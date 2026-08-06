@@ -8,3 +8,4 @@ venv/
 work/
 *.log
 .DS_Store
+.vscode/
