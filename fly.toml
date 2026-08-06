@@ -1,0 +1,51 @@
+# Fly is the reference host because it is the only cheap option that gives all
+# four of: unrestricted /dev/fuse, a persistent rootfs and volume, HTTP-triggered
+# wake with sub-second resume, and no CPU/RAM billing while suspended.
+# See docs/decisions/0002-choosing-a-host.md for the alternatives and why not.
+app = "memory-agent"
+
+# Put this in the SAME region as your Postgres. TigerFS turns every ls/cat/grep
+# into SQL, so cross-region latency is the difference between an agent that
+# feels sharp and one that feels broken.
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  KB_MOUNT = "/mnt/kb"
+  WORK_DIR = "/work"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # Long agent turns: do not let the proxy give up while the model is thinking.
+  # The SSE heartbeat keeps bytes flowing, which is the real protection.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/healthz"
+
+# Suspend requires <= 2GB RAM, and we are exactly at the ceiling. Sizing up
+# loses sub-second resume, so measure peak RSS before you do.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2gb"
+
+# Scratch space and the SDK's local session files. Not the knowledge base -
+# that lives in Postgres.
+[mounts]
+  source = "memory_agent_work"
+  destination = "/work"

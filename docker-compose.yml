@@ -1,0 +1,33 @@
+# Local development. Runs a real Postgres so you can exercise TigerFS without
+# a cloud account.
+#
+# NOTE the cap_add and devices stanzas: without them the FUSE mount fails and
+# nothing else works. This is the same requirement that rules out several
+# managed hosts in production.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: kb
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      KB_DATABASE_URL: postgres://postgres:devpassword@db:5432/kb
+      SESSION_DATABASE_URL: postgres://postgres:devpassword@db:5432/kb
+      # Local only. Skips Cloudflare Access entirely and fakes a user.
+      DEV_BYPASS_AUTH: "1"
+      DEV_FAKE_EMAIL: dev@localhost
+    ports: ["8080:8080"]
+    cap_add: ["SYS_ADMIN"]
+    devices: ["/dev/fuse"]
+    security_opt: ["apparmor:unconfined"]
