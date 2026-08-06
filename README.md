@@ -110,10 +110,24 @@ fly secrets set \
 fly deploy
 ```
 
+If your users aren't on a domain you control — personal addresses, a handful
+of named collaborators — set `ALLOWED_EMAILS` instead (or as well; the two are
+OR'd):
+
+```bash
+fly secrets set ALLOWED_EMAILS=alice@example.com,bob@example.com
+```
+
+Allowlisting a domain you don't own (`gmail.com`, `icloud.com`) admits everyone
+who has ever used that provider, not the people you meant. See
+`docs/decisions/0005-explicit-email-allowlist.md`.
+
 **3. Cloudflare Access.** In Zero Trust → Access → Applications, add a
-self-hosted app for your hostname. Add Google Workspace as an identity provider,
-then a policy allowing your email domain. Copy the **AUD tag** and your team
-domain:
+self-hosted app for your hostname. Add an identity provider (Google Workspace,
+or "One-time PIN" if your users are on personal addresses with no shared
+Workspace), then a policy allowing your users — either an email-domain rule or
+an Include rule listing exact addresses, matching whatever you set above. Copy
+the **AUD tag** and your team domain:
 
 ```bash
 fly secrets set \

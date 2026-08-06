@@ -26,7 +26,14 @@ class Config:
 
     cf_team_domain: str = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "")
     cf_aud: str = os.environ.get("CF_ACCESS_AUD", "")
+    # Two independent allowlists, checked as OR: a caller passes if their email
+    # matches EITHER list. Domain matching is for "anyone at this company";
+    # explicit emails are for "these specific people", which matters whenever
+    # the addresses aren't on a domain you control (e.g. personal Gmail
+    # accounts) - allowlisting "gmail.com" would let in every Gmail user alive.
+    # Leaving both empty allows anyone Access itself lets through.
     allowed_email_domains: list[str] = field(default_factory=lambda: _csv("ALLOWED_EMAIL_DOMAINS"))
+    allowed_emails: list[str] = field(default_factory=lambda: _csv("ALLOWED_EMAILS"))
 
     dev_bypass_auth: bool = _bool("DEV_BYPASS_AUTH")
     dev_fake_email: str = os.environ.get("DEV_FAKE_EMAIL", "dev@localhost")

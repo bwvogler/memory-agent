@@ -101,10 +101,18 @@ async def verify(token: str) -> Identity:
     if not email:
         raise HTTPException(403, "Access token has no email claim")
 
-    if config.allowed_email_domains:
+    # This is a SECOND allowlist check, defence in depth behind the Cloudflare
+    # Access policy itself (see docs/decisions/0005-explicit-email-allowlist.md
+    # for why both layers matter). ALLOWED_EMAIL_DOMAINS and ALLOWED_EMAILS are
+    # OR'd together: an address passes if it matches either list. If both are
+    # empty, this layer allows anyone Access already let through - fine only if
+    # your Access policy itself is the sole gate.
+    if config.allowed_email_domains or config.allowed_emails:
         domain = email.rsplit("@", 1)[-1]
-        if domain not in config.allowed_email_domains:
-            raise HTTPException(403, f"email domain {domain!r} is not allowed")
+        domain_ok = domain in config.allowed_email_domains
+        email_ok = email in config.allowed_emails
+        if not (domain_ok or email_ok):
+            raise HTTPException(403, f"{email!r} is not on the allowlist")
 
     return Identity(email=email, subject=claims.get("sub", ""))
 
