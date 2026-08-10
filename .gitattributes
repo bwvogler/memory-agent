@@ -1,0 +1,6 @@
+# Ensure shell scripts always land with LF, even on Windows build hosts.
+# Without this, a builder with core.autocrlf=true injects \r and the container
+# crashes with: env: 'bash\r': No such file or directory
+*.sh        text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile  text eol=lf

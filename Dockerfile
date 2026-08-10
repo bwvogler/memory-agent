@@ -35,7 +35,7 @@ COPY app ./app
 COPY static ./static
 COPY skills ./skills
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh && mkdir -p "$KB_MOUNT" "$WORK_DIR"
+RUN sed -i 's/\r//' entrypoint.sh && chmod +x entrypoint.sh && mkdir -p "$KB_MOUNT" "$WORK_DIR"
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--", "/srv/entrypoint.sh"]
