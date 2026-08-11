@@ -1,19 +1,14 @@
 """Knowledge-base helpers: mount health, savepoints, undo.
 
-TigerFS exposes its control surface as synthesised dot-directories inside the
-mount (`.savepoint/`, `.undo/`, `.log/`, `.history/`). Those paths are generated
-by the FUSE layer in Go - they are NOT rows you can query over SQL - which is
-precisely why this project mounts the filesystem instead of talking to Postgres
-directly. See docs/decisions/0001-fuse-is-the-constraint.md.
+TigerFS provides the filesystem (FUSE → Postgres). Savepoints/undo are
+implemented with a git repo stored on the local Fly volume so they work
+without TimescaleDB, which is unavailable on Neon and Cloud SQL.
 
-    !! VERIFY BEFORE RELYING ON THIS MODULE !!
-    The exact write syntax for creating a savepoint and performing an undo is
-    the one thing in this repo that has not been validated against a live
-    TigerFS mount. Everything savepoint-related is deliberately confined to
-    this file so there is exactly one place to fix. Run
-    `scripts/spike-fuse.sh` first: it prints the real contents of the control
-    directories so you can confirm the interface, and `probe_control_surface()`
-    below is called at startup to warn loudly if a directory is missing.
+Git repo:   $WORK_DIR/kb.git   (Fly persistent volume, fast local disk)
+Work tree:  $KB_MOUNT/memory   (TigerFS workspace)
+
+All git commands use --git-dir and --work-tree so no .git file or
+directory appears inside the knowledge-base workspace.
 """
 
 from __future__ import annotations
@@ -30,9 +25,13 @@ log = logging.getLogger(__name__)
 WORKSPACE_NAME = "memory"
 
 # .info is mount-level metadata present at the root of any live TigerFS mount.
-# .savepoint/.log/.history/.undo live inside each workspace, not the mount root.
 MOUNT_PROBE = ".info"
-WORKSPACE_CONTROL_DIRS = (".savepoint", ".undo", ".log", ".history")
+
+GIT_DIR = str(Path(config.work_dir) / "kb.git")
+
+
+def _git_args() -> list[str]:
+    return ["git", f"--git-dir={GIT_DIR}", f"--work-tree={workspace_root()}"]
 
 
 def mount_root() -> Path:
@@ -64,24 +63,13 @@ def is_mounted() -> bool:
 
 
 def probe_control_surface() -> dict[str, bool]:
-    """Report which TigerFS control directories are reachable.
-
-    Note that TigerFS deliberately hides parts of its control surface from
-    `ls` - some paths are path-accessible but not enumerable - so absence here
-    means "could not stat", not necessarily "does not exist".
-    """
-    root = mount_root()
-    ws = workspace_root()
+    """Report mount and savepoint health."""
     found: dict[str, bool] = {}
     try:
-        found[MOUNT_PROBE] = (root / MOUNT_PROBE).exists()
+        found[MOUNT_PROBE] = (mount_root() / MOUNT_PROBE).exists()
     except OSError:
         found[MOUNT_PROBE] = False
-    for d in WORKSPACE_CONTROL_DIRS:
-        try:
-            found[d] = (ws / d).exists()
-        except OSError:
-            found[d] = False
+    found["git_savepoints"] = Path(GIT_DIR).is_dir()
     return found
 
 
@@ -94,57 +82,49 @@ async def _run(*argv: str) -> tuple[int, str, str]:
 
 
 async def create_savepoint(name: str) -> bool:
-    """Create a named savepoint. Returns True on success.
+    """Commit the current KB state as a named savepoint.
 
     Failure is logged and swallowed: a turn that cannot be checkpointed should
     still run, it just will not be revertible. The alternative - refusing to
     answer because bookkeeping failed - is worse.
     """
-    target = workspace_root() / ".savepoint" / f"{name}.json"
-    try:
-        import json
-        await asyncio.to_thread(
-            target.write_text, json.dumps({"description": f"before turn {name}"}), "utf-8"
-        )
-        log.info("created savepoint %s", name)
-        return True
-    except OSError as exc:
-        log.warning("could not create savepoint %s: %s", name, exc)
+    await _run(*_git_args(), "add", "-A")
+    rc, _, err = await _run(*_git_args(), "commit", "-m", f"savepoint:{name}", "--allow-empty")
+    if rc != 0:
+        log.warning("savepoint commit failed: %s", err)
         return False
+    log.info("created savepoint %s", name)
+    return True
 
 
 async def undo_to_savepoint(name: str) -> bool:
-    """Roll the knowledge base back to a named savepoint.
-
-    TigerFS undo is itself reversible, so this is safe to expose in a UI.
-    """
-    apply_path = workspace_root() / ".undo" / "to-savepoint" / name / ".apply"
-    try:
-        await asyncio.to_thread(apply_path.touch)
-        log.info("undid to savepoint %s", name)
-        return True
-    except OSError as exc:
-        log.warning("could not undo to savepoint %s: %s", name, exc)
+    """Roll the knowledge base back to a named savepoint via git reset."""
+    rc, out, _ = await _run(*_git_args(), "log", "--format=%H %s")
+    target = None
+    for line in out.splitlines():
+        sha, _, subject = line.partition(" ")
+        if subject == f"savepoint:{name}":
+            target = sha
+            break
+    if not target:
+        log.warning("savepoint %s not found in git history", name)
         return False
+    rc2, _, err = await _run(*_git_args(), "reset", "--hard", target)
+    if rc2 != 0:
+        log.warning("git reset failed: %s", err)
+        return False
+    log.info("undid to savepoint %s", name)
+    return True
 
 
 async def recent_log(limit: int = 50) -> list[str]:
-    """Read recent operation-log entries, newest first.
-
-    The log records per-user attribution, which is what makes a shared,
-    multi-writer knowledge base auditable.
-    """
-    log_dir = workspace_root() / ".log"
-    try:
-        entries = sorted(
-            (p for p in log_dir.iterdir() if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:limit]
-        return [p.name for p in entries]
-    except OSError as exc:
-        log.warning("could not read operation log: %s", exc)
+    """Return recent savepoint log entries, newest first."""
+    rc, out, _ = await _run(
+        *_git_args(), "log", f"--max-count={limit}", "--format=%ai %s"
+    )
+    if rc != 0:
         return []
+    return out.strip().splitlines()
 
 
 def scratch_dir_for(user_slug: str) -> Path:

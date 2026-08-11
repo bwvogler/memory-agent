@@ -73,6 +73,23 @@ else
       > "$KB_MOUNT/memory/CLAUDE.md" \
       || log "WARNING: could not seed CLAUDE.md — agent will start without memory"
   fi
+
+  # Initialise the git repo that backs savepoints/undo. The repo lives on the
+  # local Fly volume (fast, no TimescaleDB needed); the work tree is the TigerFS
+  # workspace. Using --git-dir keeps no .git entry inside the KB mount itself.
+  GIT_DIR_PATH="${WORK_DIR}/kb.git"
+  if [[ ! -d "$GIT_DIR_PATH" ]]; then
+    log "initialising git repo for savepoints"
+    git init "$GIT_DIR_PATH"
+    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
+      config user.email "agent@memory-agent"
+    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
+      config user.name "Memory Agent"
+    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" add -A
+    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
+      commit -m "init" --allow-empty
+    log "git repo ready"
+  fi
 fi
 
 cleanup() {
