@@ -16,7 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # TigerFS. Pin a release rather than piping a moving installer in production.
+# The installer may drop the binary in ~/. local/bin (not in the runtime PATH),
+# so we explicitly move it to /usr/local/bin after verifying it was found.
 RUN curl -fsSL https://install.tigerfs.io | sh \
+    && install -m 755 "$(command -v tigerfs)" /usr/local/bin/tigerfs \
     && tigerfs version
 
 # cloudflared, so the origin needs no public IP and Access cannot be bypassed
