@@ -161,17 +161,17 @@ _kb_pool: Optional[asyncpg.Pool] = None
 
 _LIST_SQL = """
 WITH RECURSIVE paths AS (
-    SELECT file_id, filetype, body, filename AS path
+    SELECT id, filetype, body, filename AS path
     FROM   tigerfs.memory
     WHERE  parent_id IS NULL
     UNION ALL
-    SELECT m.file_id, m.filetype, m.body, p.path || '/' || m.filename
+    SELECT m.id, m.filetype, m.body, p.path || '/' || m.filename
     FROM   tigerfs.memory m
-    JOIN   paths p ON m.parent_id = p.file_id
+    JOIN   paths p ON m.parent_id = p.id
 )
 SELECT path, body
 FROM   paths
-WHERE  filetype = 'markdown'
+WHERE  filetype = 'file' AND path LIKE '%.md'
 ORDER  BY path
 """
 

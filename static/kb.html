@@ -117,11 +117,10 @@ const content = document.getElementById('content');
 let currentPath = null;
 
 async function loadFiles() {
-  const res = await fetch('/api/kb/files', { cache: 'no-store' });
   const list = document.getElementById('file-list');
+  const res = await fetch('/api/kb/files', { cache: 'no-store' });
   if (!res.ok) { list.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
   const { files } = await res.json();
-  const list = document.getElementById('file-list');
   if (!files.length) { list.innerHTML = '<div class="empty">Empty.</div>'; return; }
 
   // Group by directory.
