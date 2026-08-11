@@ -7,27 +7,31 @@
 <style>
   :root {
     --bg: #fbfbf9; --panel: #fff; --ink: #1a1a18; --muted: #6b6b66;
-    --line: #e4e4df; --accent: #3d5a80; --sidebar: #f4f3f0;
+    --line: #e4e4df; --accent: #3d5a80; --tool: #7a6a55; --err: #a4342b;
+    --sidebar: #f4f3f0;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161614; --panel: #1e1e1b; --ink: #ece9e4; --muted: #9a968e;
-      --line: #33322e; --accent: #8fb0d4; --sidebar: #181816;
+      --line: #33322e; --accent: #8fb0d4; --tool: #c0a882; --err: #e2857c;
+      --sidebar: #181816;
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     display: flex; flex-direction: column; height: 100vh;
     background: var(--bg); color: var(--ink);
-    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
   }
   header {
-    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-    border-bottom: 1px solid var(--line); flex-shrink: 0;
+    display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); flex-shrink: 0; flex-wrap: wrap;
   }
-  header h1 { font-size: 14px; font-weight: 600; }
-  header a { color: var(--muted); font-size: 13px; text-decoration: none; }
-  header a:hover { color: var(--accent); }
+  header h1 { font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+  header a.nav { color: var(--muted); font-size: 13px; text-decoration: none; }
+  header a.nav:hover { color: var(--accent); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: #4a8f5b; }
   .layout { display: flex; flex: 1; overflow: hidden; }
   nav {
     width: 240px; flex-shrink: 0; overflow-y: auto;
@@ -85,8 +89,9 @@
 </head>
 <body>
 <header>
-  <h1>📚 Knowledge Base</h1>
-  <a href="/">← Chat</a>
+  <span class="dot ok"></span>
+  <h1>Knowledge Base</h1>
+  <a class="nav" href="/">← Chat</a>
 </header>
 <div class="layout">
   <nav id="nav">

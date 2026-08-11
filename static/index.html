@@ -26,6 +26,8 @@
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   }
   header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  header a.nav { color: var(--muted); font-size: 13px; text-decoration: none; }
+  header a.nav:hover { color: var(--accent); }
   .who { color: var(--muted); font-size: 13px; margin-left: auto; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.ok { background: #4a8f5b; } .dot.bad { background: var(--err); }
@@ -78,6 +80,7 @@
 <header>
   <span class="dot" id="health" title="knowledge base mount"></span>
   <h1>memory-agent</h1>
+  <a class="nav" href="/kb">Knowledge Base →</a>
   <span class="who" id="who">…</span>
 </header>
 
