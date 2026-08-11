@@ -111,13 +111,14 @@ async def create_turn(request: Request, identity: Identity = Depends(current_ide
     """
     body = await request.json()
     prompt = (body.get("message") or "").strip()
-    if not prompt:
+    images = body.get("images") or []  # list of {"media_type": str, "data": str}
+    if not prompt and not images:
         raise HTTPException(400, "message is required")
     resume = body.get("session_id") or None
 
     turn = registry.create(user_email=identity.email, session_id=resume)
     asyncio.create_task(
-        agent.run_turn(turn, prompt=prompt, user_slug=identity.slug, resume=resume)
+        agent.run_turn(turn, prompt=prompt, user_slug=identity.slug, resume=resume, images=images or None)
     )
     return JSONResponse({"turn_id": turn.id}, status_code=202)
 

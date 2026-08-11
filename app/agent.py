@@ -213,7 +213,35 @@ def _options(user_slug: str, resume: str | None) -> ClaudeAgentOptions:
     )
 
 
-async def run_turn(turn: Turn, prompt: str, user_slug: str, resume: str | None = None) -> None:
+async def _image_prompt(text: str, images: list[dict]):
+    """Async generator yielding a single user message with image content blocks."""
+    content: list[dict] = []
+    for img in images:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img["media_type"],
+                "data": img["data"],
+            },
+        })
+    if text:
+        content.append({"type": "text", "text": text})
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+        "session_id": None,
+    }
+
+
+async def run_turn(
+    turn: Turn,
+    prompt: str,
+    user_slug: str,
+    resume: str | None = None,
+    images: list[dict] | None = None,
+) -> None:
     """Run one agent turn to completion, streaming events into the turn buffer.
 
     Every turn is wrapped in a TigerFS savepoint named after the turn id. If
@@ -228,8 +256,12 @@ async def run_turn(turn: Turn, prompt: str, user_slug: str, resume: str | None =
 
     turn.append("status", "started")
 
+    prompt_arg: str | object = prompt
+    if images:
+        prompt_arg = _image_prompt(prompt, images)
+
     try:
-        async for message in query(prompt=prompt, options=_options(user_slug, resume)):
+        async for message in query(prompt=prompt_arg, options=_options(user_slug, resume)):
             for kind, data in _render(message):
                 turn.append(kind, data)
             session_id = _extract_session_id(message)

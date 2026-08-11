@@ -63,7 +63,8 @@
     40% { opacity: 1; transform: scale(1); }
   }
   footer { border-top: 1px solid var(--line); padding: 12px 16px; }
-  form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  form { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; }
+  .input-row { display: flex; gap: 8px; }
   textarea {
     flex: 1; resize: none; font: inherit; padding: 9px 11px; border-radius: 8px;
     border: 1px solid var(--line); background: var(--panel); color: var(--ink);
@@ -74,6 +75,28 @@
   }
   button.send:disabled { opacity: .5; cursor: default; }
   .hint { max-width: 760px; margin: 6px auto 0; font-size: 12px; color: var(--muted); }
+  .img-previews { display: flex; flex-wrap: wrap; gap: 6px; }
+  .img-previews:empty { display: none; }
+  .img-thumb {
+    position: relative; display: inline-block;
+  }
+  .img-thumb img {
+    height: 64px; max-width: 120px; border-radius: 6px;
+    border: 1px solid var(--line); object-fit: cover; display: block;
+  }
+  .img-thumb button {
+    position: absolute; top: -6px; right: -6px;
+    width: 18px; height: 18px; border-radius: 50%; border: 0;
+    background: var(--muted); color: var(--panel);
+    font-size: 11px; line-height: 18px; text-align: center;
+    cursor: pointer; padding: 0;
+  }
+  .img-thumb button:hover { background: var(--err); }
+  .msg-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .msg-images img {
+    max-height: 200px; max-width: 100%; border-radius: 6px;
+    border: 1px solid var(--line); object-fit: contain;
+  }
 </style>
 </head>
 <body>
@@ -88,8 +111,11 @@
 
 <footer>
   <form id="form">
-    <textarea id="input" rows="2" placeholder="Ask, or tell it something worth remembering…"></textarea>
-    <button class="send" id="send" type="submit">Send</button>
+    <div class="img-previews" id="previews"></div>
+    <div class="input-row">
+      <textarea id="input" rows="2" placeholder="Ask, or tell it something worth remembering…"></textarea>
+      <button class="send" id="send" type="submit">Send</button>
+    </div>
   </form>
   <div class="hint" id="hint"></div>
 </footer>
@@ -103,7 +129,52 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
 const hint = document.getElementById('hint');
+const previews = document.getElementById('previews');
 let sessionId = null;
+let pendingImages = []; // [{dataUrl, mediaType, base64}]
+
+function addImagePreview(dataUrl, mediaType, base64) {
+  const idx = pendingImages.length;
+  pendingImages.push({ dataUrl, mediaType, base64 });
+
+  const entry = pendingImages[pendingImages.length - 1];
+  const thumb = document.createElement('div');
+  thumb.className = 'img-thumb';
+  const img = document.createElement('img');
+  img.src = dataUrl;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '×';
+  btn.title = 'Remove image';
+  btn.onclick = () => {
+    const i = pendingImages.indexOf(entry);
+    if (i !== -1) pendingImages.splice(i, 1);
+    thumb.remove();
+  };
+  thumb.appendChild(img);
+  thumb.appendChild(btn);
+  previews.appendChild(thumb);
+}
+
+input.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (!item.type.startsWith('image/')) continue;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (!file) continue;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      // dataUrl is "data:<mediaType>;base64,<data>"
+      const comma = dataUrl.indexOf(',');
+      const base64 = dataUrl.slice(comma + 1);
+      addImagePreview(dataUrl, item.type, base64);
+    };
+    reader.readAsDataURL(file);
+  }
+});
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -140,18 +211,41 @@ async function boot() {
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) return;
+  const images = pendingImages.slice();
+  if (!text && !images.length) return;
   input.value = '';
+  pendingImages = [];
+  previews.innerHTML = '';
   send.disabled = true;
   send.textContent = 'Working…';
-  addMessage('you', 'me').body.textContent = text;
+
+  const { wrap: youWrap, body: youBody } = addMessage('you', 'me');
+  if (images.length) {
+    const imgRow = document.createElement('div');
+    imgRow.className = 'msg-images';
+    for (const img of images) {
+      const el = document.createElement('img');
+      el.src = img.dataUrl;
+      imgRow.appendChild(el);
+    }
+    youBody.appendChild(imgRow);
+  }
+  if (text) {
+    const p = document.createElement('p');
+    p.textContent = text;
+    youBody.appendChild(p);
+  }
 
   let turnId;
   try {
     const res = await fetch('/api/turns', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, session_id: sessionId }),
+      body: JSON.stringify({
+        message: text,
+        session_id: sessionId,
+        images: images.map(i => ({ media_type: i.mediaType, data: i.base64 })),
+      }),
     });
     if (!res.ok) throw new Error('submit failed: ' + res.status);
     turnId = (await res.json()).turn_id;
