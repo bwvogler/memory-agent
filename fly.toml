@@ -2,7 +2,7 @@
 # four of: unrestricted /dev/fuse, a persistent rootfs and volume, HTTP-triggered
 # wake with sub-second resume, and no CPU/RAM billing while suspended.
 # See docs/decisions/0002-choosing-a-host.md for the alternatives and why not.
-app = "memory-agent"
+app = "memory-agent-proud-island-3747"
 
 # Put this in the SAME region as your Postgres. TigerFS turns every ls/cat/grep
 # into SQL, so cross-region latency is the difference between an agent that
