@@ -37,9 +37,10 @@ log "mounting TigerFS at $KB_MOUNT"
 tigerfs mount "$KB_DATABASE_URL" "$KB_MOUNT" &
 MOUNT_PID=$!
 
-# Wait for the control surface to appear rather than sleeping a fixed amount.
+# Wait for the mount-level .info directory, which TigerFS synthesises at the
+# root of every live mount. (.log/.savepoint live inside workspaces, not here.)
 for i in $(seq 1 30); do
-  if [[ -e "$KB_MOUNT/.log" || -e "$KB_MOUNT/.savepoint" ]]; then
+  if [[ -e "$KB_MOUNT/.info" ]]; then
     log "mount is live after ${i}s"
     break
   fi
@@ -50,9 +51,21 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-if [[ ! -e "$KB_MOUNT/.log" && ! -e "$KB_MOUNT/.savepoint" ]]; then
-  log "WARNING: control surface never appeared. Serving anyway, but the agent"
+if [[ ! -e "$KB_MOUNT/.info" ]]; then
+  log "WARNING: mount never became live. Serving anyway, but the agent"
   log "         will have no knowledge base. /healthz will report 503."
+else
+  # Initialise the memory workspace on first boot if it does not exist yet.
+  if [[ ! -d "$KB_MOUNT/memory" ]]; then
+    log "creating 'memory' workspace"
+    echo 'markdown,history' > "$KB_MOUNT/.build/memory"
+  fi
+  # Seed a minimal CLAUDE.md so the agent has a starting point.
+  if [[ ! -f "$KB_MOUNT/memory/CLAUDE.md" ]]; then
+    log "seeding memory/CLAUDE.md"
+    printf '# Memory\n\nThis is the agent knowledge base. Add notes here.\n' \
+      > "$KB_MOUNT/memory/CLAUDE.md"
+  fi
 fi
 
 cleanup() {

@@ -27,11 +27,21 @@ from .config import config
 
 log = logging.getLogger(__name__)
 
-CONTROL_DIRS = (".savepoint", ".undo", ".log", ".history")
+WORKSPACE_NAME = "memory"
+
+# .info is mount-level metadata present at the root of any live TigerFS mount.
+# .savepoint/.log/.history/.undo live inside each workspace, not the mount root.
+MOUNT_PROBE = ".info"
+WORKSPACE_CONTROL_DIRS = (".savepoint", ".undo", ".log", ".history")
 
 
 def mount_root() -> Path:
     return Path(config.kb_mount)
+
+
+def workspace_root() -> Path:
+    """Root of the primary knowledge-base workspace."""
+    return mount_root() / WORKSPACE_NAME
 
 
 def is_mounted() -> bool:
@@ -46,9 +56,9 @@ def is_mounted() -> bool:
     try:
         if not root.is_dir():
             return False
-        # An empty directory is indistinguishable from an unmounted mountpoint
-        # by existence alone, so require the control surface to be present.
-        return any((root / d).exists() for d in CONTROL_DIRS)
+        # .info is the mount-level metadata directory that TigerFS synthesises
+        # at the root of every live mount. An empty dir = unmounted mountpoint.
+        return (root / MOUNT_PROBE).exists()
     except OSError:
         return False
 
@@ -61,10 +71,15 @@ def probe_control_surface() -> dict[str, bool]:
     means "could not stat", not necessarily "does not exist".
     """
     root = mount_root()
-    found = {}
-    for d in CONTROL_DIRS:
+    ws = workspace_root()
+    found: dict[str, bool] = {}
+    try:
+        found[MOUNT_PROBE] = (root / MOUNT_PROBE).exists()
+    except OSError:
+        found[MOUNT_PROBE] = False
+    for d in WORKSPACE_CONTROL_DIRS:
         try:
-            found[d] = (root / d).exists()
+            found[d] = (ws / d).exists()
         except OSError:
             found[d] = False
     return found
@@ -85,11 +100,12 @@ async def create_savepoint(name: str) -> bool:
     still run, it just will not be revertible. The alternative - refusing to
     answer because bookkeeping failed - is worse.
     """
-    target = mount_root() / ".savepoint" / name
+    target = workspace_root() / ".savepoint" / f"{name}.json"
     try:
-        # VERIFY: creating the path is the documented gesture as far as we can
-        # tell; some builds may instead want a write into `.savepoint/create`.
-        await asyncio.to_thread(target.mkdir, parents=False, exist_ok=True)
+        import json
+        await asyncio.to_thread(
+            target.write_text, json.dumps({"description": f"before turn {name}"}), "utf-8"
+        )
         log.info("created savepoint %s", name)
         return True
     except OSError as exc:
@@ -102,10 +118,9 @@ async def undo_to_savepoint(name: str) -> bool:
 
     TigerFS undo is itself reversible, so this is safe to expose in a UI.
     """
-    target = mount_root() / ".undo" / name
+    apply_path = workspace_root() / ".undo" / "to-savepoint" / name / ".apply"
     try:
-        # VERIFY: as above. Confirm against `tigerfs` docs / spike-fuse.sh.
-        await asyncio.to_thread(target.mkdir, parents=False, exist_ok=True)
+        await asyncio.to_thread(apply_path.touch)
         log.info("undid to savepoint %s", name)
         return True
     except OSError as exc:
@@ -119,7 +134,7 @@ async def recent_log(limit: int = 50) -> list[str]:
     The log records per-user attribution, which is what makes a shared,
     multi-writer knowledge base auditable.
     """
-    log_dir = mount_root() / ".log"
+    log_dir = workspace_root() / ".log"
     try:
         entries = sorted(
             (p for p in log_dir.iterdir() if p.is_file()),
