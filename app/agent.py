@@ -158,11 +158,15 @@ async def run_turn(turn: Turn, prompt: str, user_slug: str, resume: str | None =
 
 
 def _extract_session_id(message: object) -> str | None:
-    """Pull the session id out of the init system message, if this is one."""
-    data = getattr(message, "data", None)
-    if isinstance(data, dict) and data.get("subtype") == "init":
-        value = data.get("session_id")
+    """Pull the session id out of an SDK message."""
+    from claude_agent_sdk.types import AssistantMessage, SystemMessage
+
+    if isinstance(message, AssistantMessage) and message.session_id:
+        return message.session_id
+    if isinstance(message, SystemMessage) and message.subtype == "init":
+        value = message.data.get("session_id")
         return str(value) if value else None
+    # Fallback for forward-compatibility with future message shapes.
     value = getattr(message, "session_id", None)
     return str(value) if value else None
 
@@ -170,36 +174,23 @@ def _extract_session_id(message: object) -> str | None:
 def _render(message: object) -> list[tuple[str, str]]:
     """Flatten an SDK message into (kind, text) pairs for the event stream.
 
-    Kept tolerant on purpose: the SDK's message shapes evolve, and a rendering
-    change should degrade to "show something sensible" rather than crash a turn
-    that has already spent real tokens.
+    The SDK uses dataclasses (TextBlock, ToolUseBlock, …) not dicts, so we
+    use isinstance checks rather than a .type attribute lookup.
     """
+    from claude_agent_sdk.types import (
+        AssistantMessage,
+        ServerToolUseBlock,
+        TextBlock,
+        ToolUseBlock,
+    )
+
+    if not isinstance(message, AssistantMessage):
+        return []
+
     out: list[tuple[str, str]] = []
-    content = getattr(message, "content", None)
-
-    if isinstance(content, list):
-        for block in content:
-            btype = getattr(block, "type", None) or (
-                block.get("type") if isinstance(block, dict) else None
-            )
-            if btype == "text":
-                text = getattr(block, "text", None) or (
-                    block.get("text") if isinstance(block, dict) else ""
-                )
-                if text:
-                    out.append(("text", text))
-            elif btype == "tool_use":
-                name = getattr(block, "name", None) or (
-                    block.get("name") if isinstance(block, dict) else "tool"
-                )
-                out.append(("tool", str(name)))
-        return out
-
-    if isinstance(content, str) and content:
-        out.append(("text", content))
-        return out
-
-    text = getattr(message, "text", None)
-    if isinstance(text, str) and text:
-        out.append(("text", text))
+    for block in message.content:
+        if isinstance(block, TextBlock) and block.text:
+            out.append(("text", block.text))
+        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+            out.append(("tool", block.name))
     return out
