@@ -217,6 +217,37 @@ async def kb_log(identity: Identity = Depends(current_identity)):
     return {"entries": await kb.recent_log()}
 
 
+@app.get("/api/kb/files")
+async def kb_files(identity: Identity = Depends(current_identity)):
+    """Recursive list of markdown files in the KB workspace."""
+    root = kb.workspace_root()
+    if not root.exists():
+        return {"files": []}
+    files = []
+    for p in sorted(root.rglob("*.md")):
+        try:
+            rel = p.relative_to(root)
+            files.append(str(rel))
+        except ValueError:
+            pass
+    return {"files": files}
+
+
+@app.get("/api/kb/file")
+async def kb_file(path: str, identity: Identity = Depends(current_identity)):
+    """Return raw markdown for a KB file. Path is relative to the workspace."""
+    root = kb.workspace_root()
+    target = (root / path).resolve()
+    # Guard against path traversal.
+    if not str(target).startswith(str(root.resolve())):
+        from fastapi import HTTPException
+        raise HTTPException(403, "path outside workspace")
+    if not target.exists() or not target.is_file():
+        from fastapi import HTTPException
+        raise HTTPException(404, "not found")
+    return {"path": path, "content": target.read_text(encoding="utf-8")}
+
+
 def _sse_escape(text: str) -> str:
     """SSE data lines cannot contain raw newlines."""
     return text.replace("\r\n", "\n").replace("\n", "\\n")
@@ -225,6 +256,12 @@ def _sse_escape(text: str) -> str:
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/kb")
+@app.get("/kb/{path:path}")
+async def kb_ui(identity: Identity = Depends(current_identity)):
+    return FileResponse(os.path.join(STATIC_DIR, "kb.html"))
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
