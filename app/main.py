@@ -220,32 +220,39 @@ async def kb_log(identity: Identity = Depends(current_identity)):
 @app.get("/api/kb/files")
 async def kb_files(identity: Identity = Depends(current_identity)):
     """Recursive list of markdown files in the KB workspace."""
-    root = kb.workspace_root()
-    if not root.exists():
-        return {"files": []}
-    files = []
-    for p in sorted(root.rglob("*.md")):
-        try:
-            rel = p.relative_to(root)
-            files.append(str(rel))
-        except ValueError:
-            pass
-    return {"files": files}
+    def _list():
+        root = kb.workspace_root()
+        if not root.exists():
+            return []
+        files = []
+        for p in sorted(root.rglob("*.md")):
+            try:
+                files.append(str(p.relative_to(root)))
+            except ValueError:
+                pass
+        return files
+
+    return {"files": await asyncio.to_thread(_list)}
 
 
 @app.get("/api/kb/file")
 async def kb_file(path: str, identity: Identity = Depends(current_identity)):
     """Return raw markdown for a KB file. Path is relative to the workspace."""
-    root = kb.workspace_root()
-    target = (root / path).resolve()
-    # Guard against path traversal.
-    if not str(target).startswith(str(root.resolve())):
-        from fastapi import HTTPException
+    def _read():
+        root = kb.workspace_root()
+        target = (root / path).resolve()
+        if not str(target).startswith(str(root.resolve())):
+            return None, 403
+        if not target.exists() or not target.is_file():
+            return None, 404
+        return target.read_text(encoding="utf-8"), 200
+
+    content, status = await asyncio.to_thread(_read)
+    if status == 403:
         raise HTTPException(403, "path outside workspace")
-    if not target.exists() or not target.is_file():
-        from fastapi import HTTPException
+    if status == 404:
         raise HTTPException(404, "not found")
-    return {"path": path, "content": target.read_text(encoding="utf-8")}
+    return {"path": path, "content": content}
 
 
 def _sse_escape(text: str) -> str:
