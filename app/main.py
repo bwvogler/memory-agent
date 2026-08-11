@@ -219,20 +219,24 @@ async def kb_log(identity: Identity = Depends(current_identity)):
 
 @app.get("/api/kb/files")
 async def kb_files(identity: Identity = Depends(current_identity)):
-    """Recursive list of markdown files in the KB workspace."""
-    def _list():
-        root = kb.workspace_root()
-        if not root.exists():
-            return []
-        files = []
-        for p in sorted(root.rglob("*.md")):
-            try:
-                files.append(str(p.relative_to(root)))
-            except ValueError:
-                pass
-        return files
-
-    return {"files": await asyncio.to_thread(_list)}
+    """List markdown files in the KB workspace via git index (no SQL round trips)."""
+    rc, out, _ = await kb._run(*kb._git_args(), "ls-files", "*.md")
+    if rc != 0:
+        # Git index not ready yet — fall back to filesystem walk.
+        def _list():
+            root = kb.workspace_root()
+            if not root.exists():
+                return []
+            files = []
+            for p in sorted(root.rglob("*.md")):
+                try:
+                    files.append(str(p.relative_to(root)))
+                except ValueError:
+                    pass
+            return files
+        return {"files": await asyncio.to_thread(_list)}
+    files = sorted(f for f in out.splitlines() if f.endswith(".md"))
+    return {"files": files}
 
 
 @app.get("/api/kb/file")
