@@ -78,13 +78,18 @@ else
   # local Fly volume (fast, no TimescaleDB needed); the work tree is the TigerFS
   # workspace. Using --git-dir keeps no .git entry inside the KB mount itself.
   GIT_DIR_PATH="${WORK_DIR}/kb.git"
+  # Remove a previously mis-initialised non-bare repo (no HEAD file at root).
+  if [[ -d "$GIT_DIR_PATH" && ! -f "$GIT_DIR_PATH/HEAD" ]]; then
+    log "removing invalid git dir, will re-init"
+    rm -rf "$GIT_DIR_PATH"
+  fi
   if [[ ! -d "$GIT_DIR_PATH" ]]; then
     log "initialising git repo for savepoints"
-    git init "$GIT_DIR_PATH"
-    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
-      config user.email "agent@memory-agent"
-    git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
-      config user.name "Memory Agent"
+    git init --bare "$GIT_DIR_PATH"
+    # bare repos default core.bare=true which blocks work-tree operations.
+    git --git-dir="$GIT_DIR_PATH" config core.bare false
+    git --git-dir="$GIT_DIR_PATH" config user.email "agent@memory-agent"
+    git --git-dir="$GIT_DIR_PATH" config user.name "Memory Agent"
     git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" add -A
     git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" \
       commit -m "init" --allow-empty
