@@ -47,6 +47,17 @@
   }
   .revert:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
   .revert:disabled { opacity: .5; cursor: default; }
+  .thinking { display: flex; gap: 5px; align-items: center; padding: 2px 0; }
+  .thinking span {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .thinking span:nth-child(2) { animation-delay: .2s; }
+  .thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes pulse {
+    0%, 80%, 100% { opacity: .25; transform: scale(.75); }
+    40% { opacity: 1; transform: scale(1); }
+  }
   footer { border-top: 1px solid var(--line); padding: 12px 16px; }
   form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
   textarea {
@@ -127,6 +138,7 @@ form.addEventListener('submit', async (e) => {
   if (!text) return;
   input.value = '';
   send.disabled = true;
+  send.textContent = 'Working…';
   addMessage('you', 'me').body.textContent = text;
 
   let turnId;
@@ -149,23 +161,35 @@ form.addEventListener('submit', async (e) => {
 
 function stream(turnId) {
   const msg = addMessage('agent', '');
+
+  // Pulsing indicator while the agent is working.
+  const thinking = el('div', 'thinking');
+  for (let i = 0; i < 3; i++) thinking.appendChild(el('span'));
+  msg.body.appendChild(thinking);
+
   const es = new EventSource('/api/turns/' + turnId + '/events');
+  let hasText = false;
 
   es.addEventListener('text', (e) => {
+    if (!hasText) { hasText = true; thinking.remove(); }
     msg.body.textContent += e.data.replace(/\\n/g, '\n');
     scroll();
   });
   es.addEventListener('tool', (e) => {
     const t = el('div', 'tool', '→ ' + e.data);
-    msg.wrap.appendChild(t);
+    // Insert tool events before the revert button if it exists.
+    const revert = msg.wrap.querySelector('.revert');
+    msg.wrap.insertBefore(t, revert || null);
     scroll();
   });
   es.addEventListener('session', (e) => { sessionId = e.data; });
   es.addEventListener('status', () => {});
 
   const finish = (failed, detail) => {
+    thinking.remove();   // no-op if already gone
     es.close();
     send.disabled = false;
+    send.textContent = 'Send';
     if (failed) {
       const n = el('div', 'body err', detail || 'the turn failed');
       msg.wrap.appendChild(n);
