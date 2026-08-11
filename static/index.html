@@ -171,14 +171,27 @@ function stream(turnId) {
 
   const es = new EventSource('/api/turns/' + turnId + '/events');
   let hasText = false;
+  let currentPara = null;   // the <p> currently receiving streamed tokens
+  let newParaNext = true;   // start a fresh <p> on the next text chunk
 
-  es.addEventListener('text', (e) => {
+  function appendText(raw) {
     if (!hasText) { hasText = true; thinking.remove(); }
-    const p = el('p', '', e.data.replace(/\\n/g, '\n'));
-    msg.body.appendChild(p);
+    if (newParaNext) {
+      currentPara = el('p', '');
+      msg.body.appendChild(currentPara);
+      newParaNext = false;
+    }
+    currentPara.textContent += raw.replace(/\\n/g, '\n');
     scroll();
-  });
+  }
+
+  // Streamed token-by-token with include_partial_messages=True.
+  es.addEventListener('text_delta', (e) => { appendText(e.data); });
+  // Fallback for non-streaming turns (e.g. resumed sessions).
+  es.addEventListener('text', (e) => { newParaNext = true; appendText(e.data); });
+
   es.addEventListener('tool', (e) => {
+    newParaNext = true;   // next text starts a new paragraph
     const name = e.data;
     const label = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
                     Glob: 'glob', Grep: 'grep', WebSearch: 'web search',

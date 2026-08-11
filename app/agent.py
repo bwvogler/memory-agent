@@ -116,6 +116,8 @@ def _options(user_slug: str, resume: str | None) -> ClaudeAgentOptions:
         },
         # Headless: nobody is present to answer a permission prompt.
         permission_mode="acceptEdits",
+        # Stream tokens as they arrive so the UI can show them in real time.
+        include_partial_messages=True,
         env={
             **os.environ,
             # Auto memory loads into the system prompt regardless of
@@ -174,23 +176,33 @@ def _extract_session_id(message: object) -> str | None:
 def _render(message: object) -> list[tuple[str, str]]:
     """Flatten an SDK message into (kind, text) pairs for the event stream.
 
-    The SDK uses dataclasses (TextBlock, ToolUseBlock, …) not dicts, so we
-    use isinstance checks rather than a .type attribute lookup.
+    With include_partial_messages=True the SDK emits StreamEvent objects for
+    each raw API event. We forward text deltas immediately so the UI streams
+    tokens as they arrive. The subsequent AssistantMessage (sent once the full
+    turn completes) is used only for tool events — text was already streamed.
     """
     from claude_agent_sdk.types import (
         AssistantMessage,
         ServerToolUseBlock,
-        TextBlock,
+        StreamEvent,
         ToolUseBlock,
     )
+
+    if isinstance(message, StreamEvent):
+        event = message.event
+        if event.get("type") == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                return [("text_delta", delta["text"])]
+        return []
 
     if not isinstance(message, AssistantMessage):
         return []
 
+    # Text was already forwarded token-by-token via text_delta events above.
+    # Only surface tool names from the completed AssistantMessage.
     out: list[tuple[str, str]] = []
     for block in message.content:
-        if isinstance(block, TextBlock) and block.text:
-            out.append(("text", block.text))
-        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+        if isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
             out.append(("tool", block.name))
     return out
