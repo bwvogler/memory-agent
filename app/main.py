@@ -220,20 +220,17 @@ async def kb_log(identity: Identity = Depends(current_identity)):
 @app.get("/api/kb/files")
 async def kb_files(identity: Identity = Depends(current_identity)):
     """List markdown files in the KB workspace via git index (no SQL round trips)."""
-    # Committed files from the local git index (zero SQL).
-    _, committed, _ = await kb._run(*kb._git_args(), "ls-files", "*.md")
-    # Untracked files not yet in a savepoint (one TigerFS directory scan).
-    _, untracked, _ = await kb._run(
-        *kb._git_args(), "ls-files", "--others", "--exclude-standard", "*.md"
-    )
-    seen: set[str] = set()
-    files: list[str] = []
-    for line in (committed + "\n" + untracked).splitlines():
-        f = line.strip()
-        if f.endswith(".md") and f not in seen:
-            seen.add(f)
-            files.append(f)
-    return {"files": sorted(files)}
+    def _list() -> list[str]:
+        root = kb.workspace_root()
+        files = []
+        for dirpath, _, fnames in os.walk(root):
+            for fname in fnames:
+                if fname.endswith(".md"):
+                    rel = os.path.relpath(os.path.join(dirpath, fname), root)
+                    files.append(rel)
+        return sorted(files)
+
+    return {"files": await asyncio.to_thread(_list)}
 
 
 @app.get("/api/kb/file")
