@@ -56,15 +56,22 @@ if [[ ! -e "$KB_MOUNT/.info" ]]; then
   log "         will have no knowledge base. /healthz will report 503."
 else
   # Initialise the memory workspace on first boot if it does not exist yet.
+  # Use plain markdown (no history) so it works without TimescaleDB.
   if [[ ! -d "$KB_MOUNT/memory" ]]; then
     log "creating 'memory' workspace"
-    echo 'markdown,history' > "$KB_MOUNT/.build/memory"
+    echo 'markdown' > "$KB_MOUNT/.build/memory"
+    # Wait for the FUSE layer to materialise the directory.
+    for i in $(seq 1 10); do
+      [[ -d "$KB_MOUNT/memory" ]] && break
+      sleep 1
+    done
   fi
   # Seed a minimal CLAUDE.md so the agent has a starting point.
-  if [[ ! -f "$KB_MOUNT/memory/CLAUDE.md" ]]; then
+  if [[ -d "$KB_MOUNT/memory" && ! -f "$KB_MOUNT/memory/CLAUDE.md" ]]; then
     log "seeding memory/CLAUDE.md"
     printf '# Memory\n\nThis is the agent knowledge base. Add notes here.\n' \
-      > "$KB_MOUNT/memory/CLAUDE.md"
+      > "$KB_MOUNT/memory/CLAUDE.md" \
+      || log "WARNING: could not seed CLAUDE.md — agent will start without memory"
   fi
 fi
 
