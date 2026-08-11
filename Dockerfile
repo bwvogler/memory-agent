@@ -15,12 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
-# TigerFS. Pin a release rather than piping a moving installer in production.
-# The installer may drop the binary in ~/. local/bin (not in the runtime PATH),
-# so we explicitly move it to /usr/local/bin after verifying it was found.
+# TigerFS. The installer may drop the binary in a non-standard location
+# (e.g. ~/.local/bin), so we find it and copy to /usr/local/bin explicitly.
 RUN curl -fsSL https://install.tigerfs.io | sh \
-    && install -m 755 "$(command -v tigerfs)" /usr/local/bin/tigerfs \
-    && tigerfs version
+    && TIGERFS=$(find / -name tigerfs -type f -perm /111 2>/dev/null | head -1) \
+    && [ -n "$TIGERFS" ] || { echo "ERROR: tigerfs binary not found after install"; exit 1; } \
+    && echo "Found tigerfs at: $TIGERFS" \
+    && install -m 755 "$TIGERFS" /usr/local/bin/tigerfs \
+    && /usr/local/bin/tigerfs version
 
 # cloudflared, so the origin needs no public IP and Access cannot be bypassed
 # by hitting this container directly.
