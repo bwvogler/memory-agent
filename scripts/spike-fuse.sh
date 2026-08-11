@@ -7,7 +7,7 @@
 #   usage: scripts/spike-fuse.sh <postgres-url> [mountpoint]
 set -euo pipefail
 
-DB="${1:?usage: spike-fuse.sh <postgres-url> [mountpoint]}"
+DB="${1:-${KB_DATABASE_URL:?usage: spike-fuse.sh <postgres-url> [mountpoint]}}"
 MNT="${2:-/tmp/kb-spike}"
 
 echo "== host capability =="

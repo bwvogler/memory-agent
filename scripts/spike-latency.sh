@@ -10,7 +10,7 @@
 #
 #   usage: scripts/spike-latency.sh [mountpoint]
 set -euo pipefail
-MNT="${1:-${KB_MOUNT:-/mnt/kb}}"
+MNT="${1:-/tmp/kb-spike}"
 
 [[ -d "$MNT" ]] || { echo "no mount at $MNT"; exit 1; }
 
