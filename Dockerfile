@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # TigerFS. Pin a release rather than piping a moving installer in production.
 RUN curl -fsSL https://install.tigerfs.io | sh \
-    && (tigerfs version || /usr/local/bin/tigerfs version || true)
+    && tigerfs version
 
 # cloudflared, so the origin needs no public IP and Access cannot be bypassed
 # by hitting this container directly.
