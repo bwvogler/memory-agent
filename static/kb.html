@@ -34,6 +34,13 @@
     background: var(--sidebar); border-right: 1px solid var(--line);
     padding: 12px 0;
   }
+  .nav-header { display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .nav-header span { font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); }
+  .refresh { background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
+  .refresh:hover { color: var(--accent); background: var(--line); }
   nav .dir { padding: 3px 12px; font-size: 12px; font-weight: 600;
     text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
     margin-top: 10px; }
@@ -82,7 +89,13 @@
   <a href="/">← Chat</a>
 </header>
 <div class="layout">
-  <nav id="nav"><div class="empty">Loading…</div></nav>
+  <nav id="nav">
+  <div class="nav-header">
+    <span>Files</span>
+    <button class="refresh" onclick="loadFiles()" title="Refresh">↻</button>
+  </div>
+  <div id="file-list"><div class="empty">Loading…</div></div>
+</nav>
   <main><div class="prose" id="content"><div class="empty">Select a file.</div></div></main>
 </div>
 <script>
@@ -100,9 +113,11 @@ let currentPath = null;
 
 async function loadFiles() {
   const res = await fetch('/api/kb/files');
-  if (!res.ok) { nav.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
+  const list = document.getElementById('file-list');
+  if (!res.ok) { list.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
   const { files } = await res.json();
-  if (!files.length) { nav.innerHTML = '<div class="empty">Empty.</div>'; return; }
+  const list = document.getElementById('file-list');
+  if (!files.length) { list.innerHTML = '<div class="empty">Empty.</div>'; return; }
 
   // Group by directory.
   const dirs = {};
@@ -113,7 +128,7 @@ async function loadFiles() {
     dirs[dir].push(f);
   });
 
-  nav.innerHTML = '';
+  list.innerHTML = '';
   Object.keys(dirs).sort().forEach(dir => {
     if (dir) {
       const d = document.createElement('div');
@@ -128,7 +143,7 @@ async function loadFiles() {
       a.href = '#';
       a.dataset.path = f;
       a.onclick = (e) => { e.preventDefault(); openFile(f); };
-      nav.appendChild(a);
+      list.appendChild(a);
     });
   });
 
