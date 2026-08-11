@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
 
     if store:
         await store.close()
+    await kb.close_pool()
 
 
 app = FastAPI(title="memory-agent", lifespan=lifespan)
@@ -219,36 +220,15 @@ async def kb_log(identity: Identity = Depends(current_identity)):
 
 @app.get("/api/kb/files")
 async def kb_files(identity: Identity = Depends(current_identity)):
-    """List markdown files in the KB workspace via git index (no SQL round trips)."""
-    def _list() -> list[str]:
-        root = kb.workspace_root()
-        files = []
-        for dirpath, _, fnames in os.walk(root):
-            for fname in fnames:
-                if fname.endswith(".md"):
-                    rel = os.path.relpath(os.path.join(dirpath, fname), root)
-                    files.append(rel)
-        return sorted(files)
-
-    return {"files": await asyncio.to_thread(_list)}
+    """List markdown files in the KB workspace (single SQL query)."""
+    return {"files": await kb.sql_list_files()}
 
 
 @app.get("/api/kb/file")
 async def kb_file(path: str, identity: Identity = Depends(current_identity)):
-    """Return raw markdown for a KB file. Path is relative to the workspace."""
-    def _read():
-        root = kb.workspace_root()
-        target = (root / path).resolve()
-        if not str(target).startswith(str(root.resolve())):
-            return None, 403
-        if not target.exists() or not target.is_file():
-            return None, 404
-        return target.read_text(encoding="utf-8"), 200
-
-    content, status = await asyncio.to_thread(_read)
-    if status == 403:
-        raise HTTPException(403, "path outside workspace")
-    if status == 404:
+    """Return raw markdown for a KB file (single SQL query)."""
+    content = await kb.sql_read_file(path)
+    if content is None:
         raise HTTPException(404, "not found")
     return {"path": path, "content": content}
 

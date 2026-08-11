@@ -17,6 +17,9 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Optional
+
+import asyncpg
 
 from .config import config
 
@@ -148,3 +151,57 @@ def assert_scratch_outside_kb() -> None:
             "Agent scratch files would be written into the knowledge base as "
             "versioned rows. Point WORK_DIR at local disk."
         )
+
+
+# ---------------------------------------------------------------------------
+# Direct SQL access to TigerFS backing table — one query, no FUSE round trips
+# ---------------------------------------------------------------------------
+
+_kb_pool: Optional[asyncpg.Pool] = None
+
+_LIST_SQL = """
+WITH RECURSIVE paths AS (
+    SELECT file_id, filetype, body, filename AS path
+    FROM   tigerfs.memory
+    WHERE  parent_id IS NULL
+    UNION ALL
+    SELECT m.file_id, m.filetype, m.body, p.path || '/' || m.filename
+    FROM   tigerfs.memory m
+    JOIN   paths p ON m.parent_id = p.file_id
+)
+SELECT path, body
+FROM   paths
+WHERE  filetype = 'markdown'
+ORDER  BY path
+"""
+
+
+async def _pool() -> asyncpg.Pool:
+    global _kb_pool
+    if _kb_pool is None:
+        _kb_pool = await asyncpg.create_pool(config.kb_database_url)
+    return _kb_pool
+
+
+async def close_pool() -> None:
+    global _kb_pool
+    if _kb_pool:
+        await _kb_pool.close()
+        _kb_pool = None
+
+
+async def sql_list_files() -> list[str]:
+    """Return all markdown file paths in the workspace (single SQL query)."""
+    pool = await _pool()
+    rows = await pool.fetch(_LIST_SQL)
+    return [r["path"] for r in rows]
+
+
+async def sql_read_file(path: str) -> Optional[str]:
+    """Return file content by workspace-relative path (single SQL query)."""
+    pool = await _pool()
+    rows = await pool.fetch(_LIST_SQL)
+    for r in rows:
+        if r["path"] == path:
+            return r["body"]
+    return None
