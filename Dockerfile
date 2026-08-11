@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
     WORK_DIR=/work
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl fuse3 git ripgrep tini \
+        bc ca-certificates curl fuse3 git ripgrep tini \
     # The SDK bundles a native Claude Code binary for most installs, but a few
     # install paths still need Node present. Cheap insurance.
         nodejs npm \
