@@ -171,6 +171,7 @@ function stream(turnId) {
 
   const es = new EventSource('/api/turns/' + turnId + '/events');
   let hasText = false;
+  let hasTextDelta = false; // true once the CLI streams at least one token
   let currentPara = null;   // the <p> currently receiving streamed tokens
   let newParaNext = true;   // start a fresh <p> on the next text chunk
 
@@ -185,10 +186,13 @@ function stream(turnId) {
     scroll();
   }
 
-  // Streamed token-by-token with include_partial_messages=True.
-  es.addEventListener('text_delta', (e) => { appendText(e.data); });
-  // Fallback for non-streaming turns (e.g. resumed sessions).
-  es.addEventListener('text', (e) => { newParaNext = true; appendText(e.data); });
+  // Token-by-token streaming (requires --include-partial-messages support).
+  es.addEventListener('text_delta', (e) => { hasTextDelta = true; appendText(e.data); });
+  // Full-turn text from AssistantMessage — used when streaming isn't available,
+  // ignored if text_delta already delivered the content.
+  es.addEventListener('text', (e) => {
+    if (!hasTextDelta) { newParaNext = true; appendText(e.data); }
+  });
 
   es.addEventListener('tool', (e) => {
     newParaNext = true;   // next text starts a new paragraph

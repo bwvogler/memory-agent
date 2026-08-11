@@ -199,10 +199,14 @@ def _render(message: object) -> list[tuple[str, str]]:
     if not isinstance(message, AssistantMessage):
         return []
 
-    # Text was already forwarded token-by-token via text_delta events above.
-    # Only surface tool names from the completed AssistantMessage.
+    # Emit text as a "text" fallback event AND tool names.
+    # The client ignores "text" events if it already received "text_delta" events
+    # (which means --include-partial-messages is working). If the bundled CLI
+    # version doesn't support that flag, "text" acts as the non-streaming path.
     out: list[tuple[str, str]] = []
     for block in message.content:
-        if isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+        if isinstance(block, TextBlock) and block.text:
+            out.append(("text", block.text))
+        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
             out.append(("tool", block.name))
     return out
