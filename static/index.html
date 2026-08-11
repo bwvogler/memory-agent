@@ -172,12 +172,16 @@ function stream(turnId) {
 
   es.addEventListener('text', (e) => {
     if (!hasText) { hasText = true; thinking.remove(); }
+    else if (msg.body.textContent) msg.body.textContent += '\n';
     msg.body.textContent += e.data.replace(/\\n/g, '\n');
     scroll();
   });
   es.addEventListener('tool', (e) => {
-    const t = el('div', 'tool', '→ ' + e.data);
-    // Insert tool events before the revert button if it exists.
+    const name = e.data;
+    const label = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
+                    Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
+                    WebFetch: 'web fetch' }[name] || name.toLowerCase();
+    const t = el('div', 'tool', '→ ' + label);
     const revert = msg.wrap.querySelector('.revert');
     msg.wrap.insertBefore(t, revert || null);
     scroll();
