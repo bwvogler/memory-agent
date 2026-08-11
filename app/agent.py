@@ -49,7 +49,9 @@ from .turns import Turn, TurnState
 log = logging.getLogger(__name__)
 
 MEMORY_RELATIVE_PATH = "memory/CLAUDE.md"
+GUIDE_RELATIVE_PATH = "AGENT_GUIDE.md"
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+BOOTSTRAP_DIR = Path(__file__).resolve().parent.parent / "bootstrap"
 
 
 def _read_memory() -> str:
@@ -74,20 +76,102 @@ def _read_memory() -> str:
     return text
 
 
+def _read_guide() -> str:
+    """Load the per-instance workspace guide from the knowledge base.
+
+    Returns an empty string if the file does not exist yet (expected on first
+    run before seeding completes).
+    """
+    path = kb.workspace_root() / GUIDE_RELATIVE_PATH
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        log.debug("guide file %s not found - running without workspace guide", path)
+        return ""
+    log.info("loaded %d bytes of workspace guide from %s", len(text), path)
+    return text
+
+
+def seed_guide() -> None:
+    """Write a starter AGENT_GUIDE.md if one does not already exist."""
+    if not kb.is_mounted():
+        return
+    path = kb.workspace_root() / GUIDE_RELATIVE_PATH
+    if path.exists():
+        return
+    starter = f"""\
+# Workspace guide
+
+Your wiki workspace is at `{kb.workspace_root()}`. All content files go here using
+absolute paths.
+
+## Directory layout
+
+(When the human tells you about a new directory or content type, update this
+section and create a GUIDE.md in that directory describing the expected format.)
+
+## Conventions
+
+Before writing anything in a directory, check if a `GUIDE.md` exists there and
+follow its format requirements. If no guide exists and you are creating structured
+content (recipes, notes, etc.), ask the human how they would like it formatted,
+then write a `GUIDE.md` documenting that format for future turns.
+
+When adding content, look for an existing file to extend before creating a new one.
+Correct facts in place — the version history preserves what was there before.
+"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(starter, encoding="utf-8")
+        log.info("seeded workspace guide at %s", path)
+    except OSError as exc:
+        log.warning("could not seed guide at %s: %s", path, exc)
+
+
+def seed_bootstrap() -> None:
+    """Copy bootstrap skill files into the KB workspace if not already present."""
+    if not kb.is_mounted():
+        return
+    skills_src = BOOTSTRAP_DIR / "skills"
+    if not skills_src.is_dir():
+        return
+    skills_dst = kb.workspace_root() / "skills"
+    for src_skill_dir in skills_src.iterdir():
+        if not src_skill_dir.is_dir():
+            continue
+        for src_file in src_skill_dir.rglob("*"):
+            if not src_file.is_file():
+                continue
+            rel = src_file.relative_to(skills_src)
+            dst_file = skills_dst / rel
+            if dst_file.exists():
+                continue
+            try:
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                dst_file.write_bytes(src_file.read_bytes())
+                log.info("seeded bootstrap skill file %s", dst_file)
+            except OSError as exc:
+                log.warning("could not seed %s: %s", dst_file, exc)
+
+
 def _system_prompt_append() -> str:
+    guide = _read_guide()
     memory = _read_memory()
     parts = [
         f"You have a knowledge base mounted at {config.kb_mount}.",
-        "It is a TigerFS filesystem backed by PostgreSQL: ordinary file tools "
+        f"Your writeable knowledge-base workspace is `{kb.workspace_root()}`. "
+        "Always use full absolute paths when creating or editing KB files — "
+        "your working directory is scratch space and is not part of the knowledge base.",
+        "The KB is a TigerFS filesystem backed by PostgreSQL: ordinary file tools "
         "work on it, every write is versioned, and the control directories "
         f"{config.kb_mount}/.history/, .log/, .savepoint/ and .undo/ let you "
         "inspect and roll back changes.",
         "Note that some control paths are path-accessible but deliberately "
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
-        "Before you add to the knowledge base, look for an existing document "
-        "to extend rather than creating a near-duplicate.",
     ]
+    if guide:
+        parts.append("--- Workspace guide ---\n" + guide)
     if memory:
         parts.append("--- Accumulated memory ---\n" + memory)
     return "\n\n".join(parts)

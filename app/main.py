@@ -55,6 +55,8 @@ async def lifespan(app: FastAPI):
         )
     else:
         log.info("KB mount healthy: %s", kb.probe_control_surface())
+        agent.seed_guide()
+        agent.seed_bootstrap()
 
     global store
     if config.session_database_url:
