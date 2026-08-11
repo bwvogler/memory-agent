@@ -35,8 +35,10 @@
   .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 4px; }
   .msg .body {
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 10px 12px; white-space: pre-wrap; word-wrap: break-word;
+    padding: 10px 12px;
   }
+  .msg .body p { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
+  .msg .body p + p { margin-top: 0.6em; }
   .msg.me .body { background: transparent; border-style: dashed; }
   .tool { color: var(--tool); font-size: 13px; font-style: italic; margin: 4px 0; }
   .err { color: var(--err); }
@@ -172,8 +174,8 @@ function stream(turnId) {
 
   es.addEventListener('text', (e) => {
     if (!hasText) { hasText = true; thinking.remove(); }
-    else if (msg.body.textContent) msg.body.textContent += '\n';
-    msg.body.textContent += e.data.replace(/\\n/g, '\n');
+    const p = el('p', '', e.data.replace(/\\n/g, '\n'));
+    msg.body.appendChild(p);
     scroll();
   });
   es.addEventListener('tool', (e) => {
