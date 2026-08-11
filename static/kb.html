@@ -112,7 +112,7 @@ const content = document.getElementById('content');
 let currentPath = null;
 
 async function loadFiles() {
-  const res = await fetch('/api/kb/files');
+  const res = await fetch('/api/kb/files', { cache: 'no-store' });
   const list = document.getElementById('file-list');
   if (!res.ok) { list.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
   const { files } = await res.json();
@@ -159,7 +159,7 @@ async function openFile(path) {
   location.hash = encodeURIComponent(path);
   content.innerHTML = '<div class="empty">Loading…</div>';
   try {
-    const res = await fetch('/api/kb/file?path=' + encodeURIComponent(path));
+    const res = await fetch('/api/kb/file?path=' + encodeURIComponent(path), { cache: 'no-store' });
     if (!res.ok) throw new Error(res.status);
     const { content: md } = await res.json();
     content.innerHTML = marked.parse(md);
