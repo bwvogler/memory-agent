@@ -185,6 +185,7 @@ def _render(message: object) -> list[tuple[str, str]]:
         AssistantMessage,
         ServerToolUseBlock,
         StreamEvent,
+        TextBlock,
         ToolUseBlock,
     )
 
