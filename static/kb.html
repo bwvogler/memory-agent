@@ -45,10 +45,28 @@
   .refresh { background: none; border: none; cursor: pointer; color: var(--muted);
     font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
   .refresh:hover { color: var(--accent); background: var(--line); }
-  nav .dir { padding: 3px 12px; font-size: 12px; font-weight: 600;
+  nav .section-header {
+    padding: 3px 12px; font-size: 12px; font-weight: 600;
     text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
-    margin-top: 10px; }
-  nav .dir:first-child { margin-top: 0; }
+    margin-top: 14px; cursor: pointer; border-left: 2px solid transparent;
+  }
+  nav .section-header:first-child { margin-top: 4px; }
+  nav .section-header:hover { color: var(--accent); }
+  nav .section-header.active { color: var(--accent); border-left-color: var(--accent); }
+  nav .dir-header {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 12px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    margin-top: 10px; cursor: pointer; border-left: 2px solid transparent;
+    user-select: none;
+  }
+  nav .dir-header:first-child { margin-top: 0; }
+  nav .dir-header:hover { color: var(--ink); background: var(--line); }
+  nav .dir-header.active { color: var(--accent); border-left-color: var(--accent); }
+  nav .dir-toggle { font-size: 10px; transition: transform .15s; flex-shrink: 0; }
+  nav .dir-toggle.collapsed { transform: rotate(-90deg); }
+  nav .dir-children { overflow: hidden; }
+  nav .dir-children.collapsed { display: none; }
   nav a {
     display: block; padding: 4px 16px; font-size: 13px; color: var(--ink);
     text-decoration: none; border-left: 2px solid transparent;
@@ -118,38 +136,104 @@ let currentPath = null;
 
 async function loadFiles() {
   const list = document.getElementById('file-list');
-  const res = await fetch('/api/kb/files', { cache: 'no-store' });
-  if (!res.ok) { list.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
-  const { files } = await res.json();
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  let files;
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch('/api/kb/files', { cache: 'no-store', signal: ctrl.signal });
+    clearTimeout(timeout);
+    if (!res.ok) { list.innerHTML = '<div class="empty">Not mounted.</div>'; return; }
+    ({ files } = await res.json());
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Failed to load — <a href="#" onclick="loadFiles();return false">retry</a></div>';
+    return;
+  }
   if (!files.length) { list.innerHTML = '<div class="empty">Empty.</div>'; return; }
 
-  // Group by directory.
-  const dirs = {};
-  files.forEach(f => {
-    const parts = f.split('/');
-    const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
-    if (!dirs[dir]) dirs[dir] = [];
-    dirs[dir].push(f);
-  });
-
-  list.innerHTML = '';
-  Object.keys(dirs).sort().forEach(dir => {
-    if (dir) {
-      const d = document.createElement('div');
-      d.className = 'dir';
-      d.textContent = dir;
-      nav.appendChild(d);
+  // Build a recursive tree: { dirs: {name: node}, files: [path] }
+  function addToTree(tree, parts, fullPath) {
+    if (parts.length === 1) {
+      tree.files.push(fullPath);
+    } else {
+      const name = parts[0];
+      if (!tree.dirs[name]) tree.dirs[name] = { dirs: {}, files: [], path: '' };
+      if (!tree.dirs[name].path) tree.dirs[name].path = fullPath.split('/').slice(0, parts.indexOf(parts[0]) + 1).join('/');
+      addToTree(tree.dirs[name], parts.slice(1), fullPath);
     }
-    dirs[dir].forEach(f => {
+  }
+  const tree = { dirs: {}, files: [] };
+  const fileSet = new Set(files);
+  files.forEach(f => addToTree(tree, f.split('/'), f));
+
+  // Fix dir paths after tree is built
+  function fixPaths(node, prefix) {
+    Object.keys(node.dirs).forEach(name => {
+      const child = node.dirs[name];
+      child.path = prefix ? prefix + '/' + name : name;
+      fixPaths(child, child.path);
+    });
+  }
+  fixPaths(tree, '');
+
+  function renderNode(node, container, depth) {
+    Object.keys(node.dirs).sort().forEach(name => {
+      const child = node.dirs[name];
+      const dirPath = child.path;
+
+      if (depth === 0) {
+        // Top-level dirs are section headers, not collapsible
+        const section = document.createElement('div');
+        section.className = 'section-header';
+        section.textContent = name;
+        section.onclick = () => {
+          const guidePath = dirPath + '/GUIDE.md';
+          if (fileSet.has(guidePath)) openFile(guidePath);
+        };
+        container.appendChild(section);
+        renderNode(child, container, depth + 1);
+      } else {
+        const header = document.createElement('div');
+        header.className = 'dir-header';
+        header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
+        const toggle = document.createElement('span');
+        toggle.className = 'dir-toggle';
+        toggle.textContent = '▾';
+        const label = document.createElement('span');
+        label.textContent = name;
+        header.appendChild(toggle);
+        header.appendChild(label);
+
+        const children = document.createElement('div');
+        children.className = 'dir-children';
+
+        header.onclick = () => {
+          const collapsed = children.classList.toggle('collapsed');
+          toggle.classList.toggle('collapsed', collapsed);
+          const guidePath = dirPath + '/GUIDE.md';
+          if (fileSet.has(guidePath)) openFile(guidePath);
+        };
+
+        container.appendChild(header);
+        renderNode(child, children, depth + 1);
+        container.appendChild(children);
+      }
+    });
+
+    node.files.sort().forEach(f => {
+      const name = f.split('/').pop().replace(/\.md$/, '');
       const a = document.createElement('a');
-      const parts = f.split('/');
-      a.textContent = parts[parts.length - 1].replace(/\.md$/, '');
+      a.textContent = name;
       a.href = '#';
       a.dataset.path = f;
+      a.style.paddingLeft = (16 + Math.max(0, depth - 1) * 12) + 'px';
       a.onclick = (e) => { e.preventDefault(); openFile(f); };
-      list.appendChild(a);
+      container.appendChild(a);
     });
-  });
+  }
+
+  list.innerHTML = '';
+  renderNode(tree, list, 0);
 
   // Open from URL hash or first file.
   const hash = decodeURIComponent(location.hash.slice(1));

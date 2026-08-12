@@ -107,8 +107,18 @@ absolute paths.
 
 ## Directory layout
 
-(When the human tells you about a new directory or content type, update this
-section and create a GUIDE.md in that directory describing the expected format.)
+The workspace has two top-level sections. These are the only two that should
+exist at the root level — never create other top-level directories.
+
+- `wiki/` — human knowledge: notes, recipes, references, research, etc.
+  Subdirectories inside `wiki/` organise content by topic (e.g. `wiki/recipes/`).
+- `skills/` — reusable agent skills (SKILL.md files the human invokes explicitly).
+
+Each top-level section has its own `GUIDE.md` that describes what belongs there.
+When the human tells you about a new content type, add a subdirectory under
+`wiki/` (or `skills/` if it is a skill), then create a `GUIDE.md` inside it
+describing the expected format. Update this document to record the new
+subdirectory.
 
 ## Conventions
 
