@@ -9,11 +9,16 @@ Work tree:  $KB_MOUNT/memory   (TigerFS workspace)
 
 All git commands use --git-dir and --work-tree so no .git file or
 directory appears inside the knowledge-base workspace.
+
+Also home to the beads task ledger, which is deliberately NOT in the KB:
+Bead graph: $WORK_DIR/{user_slug}/.beads   (embedded Dolt, per user)
+See docs/decisions/0006.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -76,9 +81,15 @@ def probe_control_surface() -> dict[str, bool]:
     return found
 
 
-async def _run(*argv: str) -> tuple[int, str, str]:
+async def _run(
+    *argv: str, cwd: Optional[Path] = None, env: Optional[dict[str, str]] = None
+) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(cwd) if cwd else None,
+        env=env,
     )
     out, err = await proc.communicate()
     return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
@@ -151,6 +162,132 @@ def assert_scratch_outside_kb() -> None:
             "Agent scratch files would be written into the knowledge base as "
             "versioned rows. Point WORK_DIR at local disk."
         )
+
+
+# ---------------------------------------------------------------------------
+# beads — the task ledger. See docs/decisions/0006.
+# ---------------------------------------------------------------------------
+
+# Bead IDs read as kb-a3f2dd rather than inheriting the per-user directory
+# name, which bd would otherwise use and which is an email slug here.
+BEADS_PREFIX = "kb"
+
+BACKLOG_FILE = "backlog.md"
+
+_STATUS_ORDER = ["in_progress", "blocked", "open", "deferred", "closed"]
+
+
+def _bd_env() -> dict[str, str]:
+    # bd prompts on a TTY and would hang a headless turn forever.
+    return {**os.environ, "BD_NON_INTERACTIVE": "1", "CI": "true"}
+
+
+async def ensure_beads(user_slug: str) -> bool:
+    """Initialise this user's bead graph if absent. Idempotent.
+
+    The graph lives on the Fly volume beside kb.git rather than in the KB
+    mount: it is an embedded Dolt database, and running a binary DB over
+    FUSE→SQL invites corruption. bd discovers it from the agent's cwd, which
+    is already per-user, so isolation needs no extra work.
+    """
+    scratch = scratch_dir_for(user_slug)
+    rc, _, err = await _run(
+        "bd", "init",
+        "--init-if-missing",
+        "--non-interactive",
+        "--prefix", BEADS_PREFIX,
+        cwd=scratch,
+        env=_bd_env(),
+    )
+    if rc != 0:
+        log.warning("bd init failed for %s: %s", user_slug, err.strip())
+        return False
+    return True
+
+
+async def bd_prime(user_slug: str) -> str:
+    """Return bd's own workflow context for injection into the system prompt.
+
+    bd ships this text and keeps it current with the binary, so we inject it
+    rather than hand-maintaining a copy that silently rots at the next
+    version bump. bd installs a SessionStart hook to do this itself, but that
+    hook cannot fire here: agent.py sets setting_sources=[] on purpose, so
+    project settings are never read. Same benefit, no isolation cost.
+    """
+    rc, out, err = await _run(
+        "bd", "prime", cwd=scratch_dir_for(user_slug), env=_bd_env()
+    )
+    if rc != 0:
+        log.warning("bd prime failed for %s: %s", user_slug, err.strip())
+        return ""
+    return out.strip()
+
+
+async def export_backlog(user_slug: str) -> bool:
+    """Render the bead graph to memory/backlog.md in the KB.
+
+    The Dolt database stays the source of truth; this is a projection. It
+    earns its keep twice: it puts a human-readable backlog in the
+    Postgres-backed store (the volume holding Dolt is the weaker tier, with
+    no replication), and it renders in the existing /kb browser for free.
+    """
+    rc, out, err = await _run(
+        "bd", "list", "--json", cwd=scratch_dir_for(user_slug), env=_bd_env()
+    )
+    if rc != 0:
+        log.warning("bd list failed for %s: %s", user_slug, err.strip())
+        return False
+
+    try:
+        issues = json.loads(out) or []
+    except json.JSONDecodeError:
+        log.warning("bd list returned unparseable JSON for %s", user_slug)
+        return False
+
+    try:
+        (workspace_root() / BACKLOG_FILE).write_text(_render_backlog(issues))
+    except OSError as exc:
+        log.warning("could not write %s: %s", BACKLOG_FILE, exc)
+        return False
+    return True
+
+
+def _render_backlog(issues: list[dict]) -> str:
+    lines = [
+        "# Backlog",
+        "",
+        "Generated from the bead graph after each turn. Do not edit by hand -",
+        "it is overwritten. Use `bd` to change anything here.",
+        "",
+    ]
+    if not issues:
+        lines += ["Nothing open.", ""]
+        return "\n".join(lines)
+
+    by_status: dict[str, list[dict]] = {}
+    for issue in issues:
+        by_status.setdefault(issue.get("status", "open"), []).append(issue)
+
+    # Unknown statuses sort last rather than vanishing.
+    for status in sorted(
+        by_status, key=lambda s: (_STATUS_ORDER + [s]).index(s)
+    ):
+        lines.append(f"## {status.replace('_', ' ').title()}")
+        lines.append("")
+        for issue in sorted(by_status[status], key=lambda i: i.get("priority", 4)):
+            lines.append(
+                f"- **P{issue.get('priority', 4)}** `{issue['id']}` "
+                f"{issue.get('title', '(untitled)')}"
+            )
+            if desc := issue.get("description"):
+                summary = desc.splitlines()[0]
+                if len(summary) > 200:
+                    summary = summary[:197].rstrip() + "..."
+                lines.append(f"  - {summary}")
+            if blockers := issue.get("dependency_count"):
+                lines.append(f"  - blocked by {blockers} issue(s)")
+        lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

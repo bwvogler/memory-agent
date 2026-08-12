@@ -28,6 +28,14 @@ Design notes that matter more than the code:
    accident. Reference material is data: it belongs where versioning and undo
    earn their keep.
 
+4. Task state lives in beads, and its instructions come from `bd prime`.
+   bd ships its own workflow context and keeps it current with the binary, so
+   we run `bd prime` and inject the output rather than hand-maintaining a copy
+   that rots at the next version bump. bd would normally install a SessionStart
+   hook to do this, but `setting_sources=[]` means project settings are never
+   read, so we do it explicitly - the same pattern as memory in (1).
+   See docs/decisions/0006-beads-is-the-work-ledger.md.
+
     !! Option names to confirm against your installed SDK version !!
     `add_dirs`, `permission_mode` and the `system_prompt` preset shape are the
     parts of this file most likely to drift between SDK releases. They are all
@@ -36,6 +44,8 @@ Design notes that matter more than the code:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -52,6 +62,7 @@ MEMORY_RELATIVE_PATH = "memory/CLAUDE.md"
 GUIDE_RELATIVE_PATH = "AGENT_GUIDE.md"
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 BOOTSTRAP_DIR = Path(__file__).resolve().parent.parent / "bootstrap"
+SEED_STATE_FILE = ".bootstrap-state.json"
 
 
 def _read_memory() -> str:
@@ -138,33 +149,124 @@ Correct facts in place — the version history preserves what was there before.
         log.warning("could not seed guide at %s: %s", path, exc)
 
 
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_seed_state(path: Path) -> dict[str, str]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("shipped", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def seed_bootstrap() -> None:
-    """Copy bootstrap skill files into the KB workspace if not already present."""
+    """Copy bootstrap skill files into the KB workspace.
+
+    These skills live in the KB so the human can improve them, which means we
+    cannot simply overwrite on upgrade. But never overwriting is worse: a
+    shipped fix would silently never reach any existing deployment, and the
+    seeder would look like it worked.
+
+    So we record a hash of what we last shipped. A file still matching that
+    hash is untouched and safe to replace; a file that differs has been edited
+    and is left alone with a warning naming it. Deployments predating the
+    state file have no recorded hash, so we cannot tell and do not guess.
+    """
     if not kb.is_mounted():
         return
     skills_src = BOOTSTRAP_DIR / "skills"
     if not skills_src.is_dir():
         return
+
     skills_dst = kb.workspace_root() / "skills"
-    for src_skill_dir in skills_src.iterdir():
-        if not src_skill_dir.is_dir():
+    state_path = skills_dst / SEED_STATE_FILE
+    shipped = _read_seed_state(state_path)
+    updated: dict[str, str] = {}
+
+    for src_file in sorted(skills_src.rglob("*")):
+        if not src_file.is_file():
             continue
-        for src_file in src_skill_dir.rglob("*"):
-            if not src_file.is_file():
-                continue
-            rel = src_file.relative_to(skills_src)
-            dst_file = skills_dst / rel
+        rel = src_file.relative_to(skills_src)
+        key = rel.as_posix()
+        dst_file = skills_dst / rel
+        payload = src_file.read_bytes()
+        updated[key] = _digest(payload)
+
+        try:
             if dst_file.exists():
-                continue
-            try:
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
-                dst_file.write_bytes(src_file.read_bytes())
-                log.info("seeded bootstrap skill file %s", dst_file)
-            except OSError as exc:
-                log.warning("could not seed %s: %s", dst_file, exc)
+                current = _digest(dst_file.read_bytes())
+                if current == updated[key]:
+                    continue  # already current
+                if key not in shipped:
+                    log.warning(
+                        "skill %s predates seed tracking and differs from the "
+                        "shipped version; leaving it alone. Delete it to take "
+                        "the new one.",
+                        dst_file,
+                    )
+                    # Leave it untracked. Recording the current hash would make
+                    # the next run mistake it for something we shipped.
+                    updated.pop(key, None)
+                    continue
+                if current != shipped[key]:
+                    log.warning(
+                        "skill %s has local edits; not overwriting with the "
+                        "newer shipped version. Previous content stays in "
+                        "TigerFS history if you want to compare.",
+                        dst_file,
+                    )
+                    # Keep the ORIGINAL shipped hash, not the edited file's.
+                    # Recording the edit here would make it match on the next
+                    # run and silently clobber the human's work one seed later.
+                    updated[key] = shipped[key]
+                    continue
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            dst_file.write_bytes(payload)
+            log.info("seeded bootstrap skill file %s", dst_file)
+        except OSError as exc:
+            log.warning("could not seed %s: %s", dst_file, exc)
+            updated.pop(key, None)
+
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"shipped": updated}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("could not write seed state %s: %s", state_path, exc)
 
 
-def _system_prompt_append() -> str:
+# bd claims two things this deployment has already decided differently, and
+# `bd prime` states both as rules. Left alone the agent gets contradictory
+# orders, so we override them explicitly. bd's own text defers to "explicit
+# user or orchestrator instructions", which is what this is.
+_BEADS_OVERRIDES = """\
+--- Overrides to the beads instructions above ---
+
+These win wherever they conflict with the beads block.
+
+1. Memory stays in the knowledge base. Ignore the instruction to use
+   `bd remember` / `bd memories` for persistent knowledge. This deployment
+   keeps accumulated memory in the KB at memory/CLAUDE.md, where it is
+   Postgres-backed, versioned, and readable by the human in the /kb browser.
+   The bead graph lives on a volume with no replication, so memory placed
+   there would be both less durable and invisible. See
+   docs/decisions/0004-memory-lives-in-the-kb.md.
+
+2. Never run git commands. Ignore the session-close steps about `git status`,
+   commits, pushes, or Dolt remote sync. Git here is savepoint infrastructure
+   owned by the application, which checkpoints every turn automatically. There
+   is no remote to sync to.
+
+3. Use beads for durable work, not for this turn's checklist. File a bead when
+   you notice work you are not doing right now - that is the point of it. Do
+   not file one for each step of the task in front of you.
+"""
+
+
+def _system_prompt_append(bd_context: str = "") -> str:
     guide = _read_guide()
     memory = _read_memory()
     parts = [
@@ -180,6 +282,9 @@ def _system_prompt_append() -> str:
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
     ]
+    if bd_context:
+        parts.append(bd_context)
+        parts.append(_BEADS_OVERRIDES)
     if guide:
         parts.append("--- Workspace guide ---\n" + guide)
     if memory:
@@ -187,7 +292,9 @@ def _system_prompt_append() -> str:
     return "\n\n".join(parts)
 
 
-def _options(user_slug: str, resume: str | None) -> ClaudeAgentOptions:
+def _options(
+    user_slug: str, resume: str | None, bd_context: str = ""
+) -> ClaudeAgentOptions:
     scratch = kb.scratch_dir_for(user_slug)
     config_dir = Path(config.work_dir) / f".claude-{user_slug}"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -206,10 +313,15 @@ def _options(user_slug: str, resume: str | None) -> ClaudeAgentOptions:
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_prompt_append(),
+            "append": _system_prompt_append(bd_context),
         },
         # Headless: nobody is present to answer a permission prompt.
         permission_mode="acceptEdits",
+        # acceptEdits covers file writes but NOT Bash, so without this the
+        # agent can write to the wiki and never once run `bd` - it asks for
+        # approval nobody is there to give, and silently files nothing.
+        # Scoped to bd alone rather than opening up Bash generally.
+        allowed_tools=["Bash(bd:*)"],
         # Stream tokens as they arrive so the UI can show them in real time.
         include_partial_messages=True,
         env={
@@ -266,18 +378,25 @@ async def run_turn(
 
     turn.append("status", "started")
 
+    bd_context = ""
+    if await kb.ensure_beads(user_slug):
+        bd_context = await kb.bd_prime(user_slug)
+
     prompt_arg: str | object = prompt
     if images:
         prompt_arg = _image_prompt(prompt, images)
 
     try:
-        async for message in query(prompt=prompt_arg, options=_options(user_slug, resume)):
+        async for message in query(
+            prompt=prompt_arg, options=_options(user_slug, resume, bd_context)
+        ):
             for kind, data in _render(message):
                 turn.append(kind, data)
             session_id = _extract_session_id(message)
             if session_id and not turn.session_id:
                 turn.session_id = session_id
                 turn.append("session", session_id)
+        await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
     except Exception as exc:  # noqa: BLE001 - surface everything to the client
         log.exception("turn %s failed", turn.id)

@@ -1,0 +1,10 @@
+# Development and test dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# The runtime requirements are needed too: the unit tests import app.agent and
+# app.kb directly rather than stubbing them, so an import error in the real
+# module is a test failure rather than something the suite papers over.
+-r requirements.txt
+
+pytest>=8.0.0

@@ -32,6 +32,20 @@ RUN set -eux; \
       "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"; \
     chmod +x /usr/local/bin/cloudflared
 
+# bd (beads), the task ledger. Pinned: bd refuses to open a database written by
+# a newer schema, so an unpinned agent would break the graph on redeploy.
+# Ships an embedded Dolt engine, which is most of the ~100MB - watch it against
+# the 2GB suspend ceiling in fly.toml.
+ENV BEADS_VERSION=1.2.1
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL -o /tmp/beads.tar.gz \
+      "https://github.com/gastownhall/beads/releases/download/v${BEADS_VERSION}/beads_${BEADS_VERSION}_linux_${arch}.tar.gz"; \
+    tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd; \
+    rm /tmp/beads.tar.gz; \
+    chmod +x /usr/local/bin/bd; \
+    bd version
+
 WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -39,6 +53,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY static ./static
 COPY skills ./skills
+# Seeded into the KB at startup. Without this the seeder finds no source
+# directory and silently does nothing, so bootstrap skills never ship.
+COPY bootstrap ./bootstrap
 COPY entrypoint.sh .
 COPY scripts ./scripts
 RUN sed -i 's/\r//' entrypoint.sh && chmod +x entrypoint.sh && chmod +x scripts/*.sh && mkdir -p "$KB_MOUNT" "$WORK_DIR"

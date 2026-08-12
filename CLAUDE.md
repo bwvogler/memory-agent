@@ -8,7 +8,8 @@ the TigerFS workspace.
 
 - `app/main.py` — FastAPI app, routes, startup lifespan
 - `app/agent.py` — agent construction: system prompt, skill loading, session options
-- `app/kb.py` — TigerFS helpers: mount health, SQL queries, scratch dirs, savepoints
+- `app/kb.py` — TigerFS helpers: mount health, SQL queries, scratch dirs, savepoints,
+  and the beads task ledger
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint); editable in the KB
@@ -33,9 +34,28 @@ the SDK's CLAUDE.md discovery (which is disabled via `setting_sources=[]` and
 agent reads these before writing. The human creates them by asking the agent.
 
 **Bootstrap skills.** `bootstrap/skills/` contains example skills (ingest,
-lint) seeded into `memory/skills/` at startup if absent. They live in the KB
-so the human can edit and improve them over time. They are NOT auto-loaded into
-every session — the user invokes them explicitly.
+lint) seeded into `memory/skills/` at startup. They live in the KB so the human
+can edit and improve them over time. They are NOT auto-loaded into every
+session — the user invokes them explicitly.
+
+Seeding tracks a hash of what it last shipped (`.bootstrap-state.json`) so an
+improved skill actually reaches existing deployments: an unmodified file is
+replaced, a human-edited one is left alone with a warning. Files predating the
+state file are never touched, since we cannot tell whether they were edited.
+
+**Task state lives in beads.** `bd` (pinned in the Dockerfile) keeps a
+dependency-aware issue graph per user at `$WORK_DIR/{user_slug}/.beads`, on the
+volume rather than in the KB — it is an embedded Dolt database and does not
+belong on FUSE. Skills file discovered work as beads instead of reporting it
+into chat, and `memory/backlog.md` is regenerated from the graph after every
+turn as a human-readable projection.
+
+Agent instructions for `bd` come from `bd prime`, injected into the appended
+system prompt at turn start. bd would normally install a `SessionStart` hook to
+do this, but `setting_sources=[]` means it can never fire, so `run_turn` does it
+explicitly. `_BEADS_OVERRIDES` in `agent.py` overrides the two rules where bd
+disagrees with this deployment: memory stays in `memory/CLAUDE.md`, and the
+agent never runs git. See `docs/decisions/0006`.
 
 **Memory.** `memory/CLAUDE.md` is short-lived accumulated notes — high-signal
 facts the agent wrote down to survive across conversations. The agent prunes it
@@ -51,6 +71,34 @@ docker compose up
 
 Chat: http://localhost:8000  
 Wiki: http://localhost:8000/kb
+
+## Tests
+
+```sh
+uv venv .venv
+uv pip install -r requirements-dev.txt --python .venv/bin/python
+
+.venv/bin/python -m pytest                 # fast units only (~1s)
+.venv/bin/python -m pytest --container     # + real Docker stack (~1 min, no API key)
+.venv/bin/python -m pytest --live          # + one real agent turn (spends tokens)
+```
+
+Both slow tiers are opt-in, so a bare `pytest` needs no Docker, database or API
+key. `--live` implies `--container`.
+
+The container tier builds the real image and runs the real stack under its own
+compose project name, so its teardown (`down -v`) can never touch a dev stack's
+volumes. It exists because this system's failure mode is silence: `kb.py`
+deliberately logs-and-continues when beads is unreachable (a turn that cannot
+reach its ledger should still answer the user), which means a completely broken
+`bd` looks identical to a working one at runtime. Only running it tells the two
+apart.
+
+The live tier is the only thing that catches permission regressions —
+`permission_mode="acceptEdits"` does not cover Bash, so without the
+`allowed_tools` allowlist the agent writes to the wiki normally and is silently
+blocked from ever running `bd`. It asserts on mechanism (a bd command ran, the
+ledger changed), never on what the model chose to say.
 
 ## Environment variables
 

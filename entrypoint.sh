@@ -33,8 +33,19 @@ if [[ ! -e /dev/fuse ]]; then
   exit 1
 fi
 
+# TigerFS requires TLS to remote databases. The local dev Postgres in
+# docker-compose serves none, so `docker compose up` cannot mount without this
+# opt-in. Deliberately an explicit env var rather than a hostname sniff: the
+# only safe time to send credentials in the clear is when you have said so.
+MOUNT_FLAGS=()
+if [[ "${KB_INSECURE_NO_SSL:-0}" == "1" ]]; then
+  log "WARNING: KB_INSECURE_NO_SSL=1, connecting to Postgres without TLS."
+  log "         Local development only - never set this against a real database."
+  MOUNT_FLAGS+=(--insecure-no-ssl)
+fi
+
 log "mounting TigerFS at $KB_MOUNT"
-tigerfs mount "$KB_DATABASE_URL" "$KB_MOUNT" &
+tigerfs mount "${MOUNT_FLAGS[@]}" "$KB_DATABASE_URL" "$KB_MOUNT" &
 MOUNT_PID=$!
 
 # Wait for the mount-level .info directory, which TigerFS synthesises at the
