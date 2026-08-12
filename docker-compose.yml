@@ -36,3 +36,11 @@ services:
     cap_add: ["SYS_ADMIN"]
     devices: ["/dev/fuse"]
     security_opt: ["apparmor:unconfined"]
+    volumes:
+      # Mirrors the Fly volume in fly.toml. Without this, /work lives in the
+      # container's writable layer and the bead graph and savepoint history are
+      # destroyed by any rebuild - not just `down -v`.
+      - work:/work
+
+volumes:
+  work:
