@@ -221,6 +221,7 @@ async function loadFiles() {
     });
 
     node.files.sort().forEach(f => {
+      if (f.split('/').pop() === 'GUIDE.md') return;
       const name = f.split('/').pop().replace(/\.md$/, '');
       const a = document.createElement('a');
       a.textContent = name;
