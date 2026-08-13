@@ -153,11 +153,22 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _read_seed_state(path: Path) -> dict[str, str]:
+def _read_seed_state(path: Path) -> dict[str, object]:
     try:
         return json.loads(path.read_text(encoding="utf-8")).get("shipped", {})
     except (OSError, ValueError):
         return {}
+
+
+def _write_and_read_back(path: Path, payload: bytes) -> bytes:
+    """Write a file into the KB and return it as the KB now stores it.
+
+    A seam, not a convenience. The knowledge base does NOT round-trip bytes -
+    see seed_bootstrap - so every caller that wants to remember what it wrote
+    must remember what came back, and tests need somewhere to simulate that.
+    """
+    path.write_bytes(payload)
+    return path.read_bytes()
 
 
 def seed_bootstrap() -> None:
@@ -168,10 +179,25 @@ def seed_bootstrap() -> None:
     shipped fix would silently never reach any existing deployment, and the
     seeder would look like it worked.
 
-    So we record a hash of what we last shipped. A file still matching that
-    hash is untouched and safe to replace; a file that differs has been edited
-    and is left alone with a warning naming it. Deployments predating the
-    state file have no recorded hash, so we cannot tell and do not guess.
+    So we track what we last shipped and only replace files that still match
+    it. A file that differs has been edited and is left alone with a warning.
+    Deployments predating the state file have no record, so we cannot tell and
+    do not guess.
+
+    **Two hashes per file, and the reason is subtle.** The KB is a TigerFS
+    *markdown* workspace: it parses documents and re-serialises them, so what
+    reads back is not what was written. A folded YAML `description: >` block
+    comes back as one long line, frontmatter keys get reordered, and the file
+    is a different length. Comparing a hash of the source bytes against the
+    stored file therefore reports "locally edited" for every file, forever -
+    silently disabling the upgrade path this tracking exists to provide, which
+    is exactly the failure it was written to prevent. It went unnoticed because
+    the tests wrote to tmp_path, which round-trips faithfully and so was a
+    *less* accurate double than the real store.
+
+    So we record both: `source` (the bytes we shipped, to notice that a newer
+    version exists) and `stored` (the file as it read back, to notice a human
+    edit). Only `stored` is ever compared against what is on disk.
     """
     if not kb.is_mounted():
         return
@@ -182,7 +208,7 @@ def seed_bootstrap() -> None:
     skills_dst = kb.workspace_root() / "skills"
     state_path = skills_dst / SEED_STATE_FILE
     shipped = _read_seed_state(state_path)
-    updated: dict[str, str] = {}
+    updated: dict[str, dict[str, str]] = {}
 
     for src_file in sorted(skills_src.rglob("*")):
         if not src_file.is_file():
@@ -191,38 +217,64 @@ def seed_bootstrap() -> None:
         key = rel.as_posix()
         dst_file = skills_dst / rel
         payload = src_file.read_bytes()
-        updated[key] = _digest(payload)
+        source_hash = _digest(payload)
+        entry = shipped.get(key)
 
         try:
             if dst_file.exists():
-                current = _digest(dst_file.read_bytes())
-                if current == updated[key]:
-                    continue  # already current
-                if key not in shipped:
+                current_hash = _digest(dst_file.read_bytes())
+
+                if entry is None:
                     log.warning(
-                        "skill %s predates seed tracking and differs from the "
-                        "shipped version; leaving it alone. Delete it to take "
-                        "the new one.",
+                        "skill %s predates seed tracking; leaving it alone. "
+                        "Delete it to take the shipped version.",
                         dst_file,
                     )
-                    # Leave it untracked. Recording the current hash would make
-                    # the next run mistake it for something we shipped.
-                    updated.pop(key, None)
+                    # Stays untracked. Recording a hash now would make the next
+                    # run mistake it for something we shipped.
                     continue
-                if current != shipped[key]:
+
+                if isinstance(entry, str):
+                    # Legacy state: a single hash, of the source bytes. Because
+                    # the store rewrites what it is given, that hash never
+                    # matched the file and everything looked edited. We can
+                    # repair the bookkeeping only when we are shipping that
+                    # same version - then whatever is on disk IS what we last
+                    # wrote, so its current form is the stored form. With a
+                    # newer version in hand we cannot tell a stale copy from an
+                    # edit, and must not guess.
+                    if entry == source_hash:
+                        updated[key] = {"source": source_hash, "stored": current_hash}
+                    else:
+                        log.warning(
+                            "skill %s has legacy seed state and differs from "
+                            "the shipped version; leaving it alone. Delete it "
+                            "to take the new one.",
+                            dst_file,
+                        )
+                        updated[key] = entry  # type: ignore[assignment]
+                    continue
+
+                if current_hash != entry.get("stored"):
                     log.warning(
                         "skill %s has local edits; not overwriting with the "
-                        "newer shipped version. Previous content stays in "
-                        "TigerFS history if you want to compare.",
+                        "shipped version. Previous content stays in TigerFS "
+                        "history if you want to compare.",
                         dst_file,
                     )
-                    # Keep the ORIGINAL shipped hash, not the edited file's.
-                    # Recording the edit here would make it match on the next
-                    # run and silently clobber the human's work one seed later.
-                    updated[key] = shipped[key]
+                    # Keep the ORIGINAL record, not the edited file's hash.
+                    # Recording the edit would make it match next run and
+                    # silently clobber the human's work one seed later.
+                    updated[key] = entry
                     continue
+
+                if entry.get("source") == source_hash:
+                    updated[key] = entry  # already current, nothing to ship
+                    continue
+
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            dst_file.write_bytes(payload)
+            stored = _write_and_read_back(dst_file, payload)
+            updated[key] = {"source": source_hash, "stored": _digest(stored)}
             log.info("seeded bootstrap skill file %s", dst_file)
         except OSError as exc:
             log.warning("could not seed %s: %s", dst_file, exc)
