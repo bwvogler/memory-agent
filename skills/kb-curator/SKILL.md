@@ -110,6 +110,26 @@ Memory is for facts that shape how you work. Beads are for work to be done.
 "The user prefers recipes in metric" is memory; "convert the recipes to metric"
 is a bead.
 
+### Where a preference belongs
+
+When the human states a preference, put it where its scope matches:
+
+| the preference | where it goes |
+|---|---|
+| about them, or applies to everything you do | `memory/CLAUDE.md` |
+| scoped to an activity a skill owns | that skill's `## Learned` section |
+| a thing to go and do | a bead |
+
+Scope and cost line up. `memory/CLAUDE.md` loads on every turn, so a preference
+that only matters while ingesting documents is overpriced there and correctly
+priced in the `ingest` skill. The test is one question: *would I want this to
+apply while doing something else?* If yes, it is memory.
+
+A skill's `## Learned` section is append-only, so revise a preference by adding
+an entry that says it supersedes the earlier one — a later entry wins. Do not
+let that section grow unbounded; folding it back into the skill body is
+ordinary work, and there is usually a `consolidate` bead already asking for it.
+
 ## Version history and undo
 
 The KB has a hidden control surface for reading history and rolling back

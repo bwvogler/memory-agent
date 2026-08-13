@@ -291,3 +291,114 @@ def test_repeated_edits_to_one_skill_collapse_to_their_net_effect():
     probe = next(c for c in merged if c.skill == "probe")
     assert probe.described is True
     assert probe.learned == 2  # entries do accumulate; the file does not
+
+
+# --- keeping ## Learned prunable -------------------------------------------
+
+
+class _FakeBd:
+    """Records bd calls so the escalation policy can be asserted without bd."""
+
+    def __init__(self, beads=None):
+        self.beads = beads if beads is not None else []
+        self.created, self.notes, self.priorities = [], [], []
+
+    async def list_beads(self, user_slug, label=None):
+        return self.beads
+
+    async def create_bead(self, user_slug, title, description="", priority=2,
+                          labels=(), status=None, issue_type="task"):
+        self.created.append((title, priority, description))
+        return "kb-new"
+
+    async def note_bead(self, user_slug, bead_id, text):
+        self.notes.append((bead_id, text))
+        return True
+
+    async def set_priority(self, user_slug, bead_id, priority):
+        self.priorities.append((bead_id, priority))
+        return True
+
+
+def _patch_bd(monkeypatch, fake):
+    for name in ("list_beads", "create_bead", "note_bead", "set_priority"):
+        monkeypatch.setattr(evolve.kb, name, getattr(fake, name))
+
+
+def _learned_change(skill="lint", n=1):
+    return evolve.Change(skill, f"/kb/skills/{skill}/SKILL.md", False, n)
+
+
+def test_appending_a_lesson_asks_for_it_to_be_folded_back_in(monkeypatch):
+    """Append-only means the section can only grow, and it loads with the skill
+    every time. Something has to ask for it to be pruned."""
+    fake = _FakeBd()
+    _patch_bd(monkeypatch, fake)
+
+    asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
+
+    assert len(fake.created) == 1
+    title, priority, body = fake.created[0]
+    assert title == evolve.consolidation_title("lint")
+    assert priority == evolve.FIRST_PRIORITY
+    # The bead is the only context a future turn gets - it must say why
+    # reflection did not just do this itself.
+    assert "remit withholds" in body
+    assert "read-modify-write" in body
+
+
+def test_a_description_only_change_asks_for_nothing():
+    """Nothing accumulated, so nothing to prune."""
+    fake = _FakeBd()
+    asyncio.run(evolve.request_consolidation("u", [evolve.Change("lint", "p", True, 0)]))
+    assert fake.created == []
+
+
+def test_more_lessons_escalate_one_bead_rather_than_filing_more(monkeypatch):
+    """Five lessons in one skill is one job that got more urgent, not five
+    jobs. Filing per lesson would recreate the scrolling list beads replaced."""
+    fake = _FakeBd([
+        {"id": "kb-abc", "title": evolve.consolidation_title("lint"),
+         "status": "open", "priority": 3},
+    ])
+    _patch_bd(monkeypatch, fake)
+
+    asyncio.run(evolve.request_consolidation("u", [_learned_change(n=2)]))
+
+    assert fake.created == []
+    assert fake.priorities == [("kb-abc", 2)]
+    assert "2 new entries" in fake.notes[0][1]
+
+
+def test_escalation_stops_at_the_top(monkeypatch):
+    fake = _FakeBd([
+        {"id": "kb-abc", "title": evolve.consolidation_title("lint"),
+         "status": "open", "priority": evolve.MOST_URGENT},
+    ])
+    _patch_bd(monkeypatch, fake)
+    asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
+    assert fake.priorities == []
+    assert fake.notes  # still says the section grew
+
+
+def test_a_closed_bead_does_not_suppress_a_new_one(monkeypatch):
+    """Consolidation done once does not mean it never needs doing again."""
+    fake = _FakeBd([
+        {"id": "kb-old", "title": evolve.consolidation_title("lint"),
+         "status": "closed", "priority": 3},
+    ])
+    _patch_bd(monkeypatch, fake)
+    asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
+    assert len(fake.created) == 1
+
+
+def test_an_unreachable_ledger_does_not_break_reflection(monkeypatch):
+    fake = _FakeBd()
+    _patch_bd(monkeypatch, fake)
+    monkeypatch.setattr(evolve.kb, "list_beads", lambda *a, **k: _none())
+    asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
+    assert fake.created == []
+
+
+async def _none():
+    return None

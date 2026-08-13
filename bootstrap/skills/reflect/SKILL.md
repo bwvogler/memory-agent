@@ -89,9 +89,24 @@ naming what happened and what to do instead:
 ```
 
 Keep entries short. This section loads with the skill every time it is used, so
-a page of accumulated caution costs more than it is worth. If it grows past a
-handful of entries, say so and file a bead asking a human to fold the good ones
-into the body — you may not do that yourself.
+a page of accumulated caution costs more than it is worth.
+
+**You cannot remove entries, and you do not need to.** Every append files or
+escalates a `consolidate` bead asking an ordinary turn to fold the section back
+into the skill body and drop what has been absorbed. That job needs to rewrite
+the body, which is exactly the power you do not have.
+
+**To revise something already recorded, append an entry that supersedes it.**
+A later entry beats an earlier one, so a changed preference is expressed by
+adding, never by editing:
+
+```markdown
+- 2026-09-02: Use imperial for oven temperatures. Supersedes the 2026-08-13
+  entry, for temperatures only.
+```
+
+Preferences change; guidance corrections usually do not. Saying which entry is
+being superseded keeps the contradiction visible instead of silently resolved.
 
 ## Finish the loop
 

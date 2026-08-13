@@ -438,6 +438,11 @@ human waiting, and the knowledge base is not what you are here to change.
    routing signal that exists before a skill loads. Prefer `## Learned` when
    the skill triggered but its guidance was wrong.
 
+   You cannot remove a `## Learned` entry and do not need to: every append
+   files a bead asking an ordinary turn to fold the section into the body. To
+   revise something already recorded, append an entry saying it supersedes the
+   earlier one. A later entry beats an earlier one.
+
 5. Close or note the beads you acted on, so the next reflection does not redo
    this. File a bead for anything you noticed but could not fix within the
    remit; a change too deep to make here is exactly what a human should see.
@@ -458,3 +463,104 @@ is evidence; a raw count is a popularity contest.
 
 def reflection_prompt(totals: str) -> str:
     return REFLECTION_PROMPT.format(totals=totals or "(no outcome data recorded yet)")
+
+
+# --- keeping ## Learned from growing forever -------------------------------
+#
+# Append-only is what makes a self-edit safe: nothing can be destroyed. It is
+# also what makes the section grow without limit, and it loads with the skill
+# every time the skill triggers - so an unbounded Learned section is a standing
+# tax on the activity it is supposed to improve.
+#
+# Reflection must not prune it: judging which lessons have been absorbed into
+# the body requires rewriting the body, which is exactly the power the remit
+# withholds. So pruning is a job for an ordinary turn, which has full write
+# access to KB skills and a human in the conversation - and the way work
+# reaches an ordinary turn in this system is a bead.
+#
+# The bead escalates rather than multiplying. One skill accumulating five
+# lessons is one job that has become more urgent, not five jobs.
+
+CONSOLIDATE_LABEL = "consolidate"
+FIRST_PRIORITY = 3
+MOST_URGENT = 1
+
+
+def consolidation_title(skill: str) -> str:
+    return f"Fold the ## Learned entries in {skill} into its body"
+
+
+def _consolidation_body(skill: str, path: str) -> str:
+    return (
+        f"A reflection turn appended to the `## Learned` section of `{path}`.\n\n"
+        "That section is append-only by design, so it can only grow, and it "
+        "loads with the skill every time the skill is used. This bead is the "
+        "job of folding what it has learned back into the skill body and "
+        "removing the entries that have been absorbed.\n\n"
+        "**Reflection cannot do this itself.** Deciding which lessons belong in "
+        "the body means rewriting the body, which is precisely the power the "
+        "self-evolution remit withholds (see docs/decisions/0008). An ordinary "
+        "turn has full write access to knowledge-base skills and a human in the "
+        "conversation, which is what this needs.\n\n"
+        "How to do it:\n\n"
+        f"1. Read `{path}` and its `## Learned` entries.\n"
+        "2. For each entry, decide: is this durable guidance that belongs in "
+        "the body, a preference scoped to this activity that should stay, or "
+        "something already superseded by a later entry?\n"
+        "3. Rewrite the body to absorb the durable ones, in the voice of the "
+        "rest of the skill rather than as a pasted list.\n"
+        "4. Remove the absorbed entries. Keep anything still live.\n"
+        "5. Write the whole file - the mount has no read-modify-write.\n\n"
+        "A later entry that contradicts an earlier one wins; that is how a "
+        "revised preference is expressed in an append-only section.\n\n"
+        "Priority rises as more entries accumulate, because the cost is paid on "
+        f"every turn that loads {skill}."
+    )
+
+
+async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
+    """File or escalate the bead that asks a human-facing turn to prune.
+
+    One bead per skill, escalating. Filing a fresh bead per lesson would turn
+    the ledger into the same scrolling list of noticed-but-unrecorded work that
+    beads exists to replace.
+    """
+    learned = [c for c in changes if c.learned > 0]
+    if not learned:
+        return
+    try:
+        existing = await kb.list_beads(user_slug, label=CONSOLIDATE_LABEL)
+        if existing is None:
+            log.warning("bd unreachable; not filing consolidation beads")
+            return
+        open_by_title = {
+            i.get("title"): i for i in existing if i.get("status") != "closed"
+        }
+
+        for change in learned:
+            title = consolidation_title(change.skill)
+            entries = f"{change.learned} new entr{'y' if change.learned == 1 else 'ies'}"
+            if bead := open_by_title.get(title):
+                await kb.note_bead(
+                    user_slug,
+                    bead["id"],
+                    f"{entries} appended since this was filed. The section is "
+                    "now longer, and it loads on every turn that uses this "
+                    "skill.",
+                )
+                current = bead.get("priority")
+                if isinstance(current, int) and current > MOST_URGENT:
+                    await kb.set_priority(user_slug, bead["id"], current - 1)
+                    log.info(
+                        "escalated %s to P%d (%s)", bead["id"], current - 1, title
+                    )
+            else:
+                await kb.create_bead(
+                    user_slug,
+                    title,
+                    description=_consolidation_body(change.skill, change.path),
+                    priority=FIRST_PRIORITY,
+                    labels=(CONSOLIDATE_LABEL,),
+                )
+    except Exception:  # noqa: BLE001 - never break a reflection over bookkeeping
+        log.exception("could not record a consolidation request")

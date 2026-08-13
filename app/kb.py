@@ -422,3 +422,25 @@ async def sql_read_file(path: str) -> Optional[str]:
         if r["path"] == path:
             return r["body"]
     return None
+
+
+async def note_bead(user_slug: str, bead_id: str, text: str) -> bool:
+    """Append a note to an existing bead. Never raises."""
+    rc, _, err = await _run(
+        "bd", "note", bead_id, text,
+        cwd=scratch_dir_for(user_slug), env=_bd_env(),
+    )
+    if rc != 0:
+        log.warning("bd note failed for %s/%s: %s", user_slug, bead_id, err.strip())
+    return rc == 0
+
+
+async def set_priority(user_slug: str, bead_id: str, priority: int) -> bool:
+    """Raise or lower a bead's priority. Never raises."""
+    rc, _, err = await _run(
+        "bd", "update", bead_id, "--priority", str(priority),
+        cwd=scratch_dir_for(user_slug), env=_bd_env(),
+    )
+    if rc != 0:
+        log.warning("bd update failed for %s/%s: %s", user_slug, bead_id, err.strip())
+    return rc == 0

@@ -530,6 +530,7 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
                 turn.append(kind, data)
             signals.observe_message(turn, message)
         await evolve.log_changes(turn.evolved, savepoint, trigger)
+        await evolve.request_consolidation(user_slug, evolve.merge(turn.evolved))
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
         log.info(
