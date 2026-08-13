@@ -312,10 +312,32 @@ These win wherever they conflict with the beads block.
    commits, pushes, or Dolt remote sync. Git here is savepoint infrastructure
    owned by the application, which checkpoints every turn automatically. There
    is no remote to sync to.
+"""
 
-3. Use beads for durable work, not for this turn's checklist. File a bead when
-   you notice work you are not doing right now - that is the point of it. Do
-   not file one for each step of the task in front of you.
+# Stated separately, last, and as an obligation rather than a clarification.
+# As a third bullet inside the overrides above it was agreed with and ignored:
+# the agent would write the page, say "noted as follow-up for a later session",
+# and file nothing. The Stop hook in app/guards.py is the backstop for when
+# this still does not take. See bead kb-3cl.
+_LEDGER_RULE = """\
+--- Finishing a turn ---
+
+If at any point in a turn you notice, mention, or are told about work you are
+not doing right now, you must file it as a bead BEFORE you finish replying:
+
+    bd create --title="..." --description="..." --type=task --priority=2
+
+This is not optional and it is not satisfied by mentioning it in your reply.
+Chat scrolls away and the next session starts with no memory of this one, so
+work that is only described is work that is lost. Phrases like "a follow-up for
+a later session" or "worth revisiting" in your own reply are the signal that a
+bead was owed - if you write one, file the bead.
+
+Write the description for someone with no memory of this conversation: what is
+wrong, where, and how you would fix it.
+
+This applies to durable work only. Do not file beads for the steps of the task
+you are actively completing.
 """
 
 
@@ -350,6 +372,7 @@ def _system_prompt_append(bd_context: str = "") -> str:
     if bd_context:
         parts.append(bd_context)
         parts.append(_BEADS_OVERRIDES)
+        parts.append(_LEDGER_RULE)
     if guide:
         parts.append("--- Workspace guide ---\n" + guide)
     if memory:
@@ -394,7 +417,10 @@ def _options(
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[guards.pre_tool_use_guard])
-            ]
+            ],
+            # Catches the turn that names future work and then drops it. The
+            # instruction below was not enough on its own; see app/guards.py.
+            "Stop": [HookMatcher(hooks=[guards.stop_guard])],
         },
         # Stream tokens as they arrive so the UI can show them in real time.
         include_partial_messages=True,

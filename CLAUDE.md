@@ -12,6 +12,9 @@ the TigerFS workspace.
   and the beads task ledger
 - `app/signals.py` — records which skills each turn used and files a bead when
   a turn is reverted, errors, or is denied a tool
+- `app/guards.py` — SDK hooks enforcing two rules the prompt could not: no
+  shell command may corrupt a KB file, and no turn may defer work without
+  filing it
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint); editable in the KB
@@ -58,6 +61,24 @@ do this, but `setting_sources=[]` means it can never fire, so `run_turn` does it
 explicitly. `_BEADS_OVERRIDES` in `agent.py` overrides the two rules where bd
 disagrees with this deployment: memory stays in `memory/CLAUDE.md`, and the
 agent never runs git. See `docs/decisions/0006`.
+
+**Two rules are enforced by hooks, not by instructions.** `app/guards.py`
+passes `PreToolUse` and `Stop` callbacks to the SDK. Because they are Python
+objects handed to `ClaudeAgentOptions` rather than `.claude/settings.json`
+entries, `setting_sources=[]` does not suppress them and the agent cannot
+author them in its writable cwd.
+
+Both exist because a prompt said the right thing and the agent did something
+else anyway. `PreToolUse` refuses shell appends into the KB — the mount has no
+read-modify-write, so an append zeroes what came before and truncates what came
+after, which is how a user's `memory/CLAUDE.md` was once destroyed. `Stop`
+refuses to end a turn whose reply defers work ("a follow-up for a later
+session") without a `bd` command to match; without it the ledger silently
+loses exactly the work it exists to hold (`kb-3cl`).
+
+Every refusal states the safe alternative. A bare denial is what drove the
+agent into inventing the shell workaround in the first place, and both guards
+fail open — a guard that raised would take down the turn it was protecting.
 
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied

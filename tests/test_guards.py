@@ -10,6 +10,7 @@ much as the "denies".
 from __future__ import annotations
 
 import asyncio
+import json
 
 from app import guards
 from app.config import config
@@ -116,3 +117,164 @@ def test_a_malformed_payload_does_not_break_the_turn():
     assert asyncio.run(
         guards.pre_tool_use_guard({"tool_name": "Bash"}, None, None)
     ) == {}
+
+
+# --- the deferred-work guard ----------------------------------------------
+#
+# Same asymmetry as above, for the same reason: a guard that fires on ordinary
+# turns trains the model to work around it, so the "lets it stop" cases carry
+# as much weight as the blocks.
+
+
+def _user(text: str) -> dict:
+    return {"message": {"role": "user", "content": text}}
+
+
+def _says(text: str) -> dict:
+    return {"message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def _runs(command: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+            ],
+        }
+    }
+
+
+def _tool_result() -> dict:
+    """A tool result: role=user, but NOT a new turn."""
+    return {
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "content": "ok"}],
+        }
+    }
+
+
+def test_the_exact_turn_that_lost_the_work():
+    """Regression for kb-3cl, in the words the agent actually used."""
+    rows = [
+        _user("Add a page. Separately, wiki/notes/ has no GUIDE.md - not now."),
+        _runs("cat /mnt/kb/memory/AGENT_GUIDE.md"),
+        _tool_result(),
+        _says("Done. The missing GUIDE.md is noted as a follow-up for a later session."),
+    ]
+    assert guards.unfiled_deferral(rows) == "follow-up"
+
+
+def test_filing_the_bead_satisfies_the_guard():
+    rows = [
+        _user("Add a page."),
+        _says("I noticed wiki/notes/ has no GUIDE.md - filing that as follow-up work."),
+        _runs('bd create --title="Add a GUIDE.md to wiki/notes/" --type=task'),
+        _tool_result(),
+        _says("Done, and filed as kb-abc."),
+    ]
+    assert guards.unfiled_deferral(rows) is None
+
+
+def test_annotating_an_existing_bead_counts_as_filing():
+    """The requirement is that the work reached the ledger, not which verb."""
+    rows = [
+        _user("Fix the notes page."),
+        _says("The rest is follow-up work."),
+        _runs("bd note kb-abc 'also needs metric conversion'"),
+    ]
+    assert guards.unfiled_deferral(rows) is None
+
+
+def test_an_ordinary_turn_is_not_blocked():
+    rows = [_user("What does the wiki say about tea?"), _says("Oolong steeps 4 minutes.")]
+    assert guards.unfiled_deferral(rows) is None
+
+
+def test_deferral_language_from_an_earlier_turn_does_not_re_fire():
+    """Otherwise one unfiled deferral would block every turn thereafter."""
+    rows = [
+        _user("Add a page."),
+        _says("Noted as a follow-up for a later session."),
+        _user("Thanks. What does the wiki say about tea?"),
+        _says("Oolong steeps for four minutes."),
+    ]
+    assert guards.unfiled_deferral(rows) is None
+
+
+def test_a_tool_result_does_not_start_a_new_turn():
+    """Tool results arrive as role=user; treating one as a turn boundary would
+    hide every deferral the agent made before its last tool call."""
+    rows = [
+        _user("Add a page."),
+        _says("Adding a GUIDE.md here is follow-up work."),
+        _runs("cat /mnt/kb/memory/wiki/notes/tea.md"),
+        _tool_result(),
+        _says("Done."),
+    ]
+    assert guards.unfiled_deferral(rows) == "follow-up"
+
+
+def test_bare_later_is_not_enough_to_block():
+    """"later" turns up in ordinary prose ("a later version", "later in the
+    file"). Blocking on it would fire on turns with nothing to file."""
+    rows = [_user("Explain the format."), _says("A later version changed this.")]
+    assert guards.unfiled_deferral(rows) is None
+
+
+def test_the_block_names_the_phrase_and_the_command_to_run(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [_user("Add a page."), _says("Filed as a follow-up for later.")]
+        ),
+        encoding="utf-8",
+    )
+    out = asyncio.run(
+        guards.stop_guard(
+            {"stop_hook_active": False, "transcript_path": str(transcript)}, None, None
+        )
+    )
+    assert out["decision"] == "block"
+    assert "follow-up" in out["reason"]
+    assert "bd create" in out["reason"]
+    # A bare "you must file it" with no escape hatch is how a model ends up
+    # filing junk beads to get past the guard.
+    assert "no durable work" in out["reason"]
+
+
+def test_the_guard_blocks_at_most_once(tmp_path):
+    """Without this it re-fires on its own re-prompt until max_turns."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps(_says("a follow-up for later")), encoding="utf-8"
+    )
+    assert asyncio.run(
+        guards.stop_guard(
+            {"stop_hook_active": True, "transcript_path": str(transcript)}, None, None
+        )
+    ) == {}
+
+
+def test_an_unreadable_transcript_lets_the_turn_end(tmp_path):
+    """The transcript format is a CLI internal. If it drifts, the turn still
+    finishes - a stuck turn would be far worse than a missed bead."""
+    assert asyncio.run(guards.stop_guard({}, None, None)) == {}
+    assert asyncio.run(
+        guards.stop_guard({"transcript_path": str(tmp_path / "nope.jsonl")}, None, None)
+    ) == {}
+
+
+def test_a_half_written_final_line_is_skipped(tmp_path):
+    """The CLI appends to this file while we read it."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps(_says("a follow-up for later")) + "\n{\"partial\": ",
+        encoding="utf-8",
+    )
+    out = asyncio.run(
+        guards.stop_guard({"transcript_path": str(transcript)}, None, None)
+    )
+    assert out["decision"] == "block"

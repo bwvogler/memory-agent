@@ -1,4 +1,14 @@
-"""A PreToolUse hook that refuses shell commands which would corrupt the KB.
+"""Hooks that enforce two rules prompts alone have failed to enforce.
+
+`pre_tool_use_guard` refuses shell commands that would corrupt a KB file.
+`stop_guard` refuses to end a turn that deferred work without filing it.
+
+Both follow the same three rules, learned from the incident documented below:
+scope narrowly enough that legitimate work is never blocked, always explain the
+safe alternative in the refusal itself, and never raise - a broken guard must
+not take down the turn it was written to protect.
+
+--- The KB write guard ---
 
 The knowledge-base mount has no read-modify-write: opening a file yields a
 zero-filled buffer, and on close that buffer becomes the whole file. Anything
@@ -32,8 +42,10 @@ bytes, which catches mechanisms nobody has characterised yet.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from .config import config
@@ -134,4 +146,151 @@ async def pre_tool_use_guard(
         }
     except Exception:  # noqa: BLE001 - a broken guard must not break the turn
         log.exception("KB write guard failed; allowing the command through")
+        return {}
+
+
+# --- the deferred-work guard ----------------------------------------------
+#
+# The failure this exists for, observed verbatim: asked to write a page and
+# told that a missing GUIDE.md was "follow-up work for a later session", the
+# agent wrote the page, replied "noted as a follow-up for a later session", and
+# filed nothing. The work was named, acknowledged, and lost - which is the
+# precise failure the whole ledger was built to end. See bead kb-3cl.
+#
+# It is not a permissions problem: asked directly, the same deployment runs
+# `bd ready` and `bd create` happily. It is an instruction the model agrees
+# with and then does not act on, which is the class of problem a prompt cannot
+# fix by being stated once more, more loudly.
+#
+# So: catch it at the moment it happens. A Stop hook returning decision=block
+# hands the model its own deferral language back and lets it finish the job
+# while the context is still warm and the bead costs one tool call.
+
+_DEFERRAL = re.compile(
+    r"""
+      follow[-\s]?up
+    | later\s+(session|turn|time)
+    | (another|a\s+future|a\s+separate|the\s+next)\s+(session|turn)
+    | (for|until)\s+later
+    | leav(e|ing)\s+(that|this|it)\s+for
+    | (did\s?n[o']t|have\s?n[o']t|not)\s+creat(e|ed|ing)
+    | worth\s+(doing|fixing|revisiting)\s+later
+    | \bTODO\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# `bd create` is the filing verb; `bd quick` is its shorthand. Reopening or
+# annotating an existing bead counts too - the work reached the ledger either
+# way, which is the whole requirement.
+_FILED = re.compile(r"\bbd\s+(create|quick|note|update|dep\s+add)\b")
+
+_FILE_IT = (
+    "You described work you are not doing, but did not put it anywhere it will "
+    "survive this conversation. Saying it in chat is exactly the failure the "
+    "bead ledger exists to end - the next session has no memory of this one and "
+    "will never see it.\n\n"
+    "File it now:\n\n"
+    "    bd create --title=\"Short, specific title\" \\\n"
+    "      --description=\"What needs doing, where, and why - written for "
+    "someone with no memory of this conversation.\" \\\n"
+    "      --type=task --priority=2\n\n"
+    "Then finish your reply as normal. If on reflection there is genuinely no "
+    "durable work here - you were describing what you just did, or the user "
+    "explicitly said not to track it - say so in one line and stop; you will "
+    "not be asked twice."
+)
+
+
+def _transcript_rows(path: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # a partially flushed final line is normal
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _this_turn(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows since the last real user message.
+
+    Tool results also arrive as role=user, so "real" means a message carrying
+    actual user text. Without this the guard would re-fire on deferral language
+    from three turns ago, every turn, forever.
+    """
+    start = 0
+    for i, row in enumerate(rows):
+        message = row.get("message") or {}
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            start = i
+        elif isinstance(content, list) and any(
+            block.get("type") == "text" for block in content if isinstance(block, dict)
+        ):
+            start = i
+    return rows[start:]
+
+
+def unfiled_deferral(rows: list[dict[str, Any]]) -> Optional[str]:
+    """Return the deferral phrase that was never filed, or None.
+
+    Pure over parsed transcript rows so the whole decision is unit-testable
+    without a live agent.
+    """
+    said: list[str] = []
+    for row in _this_turn(rows):
+        message = row.get("message") or {}
+        if message.get("role") != "assistant":
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                said.append(block.get("text") or "")
+            elif block.get("type") == "tool_use":
+                command = (block.get("input") or {}).get("command") or ""
+                if _FILED.search(command):
+                    return None  # it reached the ledger; nothing to enforce
+    match = _DEFERRAL.search("\n".join(said))
+    return match.group(0) if match else None
+
+
+async def stop_guard(
+    input_data: dict[str, Any],
+    tool_use_id: Optional[str],
+    context: Any,
+) -> dict[str, Any]:
+    """Block a turn that named future work and did not file it.
+
+    Blocks at most once per turn: `stop_hook_active` is set on the re-entry,
+    and a guard that could fire on its own re-prompt would loop until
+    `max_turns`. One nudge, then the model's judgment stands.
+    """
+    try:
+        if input_data.get("stop_hook_active"):
+            return {}
+        path = input_data.get("transcript_path")
+        if not path:
+            return {}
+        phrase = unfiled_deferral(_transcript_rows(path))
+        if not phrase:
+            return {}
+
+        log.info("stop guard: deferred work (%r) was never filed as a bead", phrase)
+        return {
+            "decision": "block",
+            "reason": (
+                f'You wrote "{phrase}" but ran no `bd` command.\n\n{_FILE_IT}'
+            ),
+        }
+    except Exception:  # noqa: BLE001 - a broken guard must not break the turn
+        log.exception("deferred-work guard failed; letting the turn end")
         return {}
