@@ -117,6 +117,38 @@ def test_backlog_page_is_exported_into_the_kb(beads):
     assert body.startswith("# Backlog")
 
 
+APPEND_PROBE = """
+from pathlib import Path
+p = Path('/mnt/kb/memory/.append-probe.md')
+p.write_text('hello world\\n')
+with open(p, 'a') as f:
+    f.write('appended\\n')
+data = p.read_bytes()
+p.unlink()
+print(repr(data))
+assert b'\\x00' in data, 'APPEND IS SAFE NOW - see the test for what to change'
+assert b'hello' not in data
+"""
+
+
+def test_appending_to_a_kb_file_still_destroys_it(stack):
+    """Pins a live data-loss hazard, and will fail loudly once it is fixed.
+
+    Writing at a non-zero offset on the mount does not preserve what was
+    already there: the prior bytes become NULs. This destroyed a user's
+    memory/CLAUDE.md - an agent hit a file-tool error, fell back to a shell
+    append, and turned 233 bytes of personal notes into 233 zeroes.
+
+    The defence is instructional (the system prompt and the kb-curator
+    reference both forbid appending), so this test is what tells us whether
+    that instruction is still needed. If it fails, appending has become safe:
+    relax the warnings and delete this test.
+    """
+    out = app_exec("python", "-c", APPEND_PROBE).stdout
+
+    assert "\\x00" in out, out
+
+
 def test_a_revert_files_a_signal_bead(beads):
     """Stage 2's core path, exercised without spending a model call.
 

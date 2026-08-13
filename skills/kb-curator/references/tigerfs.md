@@ -3,6 +3,20 @@
 Read this when you need to answer "what changed recently?", "what did this file
 say before?", or when you are about to undo something.
 
+## Never append. It destroys the file.
+
+Writing at any non-zero offset — `>>`, `tee -a`, `open(path, "a")` — does not
+preserve what was already there. Every byte before your write becomes a NUL and
+the original content is gone. The write reports success; the damage shows up
+later as a page that will not render.
+
+This has already destroyed a user's memory file once. An agent hit an error
+from a file tool, fell back to a shell append, and turned 233 bytes of personal
+notes into 233 zeroes. Recovering it needed the savepoint history.
+
+To add to a file: read it whole, build the whole new content, write it back
+whole. If a file tool fails, say so and stop — do not reach for the shell.
+
 Some of these paths are deliberately hidden from `ls`. They are still there;
 address them directly rather than concluding they are absent because a
 directory listing does not show them.

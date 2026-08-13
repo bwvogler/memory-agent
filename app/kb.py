@@ -328,6 +328,12 @@ def _render_backlog(issues: list[dict]) -> str:
         "Generated from the bead graph after each turn. Do not edit by hand -",
         "it is overwritten. Use `bd` to change anything here.",
         "",
+        "Descriptions are reproduced in full. This file is the only copy of the",
+        "ledger that reaches Postgres - the graph itself sits on an unreplicated",
+        "volume - so a summary here would be useless for reconstructing anything.",
+        "Note it still omits `bd` notes, design and acceptance fields, which",
+        "`bd list --json` does not return.",
+        "",
     ]
     if not issues:
         lines += ["Nothing open.", ""]
@@ -348,13 +354,18 @@ def _render_backlog(issues: list[dict]) -> str:
                 f"- **P{issue.get('priority', 4)}** `{issue['id']}` "
                 f"{issue.get('title', '(untitled)')}"
             )
-            if desc := issue.get("description"):
-                summary = desc.splitlines()[0]
-                if len(summary) > 200:
-                    summary = summary[:197].rstrip() + "..."
-                lines.append(f"  - {summary}")
+            if labels := issue.get("labels"):
+                lines.append(f"  - labels: {', '.join(labels)}")
             if blockers := issue.get("dependency_count"):
                 lines.append(f"  - blocked by {blockers} issue(s)")
+            if desc := issue.get("description"):
+                # In full, deliberately. This used to render the first line
+                # capped at 200 characters, which quietly dropped every design
+                # note and acceptance criterion - and those are exactly what a
+                # reader needs if this file is ever the only copy left.
+                lines.append("")
+                for line in desc.rstrip().splitlines():
+                    lines.append(f"  {line}" if line.strip() else "")
         lines.append("")
     return "\n".join(lines)
 

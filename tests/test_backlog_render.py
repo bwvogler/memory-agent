@@ -54,24 +54,39 @@ def test_blocker_count_is_shown():
     assert "blocked by 2" in out
 
 
-def test_long_description_is_truncated_and_marked():
+def test_long_descriptions_are_reproduced_in_full():
+    """Truncating here once made the durable copy useless for reconstruction.
+
+    This file is the only copy of the ledger that reaches Postgres. The bead
+    graph lives on an unreplicated volume, so if a summary is all this holds,
+    a lost volume takes every design note and acceptance criterion with it.
+    """
     out = _render_backlog([
         {"id": "kb-l", "title": "Long", "status": "open", "priority": 2,
          "description": "x" * 500},
     ])
 
-    assert "..." in out
-    assert "x" * 300 not in out
+    assert "x" * 500 in out
 
 
-def test_only_the_first_description_line_is_used():
+def test_every_description_line_survives():
     out = _render_backlog([
         {"id": "kb-m", "title": "Multi", "status": "open", "priority": 2,
-         "description": "first line\nsecond line"},
+         "description": "first line\n\nsecond line\n  indented detail"},
     ])
 
     assert "first line" in out
-    assert "second line" not in out
+    assert "second line" in out
+    assert "indented detail" in out
+
+
+def test_labels_are_shown_so_signal_beads_are_identifiable():
+    out = _render_backlog([
+        {"id": "kb-s", "title": "Revert", "status": "deferred", "priority": 1,
+         "labels": ["signal", "revert"]},
+    ])
+
+    assert "signal" in out
 
 
 def test_missing_optional_fields_do_not_crash():
