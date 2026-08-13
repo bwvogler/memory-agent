@@ -144,7 +144,9 @@ Two pieces of that scaffolding are inert only because of flags set for other
 reasons, which is worth knowing before anyone relaxes them:
 
 - `.claude/settings.json` registers a `SessionStart` hook running `bd prime`.
-  It is never read, because `setting_sources=[]`. Do not "fix" this by
+  It is never read, because `setting_sources=[]`. This is true of *file-based*
+  hooks only — hooks passed to `ClaudeAgentOptions` as Python callables fire
+  regardless, and 0007 relies on that. Do not "fix" this by
   enabling project settings: the agent runs with `permission_mode` of
   `acceptEdits` and that directory is its writable cwd, so it could author its
   own hooks — and hook commands are shell, bypassing the

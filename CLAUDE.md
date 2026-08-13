@@ -79,6 +79,7 @@ loses exactly the work it exists to hold (`kb-3cl`).
 Every refusal states the safe alternative. A bare denial is what drove the
 agent into inventing the shell workaround in the first place, and both guards
 fail open — a guard that raised would take down the turn it was protecting.
+See `docs/decisions/0007`.
 
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
