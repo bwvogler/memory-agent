@@ -51,8 +51,9 @@ import os
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk.types import HookMatcher
 
-from . import kb, signals
+from . import guards, kb, signals
 from .config import config
 from .turns import Turn, TurnState
 
@@ -333,18 +334,18 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Note that some control paths are path-accessible but deliberately "
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
-        "ALWAYS WRITE KNOWLEDGE-BASE FILES WHOLE, from the beginning. The "
-        "mount does not read a file before writing it: opening one gives a "
-        "zero-filled buffer, and on close that buffer becomes the entire file. "
-        "So `>>`, `tee -a`, `open(path, 'a')` and any seek-then-write DESTROY "
-        "data - bytes before your write become NULs, bytes after it are "
-        "truncated away - while reporting success. To change a file: read all "
-        "of it, build the complete new content, write it back in full. This is "
-        "a property of the mount, not a permission problem, so retrying or "
-        "switching shell commands will not help.",
-        "If a file tool fails on the knowledge base, do NOT fall back to shell "
-        "redirection. Report the failure instead. A shell workaround is how a "
-        "memory file gets silently overwritten with zeroes.",
+        # Kept deliberately short. Appends are refused structurally by the
+        # PreToolUse hook in app/guards.py, whose denial message explains the
+        # safe pattern at the moment it is needed. An earlier version spelled
+        # all of that out here instead, and the extra paragraphs measurably
+        # crowded out the beads instructions below - the agent stopped filing
+        # discovered work and went back to mentioning it in chat.
+        "Write knowledge-base files whole, and end them with a newline. The "
+        "store adds a missing trailing newline, so the Write tool may report "
+        "`Write verification failed: ... N bytes on disk, expected N-1` - that "
+        "is a FALSE ALARM and your write succeeded. If any file tool reports a "
+        "failure, re-read the file: if the content is right, you are done. "
+        "Never fall back to shell redirection to work around it.",
     ]
     if bd_context:
         parts.append(bd_context)
@@ -386,6 +387,15 @@ def _options(
         # approval nobody is there to give, and silently files nothing.
         # Scoped to bd alone rather than opening up Bash generally.
         allowed_tools=["Bash(bd:*)"],
+        # Refuse shell commands that would corrupt a KB file. Passed in
+        # process, so setting_sources=[] does not suppress it the way it
+        # suppresses .claude/settings.json hooks - and the agent cannot author
+        # this one, because it is not in its writable cwd. See app/guards.py.
+        hooks={
+            "PreToolUse": [
+                HookMatcher(matcher="Bash", hooks=[guards.pre_tool_use_guard])
+            ]
+        },
         # Stream tokens as they arrive so the UI can show them in real time.
         include_partial_messages=True,
         env={

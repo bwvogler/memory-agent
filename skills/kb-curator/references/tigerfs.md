@@ -25,6 +25,25 @@ buffer ends up fully covered.
 This is the filesystem, not the file type — `.md`, `.txt` and extensionless
 files all behave this way, and the same operations on local disk are fine.
 
+## End every file with a newline, or Write will cry wolf
+
+The store appends a trailing newline when content lacks one. That changes the
+byte count, and the Write tool's post-write size check then reports:
+
+```
+Write verification failed: <path> is N bytes on disk, expected N-1.
+The filesystem may have silently truncated the write.
+```
+
+**The write succeeded.** The content is correct and complete. Ending your
+content with a newline avoids the message entirely.
+
+This matters far more than it looks. That false error is the first link in the
+chain that destroyed a user's memory file: Write "failed", the agent went
+looking for another route, and the route it found was a shell append. If a
+file tool reports failure here, re-read the file before doing anything else —
+and if the content is right, you are done.
+
 This has already destroyed a user's memory file once. An agent hit an error
 from a file tool, fell back to a shell append, and turned 233 bytes of personal
 notes into 233 zeroes. Recovering it needed the savepoint history.

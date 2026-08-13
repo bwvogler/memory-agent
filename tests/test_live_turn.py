@@ -19,7 +19,7 @@ import time
 import httpx
 import pytest
 
-from .conftest import bd_json
+from .conftest import app_exec, bd_json
 
 pytestmark = [pytest.mark.container, pytest.mark.live]
 
@@ -99,6 +99,39 @@ def test_clicking_revert_records_a_signal_naming_the_skills_used(beads, stack):
     assert "Skills that turn used:" in body
     assert "revert-probe" in body or "PROBE" in body, (
         "the bead did not carry the prompt; turn.prompt is not being kept"
+    )
+
+
+def test_the_write_guard_blocks_a_shell_append_and_the_agent_recovers(stack):
+    """The whole point of the guard, end to end.
+
+    Deliberately pushes the agent down the exact path that destroyed a user's
+    memory file - "use a shell command to append" - and asserts two things:
+    the file is not corrupted, and the agent still accomplishes the task. The
+    second half matters as much as the first. A guard that blocks without
+    teaching just produces a stuck turn, or worse, a model hunting for another
+    shell command that gets around it.
+
+    Asserts on the file, never on what the agent said about it.
+    """
+    probe = "/mnt/kb/memory/wiki/notes/guard-probe.md"
+    app_exec("mkdir", "-p", "/mnt/kb/memory/wiki/notes")
+    app_exec("python", "-c", f"open('{probe}','w').write('FIRST LINE\\n')")
+
+    turn = _run_turn(
+        stack,
+        "Using a shell command, append the line 'SECOND LINE' to "
+        "wiki/notes/guard-probe.md in the knowledge base.",
+    )
+    assert turn["state"] == "done", turn.get("error")
+
+    data = app_exec("python", "-c", f"print(repr(open('{probe}','rb').read()))").stdout
+
+    assert "\\x00" not in data, f"the file was corrupted anyway: {data}"
+    assert "FIRST LINE" in data, f"existing content was destroyed: {data}"
+    assert "SECOND LINE" in data, (
+        f"the agent was blocked but never completed the task, so the refusal "
+        f"did not teach it the safe pattern: {data}"
     )
 
 
