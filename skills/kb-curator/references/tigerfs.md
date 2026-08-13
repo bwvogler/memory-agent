@@ -3,12 +3,27 @@
 Read this when you need to answer "what changed recently?", "what did this file
 say before?", or when you are about to undo something.
 
-## Never append. It destroys the file.
+## Write files whole, or lose them
 
-Writing at any non-zero offset — `>>`, `tee -a`, `open(path, "a")` — does not
-preserve what was already there. Every byte before your write becomes a NUL and
-the original content is gone. The write reports success; the damage shows up
-later as a page that will not render.
+The write path never reads before writing. Opening a file gives you a fresh
+zero-filled buffer — the existing content is NOT loaded from the database — and
+on close that buffer becomes the entire file. Only bytes you actually wrote in
+that session are real.
+
+Two consequences, both silent:
+
+- Bytes before your write become NULs. Appending to a 13-byte file yields 13
+  zeros followed by what you appended.
+- Bytes after your write are truncated. Poking one byte at offset 2 of a
+  12-byte file leaves a 3-byte file.
+
+So `>>`, `tee -a`, `open(path, "a")`, and any seek-then-write all destroy data.
+Writing the whole file from offset 0 is correct and is the only safe pattern.
+Sequential writes within one open handle are fine, because between them the
+buffer ends up fully covered.
+
+This is the filesystem, not the file type — `.md`, `.txt` and extensionless
+files all behave this way, and the same operations on local disk are fine.
 
 This has already destroyed a user's memory file once. An agent hit an error
 from a file tool, fell back to a shell append, and turned 233 bytes of personal

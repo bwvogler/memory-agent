@@ -333,14 +333,15 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Note that some control paths are path-accessible but deliberately "
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
-        "NEVER APPEND to a knowledge-base file. Appending - `>>`, `tee -a`, "
-        "`open(path, 'a')`, or any write at a non-zero offset - DESTROYS the "
-        "file. Everything before your write becomes NUL bytes and the original "
-        "content is gone. The write reports success and the error surfaces "
-        "later as an unreadable page. This is a property of the mount, not a "
-        "permission problem, so retrying or using a different shell command "
-        "will not help. To add to a file: read the whole file, build the whole "
-        "new content in memory, and write it back complete.",
+        "ALWAYS WRITE KNOWLEDGE-BASE FILES WHOLE, from the beginning. The "
+        "mount does not read a file before writing it: opening one gives a "
+        "zero-filled buffer, and on close that buffer becomes the entire file. "
+        "So `>>`, `tee -a`, `open(path, 'a')` and any seek-then-write DESTROY "
+        "data - bytes before your write become NULs, bytes after it are "
+        "truncated away - while reporting success. To change a file: read all "
+        "of it, build the complete new content, write it back in full. This is "
+        "a property of the mount, not a permission problem, so retrying or "
+        "switching shell commands will not help.",
         "If a file tool fails on the knowledge base, do NOT fall back to shell "
         "redirection. Report the failure instead. A shell workaround is how a "
         "memory file gets silently overwritten with zeroes.",
