@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, kb
+from . import agent, kb, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             log.exception("session store unavailable; transcripts will not be durable")
             store = None
+    signals.attach_store(store)
 
     yield
 
@@ -202,10 +203,19 @@ async def revert_turn(turn_id: str, identity: Identity = Depends(current_identit
     if not turn.savepoint:
         raise HTTPException(409, "this turn has no savepoint to revert to")
 
+    # Capture what is about to be rolled back before rolling it back: once the
+    # reset lands, the working tree matches the savepoint and the diff is empty.
+    diff_stat = await kb.diff_since_savepoint(turn.savepoint)
+
     ok = await kb.undo_to_savepoint(turn.savepoint)
     if not ok:
         raise HTTPException(500, "undo failed; check the server log")
-    return {"reverted_to": turn.savepoint}
+
+    # A revert is the strongest signal this system gets: a human saying "that
+    # was wrong" about one exact turn. Recorded, not acted on - see
+    # app/signals.py and bead kb-3sv.
+    bead_id = await signals.on_revert(turn, identity.slug, diff_stat)
+    return {"reverted_to": turn.savepoint, "signal_bead": bead_id}
 
 
 @app.get("/api/sessions")
@@ -213,6 +223,23 @@ async def list_sessions(identity: Identity = Depends(current_identity)):
     if not store:
         return {"sessions": []}
     return {"sessions": await store.sessions_for(identity.email)}
+
+
+@app.get("/api/signals")
+async def signal_summary(identity: Identity = Depends(current_identity)):
+    """What the Stage 2 ledger has actually captured so far.
+
+    This exists so bead kb-3sv - "do the captured signals justify building
+    Stage 3?" - can be answered by looking, rather than by arguing. Read the
+    rates next to `totals`: a skill loaded on every turn is present in every
+    revert whether or not it had anything to do with it.
+    """
+    if not store:
+        return {"totals": {}, "skills": [], "note": "no session store configured"}
+    return {
+        "totals": await store.turn_totals(),
+        "skills": await store.skill_signal_summary(),
+    }
 
 
 @app.get("/api/kb/log")

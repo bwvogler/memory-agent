@@ -19,6 +19,28 @@ from .conftest import USER_SLUG, app_exec, bd, bd_json
 
 pytestmark = pytest.mark.container
 
+# Kept out of the test body because `python -c` cannot take a compound
+# statement after a semicolon, so this one has to be genuinely multi-line.
+LEDGER_SCRIPT = """
+import asyncio
+from app.config import config
+from app.session_store import PostgresSessionStore
+
+async def main():
+    s = PostgresSessionStore(config.session_database_url)
+    await s.start()
+    await s.record_turn_outcome('led-1', 'dev@localhost', 'ok', None, ['lint'])
+    await s.record_turn_outcome('led-2', 'dev@localhost', 'ok', None, ['lint'])
+    await s.mark_turn_outcome('led-2', 'reverted')
+    rows = await s.skill_signal_summary()
+    hit = [r for r in rows if r['skill'] == 'lint'][0]
+    assert hit['turns'] == 2, hit
+    assert hit['reverted'] == 1, hit
+    await s.close()
+
+asyncio.run(main())
+"""
+
 
 def test_stack_is_healthy_and_the_kb_is_mounted(stack):
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
@@ -93,6 +115,76 @@ def test_backlog_page_is_exported_into_the_kb(beads):
     body = httpx.get(f"{beads}/api/kb/file", params={"path": "backlog.md"},
                      timeout=10).json()["content"]
     assert body.startswith("# Backlog")
+
+
+def test_a_revert_files_a_signal_bead(beads):
+    """Stage 2's core path, exercised without spending a model call.
+
+    Drives signals.on_revert directly with a fabricated turn. The live tier
+    covers the real button; this covers the mechanism, which is what breaks.
+    """
+    before = {i["id"] for i in bd_json("list", "--label", "signal")}
+
+    app_exec(
+        "python", "-c",
+        "import asyncio;from app import signals;from app.turns import Turn;"
+        "t=Turn(id='sig-smoke', user_email='dev@localhost');"
+        "t.prompt='add a page about oolong';t.skills={'kb-curator'};"
+        "t.savepoint='turn-sig-smoke';"
+        "print(asyncio.run(signals.on_revert(t,'dev_localhost',"
+        "' memory/wiki/tea.md | 2 +-')))",
+    )
+
+    filed = [
+        i for i in bd_json("list", "--label", "signal")
+        if i["id"] not in before
+    ]
+    assert filed, "a revert filed no bead"
+    bead = filed[0]
+    try:
+        assert "revert" in bead["labels"]
+        # Evidence, not work: it must not show up as claimable.
+        assert bead["status"] == "deferred"
+        assert bead["id"] not in {i["id"] for i in bd_json("ready")}
+        # Attribution and context both have to survive into the bead.
+        assert "kb-curator" in bead["description"]
+        assert "oolong" in bead["description"]
+        assert "tea.md" in bead["description"]
+    finally:
+        bd("close", bead["id"], "--reason=smoke test cleanup", check=False)
+
+
+def test_repeated_identical_failures_do_not_flood_the_ledger(beads):
+    """A missing allowlist entry would otherwise file one bead every turn."""
+    snippet = (
+        "import asyncio;from app import signals;from app.turns import Turn;"
+        "from app.turns import TurnState;"
+        "t=Turn(id='dup-smoke', user_email='dev@localhost');"
+        "t.prompt='x';t.permission_denials=['Bash'];"
+        "t.state=TurnState.DONE;"
+        "asyncio.run(signals.record_turn(t,'dev_localhost'))"
+    )
+    before = {i["id"] for i in bd_json("list", "--label", "signal")}
+    app_exec("python", "-c", snippet)
+    app_exec("python", "-c", snippet)
+
+    filed = [
+        i for i in bd_json("list", "--label", "signal") if i["id"] not in before
+    ]
+    try:
+        assert len(filed) == 1, f"expected one deduped bead, got {len(filed)}"
+    finally:
+        for bead in filed:
+            bd("close", bead["id"], "--reason=smoke test cleanup", check=False)
+
+
+def test_the_skill_ledger_records_every_turn_not_just_bad_ones(stack):
+    """Without the denominator, a per-skill revert count means nothing."""
+    app_exec("python", "-c", LEDGER_SCRIPT)
+
+    summary = httpx.get(f"{stack}/api/signals", timeout=10).json()
+    assert summary["totals"]["turns"] >= 2
+    assert any(s["skill"] == "lint" for s in summary["skills"])
 
 
 def test_ready_work_excludes_blocked_beads(beads):

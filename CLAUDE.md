@@ -10,6 +10,8 @@ the TigerFS workspace.
 - `app/agent.py` — agent construction: system prompt, skill loading, session options
 - `app/kb.py` — TigerFS helpers: mount health, SQL queries, scratch dirs, savepoints,
   and the beads task ledger
+- `app/signals.py` — records which skills each turn used and files a bead when
+  a turn is reverted, errors, or is denied a tool
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint); editable in the KB
@@ -56,6 +58,21 @@ do this, but `setting_sources=[]` means it can never fire, so `run_turn` does it
 explicitly. `_BEADS_OVERRIDES` in `agent.py` overrides the two rules where bd
 disagrees with this deployment: memory stays in `memory/CLAUDE.md`, and the
 agent never runs git. See `docs/decisions/0006`.
+
+**Signals are captured, not acted on.** `app/signals.py` observes every turn:
+which skills it read, whether it errored, exhausted `max_turns`, or was denied
+a tool. A Revert click is the valuable one — an explicit, human-labelled "that
+was wrong" bound to an exact turn — and files a bead quoting the prompt, the
+skills involved, and the diff that was rolled back.
+
+Nothing consumes these yet, on purpose. Bead `kb-3sv` gates that decision on
+looking at real signals first, and blocks every Stage 3 bead. `GET /api/signals`
+reports per-skill outcome rates so the gate can be answered with data.
+
+Two rules the code depends on: signal beads are `deferred` so evidence never
+reaches `bd ready`, and *every* turn is recorded, not just failing ones —
+`kb-curator` loads on every turn, so without the denominator it appears in
+every revert by construction. See the amendment in `docs/decisions/0006`.
 
 **Memory.** `memory/CLAUDE.md` is short-lived accumulated notes — high-signal
 facts the agent wrote down to survive across conversations. The agent prunes it

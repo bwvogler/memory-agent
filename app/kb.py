@@ -111,15 +111,32 @@ async def create_savepoint(name: str) -> bool:
     return True
 
 
-async def undo_to_savepoint(name: str) -> bool:
-    """Roll the knowledge base back to a named savepoint via git reset."""
-    rc, out, _ = await _run(*_git_args(), "log", "--format=%H %s")
-    target = None
+async def _savepoint_sha(name: str) -> Optional[str]:
+    _, out, _ = await _run(*_git_args(), "log", "--format=%H %s")
     for line in out.splitlines():
         sha, _, subject = line.partition(" ")
         if subject == f"savepoint:{name}":
-            target = sha
-            break
+            return sha
+    return None
+
+
+async def diff_since_savepoint(name: str) -> str:
+    """Summarise what changed since a savepoint, as `git diff --stat`.
+
+    Call this BEFORE undoing: afterwards the working tree matches the
+    savepoint and the diff is empty. It exists so a revert can record what was
+    actually rolled back rather than just that something was.
+    """
+    target = await _savepoint_sha(name)
+    if not target:
+        return ""
+    rc, out, _ = await _run(*_git_args(), "diff", "--stat", target)
+    return out.strip() if rc == 0 else ""
+
+
+async def undo_to_savepoint(name: str) -> bool:
+    """Roll the knowledge base back to a named savepoint via git reset."""
+    target = await _savepoint_sha(name)
     if not target:
         log.warning("savepoint %s not found in git history", name)
         return False
@@ -223,6 +240,67 @@ async def bd_prime(user_slug: str) -> str:
     return out.strip()
 
 
+async def list_beads(user_slug: str, label: Optional[str] = None) -> Optional[list[dict]]:
+    """Return the bead graph as dicts, optionally filtered to one label.
+
+    Returns None - not [] - when bd could not be reached. The distinction
+    matters: export_backlog overwrites a file with this, and an empty list
+    from a transient failure would silently replace a real backlog with
+    "Nothing open."
+    """
+    argv = ["bd", "list", "--json"]
+    if label:
+        argv += ["--label", label]
+    rc, out, err = await _run(*argv, cwd=scratch_dir_for(user_slug), env=_bd_env())
+    if rc != 0:
+        log.warning("bd list failed for %s: %s", user_slug, err.strip())
+        return None
+    try:
+        return json.loads(out) or []
+    except json.JSONDecodeError:
+        log.warning("bd list returned unparseable JSON for %s", user_slug)
+        return None
+
+
+async def create_bead(
+    user_slug: str,
+    title: str,
+    description: str = "",
+    priority: int = 2,
+    labels: tuple[str, ...] = (),
+    status: Optional[str] = None,
+    issue_type: str = "task",
+) -> Optional[str]:
+    """Create one bead and return its id, or None if bd could not be reached.
+
+    Arguments go through argv, never a shell, so newlines and quotes in the
+    description are safe. Note `bd edit` is never used anywhere in this
+    codebase: it opens $EDITOR and a headless turn would hang forever.
+    """
+    argv = [
+        "bd", "create", title,
+        "--type", issue_type,
+        "--priority", str(priority),
+    ]
+    if description:
+        argv += ["--description", description]
+    if labels:
+        argv += ["--labels", ",".join(labels)]
+    if status:
+        argv += ["--status", status]
+    argv += ["--json"]
+
+    rc, out, err = await _run(*argv, cwd=scratch_dir_for(user_slug), env=_bd_env())
+    if rc != 0:
+        log.warning("bd create failed for %s: %s", user_slug, err.strip())
+        return None
+    try:
+        return json.loads(out).get("id")
+    except (json.JSONDecodeError, AttributeError):
+        log.warning("bd create returned unparseable JSON for %s", user_slug)
+        return None
+
+
 async def export_backlog(user_slug: str) -> bool:
     """Render the bead graph to memory/backlog.md in the KB.
 
@@ -231,17 +309,8 @@ async def export_backlog(user_slug: str) -> bool:
     Postgres-backed store (the volume holding Dolt is the weaker tier, with
     no replication), and it renders in the existing /kb browser for free.
     """
-    rc, out, err = await _run(
-        "bd", "list", "--json", cwd=scratch_dir_for(user_slug), env=_bd_env()
-    )
-    if rc != 0:
-        log.warning("bd list failed for %s: %s", user_slug, err.strip())
-        return False
-
-    try:
-        issues = json.loads(out) or []
-    except json.JSONDecodeError:
-        log.warning("bd list returned unparseable JSON for %s", user_slug)
+    issues = await list_beads(user_slug)
+    if issues is None:
         return False
 
     try:

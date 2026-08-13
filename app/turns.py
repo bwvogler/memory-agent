@@ -50,6 +50,15 @@ class Turn:
     state: TurnState = TurnState.RUNNING
     error: str | None = None
     events: list[Event] = field(default_factory=list)
+
+    # Signal capture (app/signals.py). The prompt is kept because the revert
+    # handler needs it long after run_turn has returned, and skills because
+    # attributing a revert to anything requires knowing what the turn read.
+    prompt: str = ""
+    skills: set[str] = field(default_factory=set)
+    terminal_reason: str | None = None
+    permission_denials: list[str] = field(default_factory=list)
+
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
 
     def append(self, kind: str, data: str) -> Event:
@@ -95,6 +104,7 @@ class Turn:
             "session_id": self.session_id,
             "savepoint": self.savepoint,
             "event_count": len(self.events),
+            "skills": sorted(self.skills),
         }
 
 

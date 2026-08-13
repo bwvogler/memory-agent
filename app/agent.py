@@ -52,7 +52,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
-from . import kb
+from . import kb, signals
 from .config import config
 from .turns import Turn, TurnState
 
@@ -376,6 +376,9 @@ async def run_turn(
     if await kb.create_savepoint(savepoint):
         turn.savepoint = savepoint
 
+    # Kept for the signal layer: a revert files a bead quoting the prompt, and
+    # by then run_turn is long gone.
+    turn.prompt = prompt
     turn.append("status", "started")
 
     bd_context = ""
@@ -392,6 +395,7 @@ async def run_turn(
         ):
             for kind, data in _render(message):
                 turn.append(kind, data)
+            signals.observe_message(turn, message)
             session_id = _extract_session_id(message)
             if session_id and not turn.session_id:
                 turn.session_id = session_id
@@ -402,6 +406,10 @@ async def run_turn(
         log.exception("turn %s failed", turn.id)
         turn.append("error", str(exc))
         turn.finish(TurnState.ERROR, error=str(exc))
+    finally:
+        # After finish() on both paths: a turn that failed is precisely the one
+        # worth recording, and the client is no longer waiting on us.
+        await signals.record_turn(turn, user_slug)
 
 
 def _extract_session_id(message: object) -> str | None:

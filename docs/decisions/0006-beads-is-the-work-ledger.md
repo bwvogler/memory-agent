@@ -98,6 +98,31 @@ that hash is untouched and gets replaced, a file that differs is left alone
 with a warning. Deployments predating the state file have no recorded hash, so
 we cannot tell and do not guess.
 
+## Amendment: signal beads are evidence, not work
+
+Stage 2 added a second kind of bead, and it needs a rule of its own. When a
+turn is reverted, errors, exhausts `max_turns`, or is denied a tool, `app/
+signals.py` files a bead recording it. These are *observations*, and treating
+them like tasks would ruin the thing this ADR is about: `bd ready` is the
+frontier a fresh session works from, and filling it with evidence turns the
+ledger into a queue of things nobody intends to do.
+
+So signal beads are created `deferred` and labelled `signal`. They are out of
+`bd ready` by construction and are read in bulk — by a human, or by bead
+kb-3sv, which asks whether they justify Stage 3 at all.
+
+Repeated signals are deduped by title against open signal beads, because a
+standing defect (a missing `allowed_tools` entry, say) would otherwise file one
+bead per turn forever. Reverts are deliberately **not** deduped: each is a
+separate human judgement, and the count is the measurement.
+
+The ledger records **every** turn, not only the bad ones, in `turn_outcomes`
+and `turn_skill_uses`. This is the part most likely to look redundant and is
+not: `kb-curator` is effectively loaded on every turn, so it appears in every
+revert whether or not it had anything to do with the failure. Without the
+denominator, a per-skill failure count is a popularity contest. `GET
+/api/signals` returns the rates.
+
 ## Note on verification
 
 Run `pytest --container` before trusting any of this, and `--live` before

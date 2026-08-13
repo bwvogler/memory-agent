@@ -67,6 +67,41 @@ def test_agent_can_run_bd_and_file_discovered_work(beads, stack):
     )
 
 
+def test_clicking_revert_records_a_signal_naming_the_skills_used(beads, stack):
+    """Stage 2 end to end: a real turn, the real button, a real bead.
+
+    The container tier proves the mechanism works when handed a turn. Only
+    this proves the pieces are actually connected - that a turn records the
+    skills it read, that the registry still holds it when Revert is clicked,
+    and that the handler files what it captured.
+    """
+    turn = _run_turn(
+        stack,
+        "Add a page at wiki/notes/revert-probe.md containing the single word "
+        "PROBE. Nothing else.",
+    )
+    assert turn["state"] == "done", turn.get("error")
+
+    before = {i["id"] for i in bd_json("list", "--label", "signal")}
+    reverted = httpx.post(
+        f"{stack}/api/turns/{turn['turn_id']}/revert", timeout=60
+    )
+    assert reverted.status_code == 200, reverted.text
+
+    filed = [
+        i for i in bd_json("list", "--label", "signal") if i["id"] not in before
+    ]
+    assert filed, "Revert filed no signal bead"
+    body = filed[0]["description"]
+
+    # Not asserting WHICH skills: that is the model's choice and would flake.
+    # Asserting that the ledger reported something either way is the contract.
+    assert "Skills that turn used:" in body
+    assert "revert-probe" in body or "PROBE" in body, (
+        "the bead did not carry the prompt; turn.prompt is not being kept"
+    )
+
+
 def test_a_fresh_session_recovers_work_it_never_saw(beads, stack):
     """The whole point: no session_id, no conversational memory, work survives.
 
