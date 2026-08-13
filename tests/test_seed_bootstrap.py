@@ -63,6 +63,10 @@ def test_fresh_seed_writes_skills_and_records_hashes(workspace):
     shipped = json.loads(_state(workspace).read_text())["shipped"]
     assert "lint/SKILL.md" in shipped
     assert "ingest/SKILL.md" in shipped
+    # Not every seeded file is a skill: an image skill's LEARNED.md overlay
+    # rides the same path, and needs the same "left alone once edited" rule -
+    # once reflection appends to it, the shipped stub must never come back.
+    assert "kb-curator/LEARNED.md" in shipped
 
 
 def test_reseed_without_changes_is_a_noop(workspace):

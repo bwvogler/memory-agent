@@ -17,7 +17,9 @@ happen when they wrote it.
 
 The remit is deliberately small, and it is enforced in code rather than by this
 document: you may rewrite a skill's `description` and append under a
-`## Learned` heading. Everything else is refused by a hook. Read
+`## Learned` heading — in a knowledge-base skill, or in the `LEARNED.md`
+overlay belonging to a skill that ships in the image. Everything else is
+refused by a hook. Read
 `docs/decisions/0008` if you want the reasoning; the short version is that a
 reflection turn which misreads its remit damages every later turn, so the
 remit is not left to judgement.
@@ -91,10 +93,20 @@ naming what happened and what to do instead:
 Keep entries short. This section loads with the skill every time it is used, so
 a page of accumulated caution costs more than it is worth.
 
+**A skill that ships in the image keeps its lessons next door.** `kb-curator`
+and anything else under `/srv/skills` is code — you cannot write to it, and an
+edit would vanish on the next deploy anyway. Its overlay is a knowledge-base
+file at `skills/<skill>/LEARNED.md` in your workspace, which the skill reads
+when it loads. Append there exactly as you would to a `## Learned` section; the
+same append-only rule applies, and there is no description to rewrite.
+
 **You cannot remove entries, and you do not need to.** Every append files or
-escalates a `consolidate` bead asking an ordinary turn to fold the section back
-into the skill body and drop what has been absorbed. That job needs to rewrite
-the body, which is exactly the power you do not have.
+escalates a `consolidate` bead asking an ordinary turn to prune. For a skill
+with an editable body that means folding the durable lessons in and dropping
+what was absorbed — rewriting the body, which is exactly the power you do not
+have. For an overlay there is no body to fold into, so the bead asks for a
+prune plus, where a lesson has outgrown the overlay, a proposed change to the
+image for a human to ship.
 
 **To revise something already recorded, append an entry that supersedes it.**
 A later entry beats an earlier one, so a changed preference is expressed by

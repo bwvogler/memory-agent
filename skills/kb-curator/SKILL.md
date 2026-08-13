@@ -89,6 +89,18 @@ If no guide exists for a directory and you are creating structured content, ask
 the human how they would like it formatted, then write a `GUIDE.md` recording
 that format so future turns follow the same convention.
 
+## Read what curating has already taught you
+
+This skill ships inside the application image and cannot be edited from a
+conversation, so what it has learned lives beside it in the knowledge base, at
+`memory/skills/kb-curator/LEARNED.md`. Read it before substantive curation
+work.
+
+Its entries are scoped to this activity and they win over the general guidance
+above when the two conflict; a later entry wins over an earlier one. When the
+human states a preference about how the wiki should be curated, that file is
+where it goes.
+
 ## Writing well
 
 Write documents a colleague would want to read: a clear title, the claim up
@@ -117,7 +129,7 @@ When the human states a preference, put it where its scope matches:
 | the preference | where it goes |
 |---|---|
 | about them, or applies to everything you do | `memory/CLAUDE.md` |
-| scoped to an activity a skill owns | that skill's `## Learned` section |
+| scoped to an activity a skill owns | that skill's `## Learned` section — or, for a skill that ships in the image, its overlay at `memory/skills/<skill>/LEARNED.md` |
 | a thing to go and do | a bead |
 
 Scope and cost line up. `memory/CLAUDE.md` loads on every turn, so a preference
@@ -125,10 +137,12 @@ that only matters while ingesting documents is overpriced there and correctly
 priced in the `ingest` skill. The test is one question: *would I want this to
 apply while doing something else?* If yes, it is memory.
 
-A skill's `## Learned` section is append-only, so revise a preference by adding
-an entry that says it supersedes the earlier one — a later entry wins. Do not
-let that section grow unbounded; folding it back into the skill body is
-ordinary work, and there is usually a `consolidate` bead already asking for it.
+`## Learned` is append-only *to a reflection turn*, so a reflection revises a
+preference by adding an entry that says it supersedes the earlier one — a later
+entry wins. You are an ordinary turn and may rewrite these sections and overlays
+outright, which is the point: do not let them grow unbounded. Pruning them, and
+folding what is durable back into a skill's body, is ordinary work, and there is
+usually a `consolidate` bead already asking for it.
 
 ## Version history and undo
 

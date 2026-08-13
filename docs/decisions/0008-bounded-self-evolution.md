@@ -55,8 +55,9 @@ destroy what it is adding to. Both are recoverable by construction.
 
 **What is out of reach, and why each one.** Skills shipped in the image are
 code — reviewed and deployed atomically, and an edit there would also silently
-vanish at the next deploy, which is worse than being refused. `AGENT_GUIDE.md`
-is the human's own schema document. New skills are a human's decision, so
+vanish at the next deploy, which is worse than being refused. (Their *lessons*
+are reachable — see the amendment below.) `AGENT_GUIDE.md` is the human's own
+schema document. New skills are a human's decision, so
 reflection improves what exists and files a bead when something is missing.
 `Edit` is refused outright: whole-file writes are the safe pattern on this
 mount anyway (ADR 0007), and they let the bound see the complete proposed
@@ -118,6 +119,62 @@ differently — so log entries are collapsed to their net effect per skill. And 
 reflection turn that reaches for shell it does not have still files a P1
 "check allowed_tools" bead, because the *real* permission system denied it; our
 own guards' refusals are already excluded, but that case is not.
+
+## Amendment — `## Learned` has to be prunable, and it has to be reachable
+
+Two things the original decision did not settle, both of them consequences of
+append-only rather than departures from it. Recorded here rather than as a new
+ADR because neither changes the remit, the hook-not-instructions argument, or
+reversibility by savepoint; what changes is the reach of what is above, and
+"what is out of reach" is where a reader will look for it.
+
+**An append-only section grows forever, and it is charged on every turn that
+loads the skill.** Reflection cannot prune it: deciding which lessons have been
+absorbed into the body means rewriting the body, which is exactly the power the
+remit withholds. So pruning is ordinary work, and the way work reaches an
+ordinary turn here is a bead. Every append files or escalates one
+`consolidate`-labelled bead per skill — escalating rather than multiplying,
+because one skill accumulating five lessons is one job that got more urgent, not
+five jobs.
+
+**Preferences are routed by scope, for the same cost reason.** `memory/CLAUDE.md`
+is injected into the system prompt on every turn, so a preference that only
+matters while ingesting documents is overpriced there and correctly priced in
+the `ingest` skill's `## Learned`. The test is one question: *would I want this
+to apply while doing something else?*
+
+**Which left the rule unfollowable for the skill it mattered most for.**
+`kb-curator` ships in the image. Curation-scoped lessons therefore had exactly
+one home — the system prompt, on every turn — which is the cost the routing rule
+exists to avoid (`kb-5uu`). So an image skill now keeps a `LEARNED.md` overlay
+in the knowledge base at `memory/skills/<skill>/LEARNED.md`, seeded as a stub by
+the same bootstrap path as any other file, and the skill's own body points at it.
+
+The overlay is deliberately not a skill: no frontmatter, no description, nothing
+the router sees. A shadow *skill* was the obvious alternative and needs no code
+at all, since the remit already covers knowledge-base skills — it was rejected
+because it would put a second skill in front of the router competing with
+`kb-curator` on the same triggers, and because a mutable `description` is
+meaningless on a companion file. The skill's text stays code; only what was
+learned about it becomes data.
+
+Reflection may append to an overlay under the same append-only bound
+(`bounded_overlay_edit` shares its core with `bounded_skill_edit`, so the promise
+is defined once). Ordinary turns rewrite it freely, which is what makes it
+prunable, and is also where human-stated curation preferences now land — the
+half that actually shrinks the prompt, since reflection fires rarely and
+ordinary turns are where preferences get stated.
+
+Its consolidation bead is a different job and says so in a different title:
+there is no body to fold into, so the ask is to prune what a later entry
+superseded, and to file a proposed change to `skills/<skill>/SKILL.md` in the
+repository for anything durable enough to belong in the image. That is the only
+route by which a lesson learned in production reaches the shipped skill, and it
+goes through a human by construction.
+
+**No size cap.** A hard limit was considered and rejected: a refused lesson is a
+lost lesson, and refusing one would also break the rule from ADR 0007 that every
+refusal names the safe alternative. The escalating bead is the pressure instead.
 
 ## Note on verification
 

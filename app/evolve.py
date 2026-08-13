@@ -25,7 +25,10 @@ never destroy what it is adding to. Both are recoverable by construction.
 
 - Skills shipped in the image (`skills/kb-curator/`). They are code, reviewed
   and deployed atomically. An edit there would also silently vanish on the next
-  deploy, which is worse than being refused.
+  deploy, which is worse than being refused. Their *lessons* are not out of
+  reach: an image skill keeps a `LEARNED.md` overlay in the knowledge base, and
+  that file follows the same append-only rules as a `## Learned` section. The
+  text stays code; what was learned about it becomes data.
 - `AGENT_GUIDE.md`, the human's own schema document.
 - Everything in ADR 0007. Two of this system's load-bearing behaviours turned
   out not to be skill-shaped at all and now live in hooks. Those are guarantees,
@@ -50,6 +53,11 @@ from . import kb
 log = logging.getLogger(__name__)
 
 SKILL_FILE = "SKILL.md"
+# The knowledge-base overlay for a skill that ships in the image. It is a data
+# file rather than a skill: no frontmatter, no description, nothing the router
+# looks at. The image skill's own body points at it, so it loads on demand with
+# the skill and costs nothing on turns that never use it.
+OVERLAY_FILE = "LEARNED.md"
 LEARNED_HEADING = re.compile(r"^#{2,3}\s+Learned\s*$", re.IGNORECASE)
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
 MUTABLE_FIELD = "description"
@@ -140,6 +148,52 @@ def _trimmed(lines: list[str]) -> list[str]:
     return lines
 
 
+def _bounded_learned(cur_body: str, new_body: str) -> Optional[str]:
+    """The append-only rule, shared by skills and overlays.
+
+    Defined once on purpose: a skill's `## Learned` section and an image skill's
+    `LEARNED.md` overlay are the same promise made about two files, and two
+    copies of it would drift.
+    """
+    cur_head, cur_learned = _learned_split(cur_body)
+    new_head, new_learned = _learned_split(new_body)
+    if cur_head.rstrip("\n") != new_head.rstrip("\n"):
+        return (
+            "the text above `## Learned` must be byte-identical; existing "
+            "guidance may not be edited, reworded, reordered or deleted"
+        )
+    cur_learned = _trimmed(cur_learned)
+    new_learned = _trimmed(new_learned)
+    if new_learned[: len(cur_learned)] != cur_learned:
+        return (
+            "`## Learned` is append-only; existing entries may not be changed "
+            "or removed"
+        )
+    return None
+
+
+def _learned_count(body: str) -> int:
+    return len(_trimmed(_learned_split(body)[1]))
+
+
+def bounded_overlay_edit(current: str, proposed: str) -> Optional[str]:
+    """Return why this overlay rewrite exceeds the remit, or None if allowed.
+
+    An overlay carries no frontmatter and no description, so append-only is the
+    entire policy. Pure, like `bounded_skill_edit`, and for the same reason.
+    """
+    if _split_frontmatter(proposed)[0] is not None:
+        return (
+            f"an overlay is a data file, not a skill; {OVERLAY_FILE} may not "
+            "grow a `---` frontmatter block"
+        )
+    if reason := _bounded_learned(current, proposed):
+        return reason
+    if _learned_count(proposed) == _learned_count(current):
+        return "this rewrite changes nothing; do not write the file back unchanged"
+    return None
+
+
 def bounded_skill_edit(current: str, proposed: str) -> Optional[str]:
     """Return why this rewrite exceeds the remit, or None if it is allowed.
 
@@ -168,26 +222,13 @@ def bounded_skill_edit(current: str, proposed: str) -> Optional[str]:
             continue
         return f"`{key}:` may not be changed; only `{MUTABLE_FIELD}:` is mutable"
 
-    cur_head, cur_learned = _learned_split(cur_body)
-    new_head, new_learned = _learned_split(new_body)
-    if cur_head.rstrip("\n") != new_head.rstrip("\n"):
-        return (
-            "the body above `## Learned` must be byte-identical; existing "
-            "guidance may not be edited, reworded, reordered or deleted"
-        )
-
-    cur_learned = _trimmed(cur_learned)
-    new_learned = _trimmed(new_learned)
-    if new_learned[: len(cur_learned)] != cur_learned:
-        return (
-            "`## Learned` is append-only; existing entries may not be changed "
-            "or removed"
-        )
+    if reason := _bounded_learned(cur_body, new_body):
+        return reason
 
     described = _block_of(cur_fields, MUTABLE_FIELD) != _block_of(
         new_fields, MUTABLE_FIELD
     )
-    if not described and len(new_learned) == len(cur_learned):
+    if not described and _learned_count(new_body) == _learned_count(cur_body):
         return "this rewrite changes nothing; do not write the file back unchanged"
     return None
 
@@ -200,7 +241,13 @@ def _block_of(fields: list[tuple[str, list[str]]], key: str) -> list[str]:
 
 
 def describe_edit(current: str, proposed: str, path: Path) -> Change:
-    """What an already-approved edit actually did. Call only after the bound passes."""
+    """What an already-approved edit actually did. Call only after the bound passes.
+
+    Works for both shapes. An overlay has no frontmatter, so it can never be
+    `described`; its directory is named for the skill it belongs to, which is
+    why `path.parent.name` identifies the skill either way and the rest of the
+    Change/merge/log chain needs to know nothing about the distinction.
+    """
     cur_fm, cur_body = _split_frontmatter(current)
     new_fm, new_body = _split_frontmatter(proposed)
     cur_learned = _trimmed(_learned_split(cur_body)[1])
@@ -247,18 +294,21 @@ def merge(changes: list[Change]) -> list[Change]:
 
 
 def mutable_skill_path(path_str: str) -> Optional[Path]:
-    """Return the resolved path if it is a KB skill file, else None.
+    """Return the resolved path if it is a writable skill file, else None.
 
-    Image skills are excluded by construction: this only accepts paths under
-    the knowledge base's own `skills/` directory, and the image copy lives in
-    the container filesystem instead.
+    Two shapes qualify, both under the knowledge base's own `skills/` directory:
+    a KB skill's `SKILL.md`, and the `LEARNED.md` overlay belonging to a skill
+    that ships in the image. The image tree itself is still excluded by
+    construction - it lives in the container filesystem and never matches this.
+    The overlay is the supported way in, not a hole in that: the skill's text
+    stays code, and only what was learned about it becomes editable data.
     """
     try:
         path = Path(path_str).resolve()
     except (OSError, ValueError):
         return None
     skills_root = (kb.workspace_root() / "skills").resolve()
-    if path.name != SKILL_FILE:
+    if path.name not in (SKILL_FILE, OVERLAY_FILE):
         return None
     if skills_root not in path.parents:
         return None
@@ -302,12 +352,17 @@ def write_guard_for(turn: Any) -> Any:
             if path is None:
                 return _deny_write(
                     turn,
-                    "reflection may only write SKILL.md files inside the "
-                    f"knowledge base at {kb.workspace_root()}/skills/. Skills "
-                    "shipped in the image are code and are reviewed and "
-                    "deployed like code; AGENT_GUIDE.md belongs to the human. "
-                    "If the fix is somewhere else, file a bead describing it "
-                    "instead of making the change."
+                    f"reflection may only write {SKILL_FILE} or {OVERLAY_FILE} "
+                    f"files inside the knowledge base at "
+                    f"{kb.workspace_root()}/skills/. A skill shipped in the "
+                    "image is code, reviewed and deployed like code, and an "
+                    "edit to it would vanish on the next deploy - but its "
+                    "lessons are not out of reach: append them to "
+                    f"{kb.workspace_root()}/skills/<skill>/{OVERLAY_FILE}, "
+                    "which the skill reads when it loads. AGENT_GUIDE.md "
+                    "belongs to the human. If the fix is somewhere else "
+                    "entirely, file a bead describing it instead of making the "
+                    "change."
                 )
 
             try:
@@ -316,20 +371,33 @@ def write_guard_for(turn: Any) -> Any:
                 return _deny_write(
                     turn,
                     f"{path} does not exist yet. Reflection improves existing "
-                    "skills; it does not create new ones. File a bead if a new "
-                    "skill is what is needed."
+                    "skills; it does not create new ones, and it does not "
+                    "create an overlay for a skill that has none. File a bead "
+                    "if that is what is needed."
                 )
 
             proposed = tool_input.get("content") or ""
-            reason = bounded_skill_edit(current, proposed)
+            overlay = path.name == OVERLAY_FILE
+            reason = (
+                bounded_overlay_edit(current, proposed)
+                if overlay
+                else bounded_skill_edit(current, proposed)
+            )
             if reason:
+                allowed = (
+                    "You may append entries under the `## Learned` heading. "
+                    "Nothing else - an overlay has no description to rewrite."
+                    if overlay
+                    else "You may rewrite the `description:` frontmatter field "
+                    "and append entries under a `## Learned` heading. Nothing "
+                    "else."
+                )
                 return _deny_write(
                     turn,
-                    f"Refused: {reason}.\n\nYou may rewrite the `description:` "
-                    "frontmatter field and append entries under a `## Learned` "
-                    "heading. Nothing else. If the skill needs a deeper change "
-                    "than that, say so and file a bead for a human - that is a "
-                    "successful outcome of reflecting, not a failure."
+                    f"Refused: {reason}.\n\n{allowed} If the skill needs a "
+                    "deeper change than that, say so and file a bead for a "
+                    "human - that is a successful outcome of reflecting, not a "
+                    "failure."
                 )
 
             change = describe_edit(current, proposed, path)
@@ -438,8 +506,13 @@ human waiting, and the knowledge base is not what you are here to change.
    routing signal that exists before a skill loads. Prefer `## Learned` when
    the skill triggered but its guidance was wrong.
 
+   A skill that ships in the image has no editable SKILL.md here, but it does
+   have an overlay: `skills/<skill>/LEARNED.md` in the knowledge base, which
+   the skill reads when it loads. Append the lesson there instead. The overlay
+   has no description to rewrite, so appending is the only move it offers.
+
    You cannot remove a `## Learned` entry and do not need to: every append
-   files a bead asking an ordinary turn to fold the section into the body. To
+   files a bead asking an ordinary turn to prune the section. To
    revise something already recorded, append an entry saying it supersedes the
    earlier one. A later entry beats an earlier one.
 
@@ -480,14 +553,61 @@ def reflection_prompt(totals: str) -> str:
 #
 # The bead escalates rather than multiplying. One skill accumulating five
 # lessons is one job that has become more urgent, not five jobs.
+#
+# An overlay gets the same treatment and a different job description: there is
+# no body to fold into, so pruning is all that can be done locally and anything
+# durable has to reach a human as a proposed change to the image.
 
 CONSOLIDATE_LABEL = "consolidate"
 FIRST_PRIORITY = 3
 MOST_URGENT = 1
 
 
-def consolidation_title(skill: str) -> str:
+def consolidation_title(skill: str, overlay: bool = False) -> str:
+    """The bead title for a skill's pruning job.
+
+    The two forms are deliberately different strings. They are different jobs -
+    one folds lessons into a body, the other cannot - and the title is also the
+    key the escalation matches on, so distinct titles mean a skill that somehow
+    has both never has to be disambiguated after the fact.
+    """
+    if overlay:
+        return f"Prune the ## Learned overlay for {skill}"
     return f"Fold the ## Learned entries in {skill} into its body"
+
+
+def _overlay_consolidation_body(skill: str, path: str) -> str:
+    """The same job, for a skill whose body cannot be rewritten at all.
+
+    An image skill's text is code. There is nothing here to fold *into*, so the
+    work splits in two: prune what is dead, and hand the durable part to a human
+    as a proposed change to the repository.
+    """
+    return (
+        f"A reflection turn appended to `{path}`, the knowledge-base overlay "
+        f"for `{skill}`.\n\n"
+        "That file is append-only to reflection by design, so it can only grow, "
+        "and the skill reads it every time it loads. This bead is the job of "
+        "pruning it.\n\n"
+        f"**`{skill}` ships in the image, so there is no body to fold these "
+        "into.** Its text is code: reviewed, deployed atomically, and outside "
+        "what any turn here can edit (see docs/decisions/0008). That makes this "
+        "two jobs rather than one.\n\n"
+        "How to do it:\n\n"
+        f"1. Read `{path}`.\n"
+        "2. Drop entries a later entry has superseded, and entries that turned "
+        "out to be about one situation rather than about the activity.\n"
+        "3. Keep the live ones, merged and tightened. This file is ordinary "
+        "knowledge base content to you - you may rewrite it freely.\n"
+        "4. If an entry is durable and general enough that it belongs in the "
+        "skill itself, file a bead proposing that change to "
+        f"`skills/{skill}/SKILL.md` in the repository, quoting the entry and "
+        "the evidence. A human ships it with the next image, and the entry can "
+        "be dropped from here once they have.\n"
+        "5. Write the whole file - the mount has no read-modify-write.\n\n"
+        "Priority rises as more entries accumulate, because the cost is paid on "
+        f"every turn that loads {skill}."
+    )
 
 
 def _consolidation_body(skill: str, path: str) -> str:
@@ -538,7 +658,8 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
         }
 
         for change in learned:
-            title = consolidation_title(change.skill)
+            overlay = change.path.endswith(OVERLAY_FILE)
+            title = consolidation_title(change.skill, overlay)
             entries = f"{change.learned} new entr{'y' if change.learned == 1 else 'ies'}"
             if bead := open_by_title.get(title):
                 await kb.note_bead(
@@ -555,10 +676,13 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
                         "escalated %s to P%d (%s)", bead["id"], current - 1, title
                     )
             else:
+                body = (
+                    _overlay_consolidation_body if overlay else _consolidation_body
+                )
                 await kb.create_bead(
                     user_slug,
                     title,
-                    description=_consolidation_body(change.skill, change.path),
+                    description=body(change.skill, change.path),
                     priority=FIRST_PRIORITY,
                     labels=(CONSOLIDATE_LABEL,),
                 )

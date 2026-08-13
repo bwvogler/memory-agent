@@ -42,6 +42,19 @@ asyncio.run(main())
 """
 
 
+OVERLAY_APPEND_SCRIPT = """
+import sys
+from app import evolve
+
+path = "/mnt/kb/memory/skills/kb-curator/LEARNED.md"
+current = open(path).read()
+reason = evolve.bounded_overlay_edit(current, current + "\\n- 2026-08-13: a lesson.\\n")
+if reason:
+    print(reason)
+    sys.exit(1)
+"""
+
+
 def test_stack_is_healthy_and_the_kb_is_mounted(stack):
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
 
@@ -66,6 +79,27 @@ def test_bootstrap_skills_are_seeded_into_the_kb(stack):
 
     assert "lint" in listing
     assert "ingest" in listing
+
+
+def test_the_image_skill_overlay_is_seeded_and_can_be_appended_to(stack):
+    """kb-curator ships in the image and cannot be edited, so its lessons need
+    a file in the KB to land in. Seeding a stub rather than creating it on
+    demand: the evolution guard refuses a Write to a path that does not exist,
+    and the skill would otherwise read a missing file on every curation turn.
+
+    Then the part only the real store can answer. The overlay's header is
+    immutable under the bound, and TigerFS re-serialises markdown rather than
+    round-tripping bytes - the same behaviour that once silently disabled
+    bootstrap upgrades. If re-serialisation moved the header, the very first
+    append reflection attempts would be refused as a body edit, in production,
+    for a reason no unit test using tmp_path could ever reproduce.
+    """
+    overlay = app_exec("cat", "/mnt/kb/memory/skills/kb-curator/LEARNED.md").stdout
+
+    assert "## Learned" in overlay
+
+    out = app_exec("python", "-c", OVERLAY_APPEND_SCRIPT, check=False)
+    assert out.returncode == 0, f"appending to the stored overlay was refused: {out.stdout}"
 
 
 def test_seeded_skills_are_the_beads_aware_versions(stack):

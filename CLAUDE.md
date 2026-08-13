@@ -103,7 +103,21 @@ reflection turn may rewrite one skill's `description` and append under a
 `## Learned` heading. That is the entire vocabulary of self-modification, and
 `app/evolve.py` enforces it by comparing the file on disk against the content
 about to be written — image skills, `AGENT_GUIDE.md`, new skills and `Edit`
-itself are all out of reach. Reflection is an ordinary Turn, so it savepoints
+itself are all out of reach.
+
+A skill shipped in the image is still unwritable, but its *lessons* are not: it
+keeps an overlay at `memory/skills/<skill>/LEARNED.md`, seeded from
+`bootstrap/` like any other file, which its body tells the agent to read. The
+overlay carries no frontmatter and no description, so it is data rather than a
+second skill competing for the router's attention. Reflection appends to it
+under the same append-only bound; ordinary turns rewrite it freely, which is
+what makes it prunable and is where human-stated curation preferences land
+instead of `memory/CLAUDE.md`. Because an image skill's body cannot absorb
+anything, its `consolidate` bead asks for a prune plus a proposed repo change
+for whatever has outgrown the overlay — the only route from a production lesson
+into a shipped skill, and it runs through a human.
+
+Reflection is an ordinary Turn, so it savepoints
 and reverts like any other; a Revert also files a `REJECTED self-edit` bead,
 without which the loop oscillates forever on the same evidence. Every accepted
 change lands in `memory/evolution.md`, written by the application rather than

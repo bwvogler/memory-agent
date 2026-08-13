@@ -140,6 +140,57 @@ def test_smuggling_a_body_edit_under_a_learned_heading_is_refused():
     assert refuse(SKILL, proposed) is not None
 
 
+# --- the overlay for a skill that ships in the image ------------------------
+#
+# An image skill's text is code, so its lessons live beside it in the KB. Same
+# append-only promise, different file, and no frontmatter to argue about.
+
+OVERLAY = """\
+# What curating taught us
+
+kb-curator ships in the image, so its lessons live here.
+
+## Learned
+"""
+
+
+def refuse_overlay(current: str, proposed: str) -> str | None:
+    return evolve.bounded_overlay_edit(current, proposed)
+
+
+def test_appending_to_an_overlay_is_allowed():
+    assert refuse_overlay(OVERLAY, OVERLAY + "\n- 2026-08-13: a thing.\n") is None
+
+
+def test_editing_the_overlay_header_is_refused():
+    """The header explains what the file is and who may write it. It is as
+    load-bearing as a skill body, and just as out of reach."""
+    proposed = OVERLAY.replace("lessons live here", "lessons used to live here")
+    assert "byte-identical" in (refuse_overlay(OVERLAY, proposed) or "")
+
+
+def test_rewriting_an_overlay_entry_is_refused():
+    current = OVERLAY + "\n- 2026-08-13: one thing.\n"
+    proposed = OVERLAY + "\n- 2026-08-13: one thing, revised.\n"
+    assert "append-only" in (refuse_overlay(current, proposed) or "")
+
+
+def test_deleting_an_overlay_entry_is_refused():
+    current = OVERLAY + "\n- a\n- b\n"
+    assert "append-only" in (refuse_overlay(current, OVERLAY + "\n- a\n") or "")
+
+
+def test_an_overlay_may_not_become_a_skill():
+    """A frontmatter block would make it routable, and a routable overlay is a
+    second skill competing with the one it belongs to."""
+    proposed = "---\nname: kb-curator\ndescription: x\n---\n\n" + OVERLAY
+    assert "data file" in (refuse_overlay(OVERLAY, proposed) or "")
+
+
+def test_a_no_op_overlay_write_is_refused():
+    assert "changes nothing" in (refuse_overlay(OVERLAY, OVERLAY) or "")
+
+
 # --- which files are reachable at all --------------------------------------
 
 
@@ -149,19 +200,24 @@ def test_only_kb_skill_files_are_writable(monkeypatch, tmp_path):
     skills.mkdir(parents=True)
 
     assert evolve.mutable_skill_path(str(skills / "SKILL.md")) is not None
+    assert evolve.mutable_skill_path(str(skills / evolve.OVERLAY_FILE)) is not None
     # Reference material next to a skill is not the skill.
     assert evolve.mutable_skill_path(str(skills / "references" / "x.md")) is None
     # The human's schema document.
     assert evolve.mutable_skill_path(str(tmp_path / "AGENT_GUIDE.md")) is None
     # Wiki content is not reflection's business.
     assert evolve.mutable_skill_path(str(tmp_path / "wiki" / "SKILL.md")) is None
+    # ...and neither is a LEARNED.md that happens to be filed somewhere else.
+    assert evolve.mutable_skill_path(str(tmp_path / "wiki" / "LEARNED.md")) is None
 
 
 def test_image_skills_are_out_of_reach(monkeypatch, tmp_path):
     """Skills shipped in the image are code: reviewed and deployed atomically.
-    An edit there would also vanish on the next deploy, silently."""
+    An edit there would also vanish on the next deploy, silently. The overlay
+    is the way in, and it is in the knowledge base, not next to the image."""
     monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
     assert evolve.mutable_skill_path("/srv/skills/kb-curator/SKILL.md") is None
+    assert evolve.mutable_skill_path("/srv/skills/kb-curator/LEARNED.md") is None
 
 
 def test_traversal_out_of_the_skills_dir_is_refused(monkeypatch, tmp_path):
@@ -203,6 +259,35 @@ def test_the_hook_records_what_it_allows(monkeypatch, tmp_path):
     assert change.described is True
     assert change.learned == 1
     assert "rewrote description" in change.summary()
+
+
+def test_the_hook_records_an_overlay_append(monkeypatch, tmp_path):
+    """The skill name comes from the directory, so the log, the merge and the
+    consolidation bead need to know nothing about which shape this was."""
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    path = tmp_path / "skills" / "kb-curator" / evolve.OVERLAY_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text(OVERLAY, encoding="utf-8")
+
+    turn = _Turn()
+    guard = evolve.write_guard_for(turn)
+    proposed = OVERLAY + "\n- 2026-08-13: a thing.\n"
+
+    assert _run(guard, "Write", {"file_path": str(path), "content": proposed}) == {}
+    change = turn.evolved[0]
+    assert change.skill == "kb-curator"
+    assert change.described is False
+    assert change.learned == 1
+
+
+def test_refusing_an_image_write_names_the_overlay(monkeypatch, tmp_path):
+    """A bare denial is what drove the agent into inventing a shell workaround
+    the last time (ADR 0007). The refusal must say where the lesson does go."""
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    guard = evolve.write_guard_for(_Turn())
+    out = _run(guard, "Write", {"file_path": "/srv/skills/kb-curator/SKILL.md",
+                                "content": SKILL})
+    assert evolve.OVERLAY_FILE in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_the_hook_refuses_edit_and_says_what_to_use(monkeypatch, tmp_path):
@@ -390,6 +475,40 @@ def test_a_closed_bead_does_not_suppress_a_new_one(monkeypatch):
     _patch_bd(monkeypatch, fake)
     asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
     assert len(fake.created) == 1
+
+
+def _overlay_change(skill="kb-curator", n=1):
+    return evolve.Change(skill, f"/kb/skills/{skill}/{evolve.OVERLAY_FILE}", False, n)
+
+
+def test_an_overlay_asks_to_be_pruned_not_folded_in(monkeypatch):
+    """There is no body to fold into: the skill ships in the image. The bead
+    has to say so, or a future turn will try and be refused."""
+    fake = _FakeBd()
+    _patch_bd(monkeypatch, fake)
+
+    asyncio.run(evolve.request_consolidation("u", [_overlay_change()]))
+
+    title, priority, body = fake.created[0]
+    assert title == evolve.consolidation_title("kb-curator", overlay=True)
+    assert title != evolve.consolidation_title("kb-curator")
+    assert priority == evolve.FIRST_PRIORITY
+    assert "ships in the image" in body
+    # The escape hatch for a lesson that has outgrown the overlay.
+    assert "skills/kb-curator/SKILL.md" in body
+
+
+def test_the_two_shapes_do_not_share_a_bead(monkeypatch):
+    """Same directory name, genuinely different jobs. One escalating bead each,
+    rather than two rows in the ledger that read identically."""
+    fake = _FakeBd()
+    _patch_bd(monkeypatch, fake)
+
+    asyncio.run(evolve.request_consolidation(
+        "u", [_learned_change("probe"), _overlay_change("probe")]
+    ))
+
+    assert len({title for title, _, _ in fake.created}) == 2
 
 
 def test_an_unreachable_ledger_does_not_break_reflection(monkeypatch):
