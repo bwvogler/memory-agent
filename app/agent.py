@@ -44,6 +44,7 @@ Design notes that matter more than the code:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -53,9 +54,9 @@ from pathlib import Path
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import HookMatcher
 
-from . import guards, kb, signals
+from . import evolve, guards, kb, signals
 from .config import config
-from .turns import Turn, TurnState
+from .turns import Turn, TurnState, registry
 
 log = logging.getLogger(__name__)
 
@@ -381,7 +382,7 @@ def _system_prompt_append(bd_context: str = "") -> str:
 
 
 def _options(
-    user_slug: str, resume: str | None, bd_context: str = ""
+    user_slug: str, resume: str | None, bd_context: str = "", turn: Turn | None = None
 ) -> ClaudeAgentOptions:
     scratch = kb.scratch_dir_for(user_slug)
     config_dir = Path(config.work_dir) / f".claude-{user_slug}"
@@ -416,7 +417,9 @@ def _options(
         # this one, because it is not in its writable cwd. See app/guards.py.
         hooks={
             "PreToolUse": [
-                HookMatcher(matcher="Bash", hooks=[guards.pre_tool_use_guard])
+                HookMatcher(
+                    matcher="Bash", hooks=[guards.kb_write_guard_for(turn)]
+                )
             ],
             # Catches the turn that names future work and then drops it. The
             # instruction below was not enough on its own; see app/guards.py.
@@ -433,6 +436,111 @@ def _options(
             "CLAUDE_CONFIG_DIR": str(config_dir),
         },
     )
+
+
+def _reflection_options(
+    user_slug: str, turn: Turn, bd_context: str
+) -> ClaudeAgentOptions:
+    """Options for a reflection turn: a deliberately narrower surface.
+
+    Differences from an ordinary turn, each of them a safety property rather
+    than a preference:
+
+    * No `resume`. Reflection starts cold every time, so it judges the evidence
+      in the ledger rather than a conversation it half-remembers.
+    * A small `max_turns`. A reflection that starts wandering hits the wall
+      early, and the max_turns signal records that it did.
+    * The evolution guard replaces nothing - it is added *alongside* the KB
+      write guard, so a reflection turn is strictly more constrained than a
+      normal one, never less.
+    * No workspace guide and no accumulated memory in the prompt: neither is
+      evidence about a skill, and both are things reflection must not treat as
+      editable.
+    """
+    scratch = kb.scratch_dir_for(user_slug)
+    config_dir = Path(config.work_dir) / f".claude-{user_slug}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    return ClaudeAgentOptions(
+        model=config.agent_model,
+        cwd=str(scratch),
+        max_turns=evolve.MAX_REFLECTION_TURNS,
+        setting_sources=[],
+        add_dirs=[config.kb_mount, str(SKILLS_DIR)],
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "\n\n".join(
+                p
+                for p in (
+                    f"You have a knowledge base mounted at {config.kb_mount}, "
+                    f"with your skills under {kb.workspace_root()}/skills/.",
+                    "Write files whole and end them with a newline. The store "
+                    "adds a missing trailing newline, so a `Write verification "
+                    "failed ... expected N-1` message is a FALSE ALARM and your "
+                    "write succeeded.",
+                    bd_context,
+                    _BEADS_OVERRIDES if bd_context else "",
+                )
+                if p
+            ),
+        },
+        permission_mode="acceptEdits",
+        allowed_tools=["Bash(bd:*)"],
+        hooks={
+            "PreToolUse": [
+                HookMatcher(matcher="Bash", hooks=[guards.kb_write_guard_for(turn)]),
+                HookMatcher(hooks=[evolve.write_guard_for(turn)]),
+            ]
+            # Deliberately no Stop guard: reflection has no "defer the work"
+            # failure mode, and filing a bead is one of its correct endings.
+        },
+        include_partial_messages=True,
+        env={
+            **os.environ,
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+        },
+    )
+
+
+async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
+    """Let the agent improve one of its own skills, within the evolve.py remit.
+
+    Savepointed like any other turn, so the whole thing is one Revert away -
+    which is the single reason self-modification is defensible here at all.
+    """
+    savepoint = f"reflect-{turn.id}"
+    if await kb.create_savepoint(savepoint):
+        turn.savepoint = savepoint
+    turn.reflection = True
+    turn.prompt = f"[reflection: {trigger}]"
+    turn.append("status", "started")
+
+    bd_context = ""
+    if await kb.ensure_beads(user_slug):
+        bd_context = await kb.bd_prime(user_slug)
+
+    try:
+        async for message in query(
+            prompt=evolve.reflection_prompt(await signals.evidence_summary()),
+            options=_reflection_options(user_slug, turn, bd_context),
+        ):
+            for kind, data in _render(message):
+                turn.append(kind, data)
+            signals.observe_message(turn, message)
+        await evolve.log_changes(turn.evolved, savepoint, trigger)
+        await kb.export_backlog(user_slug)
+        turn.finish(TurnState.DONE)
+        log.info(
+            "reflection %s finished with %d change(s)", turn.id, len(turn.evolved)
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("reflection turn %s failed", turn.id)
+        turn.append("error", str(exc))
+        turn.finish(TurnState.ERROR, error=str(exc))
+    finally:
+        await signals.record_turn(turn, user_slug)
 
 
 async def _image_prompt(text: str, images: list[dict]):
@@ -491,7 +599,7 @@ async def run_turn(
 
     try:
         async for message in query(
-            prompt=prompt_arg, options=_options(user_slug, resume, bd_context)
+            prompt=prompt_arg, options=_options(user_slug, resume, bd_context, turn)
         ):
             for kind, data in _render(message):
                 turn.append(kind, data)
@@ -509,7 +617,42 @@ async def run_turn(
     finally:
         # After finish() on both paths: a turn that failed is precisely the one
         # worth recording, and the client is no longer waiting on us.
-        await signals.record_turn(turn, user_slug)
+        filed = await signals.record_turn(turn, user_slug)
+
+    if filed:
+        await maybe_reflect(user_slug, trigger=f"signal {', '.join(filed)}")
+
+
+# One reflection at a time, process-wide. Two concurrent reflections would race
+# on the same skill file, and each would savepoint over the other's work.
+_reflecting = asyncio.Lock()
+
+
+async def maybe_reflect(user_slug: str, trigger: str) -> str | None:
+    """Start a reflection turn if it is safe to, otherwise skip it quietly.
+
+    Skipping is the common case and is not a failure: the signal that would
+    have triggered this is in the ledger either way, and the next signal - or a
+    manual POST /api/reflect - will pick it up. Never blocks the caller.
+    """
+    if _reflecting.locked():
+        log.info("reflection already running; not starting another (%s)", trigger)
+        return None
+    if registry.any_running():
+        # The 2GB suspend ceiling is real and a second agent is not free. The
+        # user's turn wins; reflection is never urgent.
+        log.info("a turn is running; skipping reflection (%s)", trigger)
+        return None
+
+    turn = registry.create(user_email=f"reflection@{user_slug}")
+    turn.reflection = True
+
+    async def _run() -> None:
+        async with _reflecting:
+            await run_reflection(turn, user_slug, trigger)
+
+    asyncio.create_task(_run())
+    return turn.id
 
 
 def _extract_session_id(message: object) -> str | None:

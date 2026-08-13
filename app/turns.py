@@ -59,6 +59,16 @@ class Turn:
     terminal_reason: str | None = None
     permission_denials: list[str] = field(default_factory=list)
 
+    # Self-evolution (app/evolve.py). `evolved` holds the bounded skill edits
+    # this turn was allowed to make - empty for every ordinary turn, and the
+    # thing a later Revert consults to mark a proposal rejected.
+    reflection: bool = False
+    evolved: list = field(default_factory=list)
+    # Tools OUR OWN hooks refused, as opposed to ones the permission system
+    # refused. Without the distinction a guard doing its job files a P1 bead
+    # reporting itself as a deployment defect.
+    guard_denials: list[str] = field(default_factory=list)
+
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
 
     def append(self, kind: str, data: str) -> Event:
@@ -105,6 +115,8 @@ class Turn:
             "savepoint": self.savepoint,
             "event_count": len(self.events),
             "skills": sorted(self.skills),
+            "reflection": self.reflection,
+            "evolved": [c.summary() for c in self.evolved],
         }
 
 

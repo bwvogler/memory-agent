@@ -85,9 +85,14 @@ def test_bd_commands_are_untouched():
 # --- the hook wrapper ------------------------------------------------------
 
 
-def _run(tool_name: str, command: str) -> dict:
+class _Turn:
+    def __init__(self):
+        self.guard_denials = []
+
+
+def _run(tool_name: str, command: str, turn=None) -> dict:
     return asyncio.run(
-        guards.pre_tool_use_guard(
+        guards.kb_write_guard_for(turn)(
             {"tool_name": tool_name, "tool_input": {"command": command}},
             "tu_1",
             None,
@@ -113,10 +118,23 @@ def test_the_hook_allows_anything_it_does_not_recognise():
 
 def test_a_malformed_payload_does_not_break_the_turn():
     """A guard that throws would take down every turn it was meant to protect."""
-    assert asyncio.run(guards.pre_tool_use_guard({}, None, None)) == {}
-    assert asyncio.run(
-        guards.pre_tool_use_guard({"tool_name": "Bash"}, None, None)
-    ) == {}
+    guard = guards.kb_write_guard_for(None)
+    assert asyncio.run(guard({}, None, None)) == {}
+    assert asyncio.run(guard({"tool_name": "Bash"}, None, None)) == {}
+
+
+def test_a_refusal_is_recorded_as_ours_not_as_a_deployment_defect():
+    """The SDK reports a hook denial through the same channel as a missing
+    allowed_tools entry, and signals.py files a P1 bead for the latter. Without
+    this the guard doing its job reports itself as a bug - into the ledger a
+    reflection turn then reads."""
+    turn = _Turn()
+    _run("Bash", f"echo x >> {KB}/memory/CLAUDE.md", turn)
+    assert turn.guard_denials == ["Bash"]
+
+    quiet = _Turn()
+    _run("Bash", "ls -la", quiet)
+    assert quiet.guard_denials == []
 
 
 # --- the deferred-work guard ----------------------------------------------

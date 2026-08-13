@@ -215,7 +215,26 @@ async def revert_turn(turn_id: str, identity: Identity = Depends(current_identit
     # was wrong" about one exact turn. Recorded, not acted on - see
     # app/signals.py and bead kb-3sv.
     bead_id = await signals.on_revert(turn, identity.slug, diff_stat)
+    # If this was a reflection turn, the revert is also a rejection of the
+    # self-edit it made. Recorded so the loop cannot re-propose it forever.
+    await signals.note_rejected_proposals(turn, identity.slug)
     return {"reverted_to": turn.savepoint, "signal_bead": bead_id}
+
+
+@app.post("/api/reflect")
+async def reflect(identity: Identity = Depends(current_identity)):
+    """Run a reflection turn now, instead of waiting for a signal to trigger one.
+
+    This exists because signal-gated reflection alone is untestable at this
+    scale. When Stage 3 was built the ledger held 6 turns and zero reverts, so
+    a loop that only fires on a signal would have been dead code shipped
+    unexercised - the worst way to deploy self-modification. See ADR 0008.
+    """
+    if registry.any_running():
+        raise HTTPException(409, "a turn is already running; try again when idle")
+    turn = registry.create(user_email=identity.email)
+    asyncio.create_task(agent.run_reflection(turn, identity.slug, trigger="manual"))
+    return JSONResponse({"turn_id": turn.id}, status_code=202)
 
 
 @app.get("/api/sessions")

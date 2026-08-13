@@ -15,6 +15,8 @@ the TigerFS workspace.
 - `app/guards.py` — SDK hooks enforcing two rules the prompt could not: no
   shell command may corrupt a KB file, and no turn may defer work without
   filing it
+- `app/evolve.py` — bounded self-evolution: what a reflection turn may change
+  about its own skills, enforced as a hook, plus the evolution log
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint); editable in the KB
@@ -95,6 +97,25 @@ Two rules the code depends on: signal beads are `deferred` so evidence never
 reaches `bd ready`, and *every* turn is recorded, not just failing ones —
 `kb-curator` loads on every turn, so without the denominator it appears in
 every revert by construction. See the amendment in `docs/decisions/0006`.
+
+**The agent rewrites its own skills, within a remit it cannot exceed.** A
+reflection turn may rewrite one skill's `description` and append under a
+`## Learned` heading. That is the entire vocabulary of self-modification, and
+`app/evolve.py` enforces it by comparing the file on disk against the content
+about to be written — image skills, `AGENT_GUIDE.md`, new skills and `Edit`
+itself are all out of reach. Reflection is an ordinary Turn, so it savepoints
+and reverts like any other; a Revert also files a `REJECTED self-edit` bead,
+without which the loop oscillates forever on the same evidence. Every accepted
+change lands in `memory/evolution.md`, written by the application rather than
+the agent, because the failure mode to design against is not a bad edit but an
+unnoticed one.
+
+It fires on a Stage-2 signal, and can be triggered directly with
+`POST /api/reflect`. The manual path is not a convenience: bead `kb-3sv` gated
+Stage 3 on real signal data, the ledger held 6 turns and 0 reverts, and the
+user chose to proceed anyway — so a signal-only trigger would have shipped
+unexercised self-modification. See `docs/decisions/0008`, which records the
+override honestly.
 
 **Memory.** `memory/CLAUDE.md` is short-lived accumulated notes — high-signal
 facts the agent wrote down to survive across conversations. The agent prunes it

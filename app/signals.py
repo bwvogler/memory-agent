@@ -208,12 +208,16 @@ async def _file_signal(
     )
 
 
-async def record_turn(turn: Turn, user_slug: str) -> None:
+async def record_turn(turn: Turn, user_slug: str) -> list[str]:
     """Persist the turn's skill use and file beads for cheap failure signals.
 
     Called once, after the turn finishes, for every turn - including failed
     ones, which is the point.
+
+    Returns the ids of any beads filed, which is how the caller knows whether
+    this turn produced a signal worth reflecting on.
     """
+    filed: list[str] = []
     try:
         outcome = _outcome(turn)
         if _store:
@@ -223,7 +227,7 @@ async def record_turn(turn: Turn, user_slug: str) -> None:
             )
 
         if outcome == OUTCOME_ERROR:
-            await _file_signal(
+            filed.append(await _file_signal(
                 user_slug,
                 f"Turn failed: {_error_key(turn)}",
                 f"A turn ended in error rather than completing.\n\n"
@@ -234,10 +238,10 @@ async def record_turn(turn: Turn, user_slug: str) -> None:
                 "or model failures, not bad guidance.",
                 priority=3,
                 labels=("error",),
-            )
+            ))
 
         elif outcome == OUTCOME_MAX_TURNS:
-            await _file_signal(
+            filed.append(await _file_signal(
                 user_slug,
                 "Turn exhausted max_turns without finishing",
                 f"The agent used its entire turn budget and stopped without "
@@ -247,10 +251,14 @@ async def record_turn(turn: Turn, user_slug: str) -> None:
                 f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}",
                 priority=3,
                 labels=("max-turns",),
-            )
+            ))
 
-        for tool in sorted(set(turn.permission_denials)):
-            await _file_signal(
+        # Denials our own hooks made are the guards working, not a defect.
+        # Filing them would put P1 'check allowed_tools' beads into the very
+        # ledger reflection reads, every time a guard did its job.
+        unexpected = set(turn.permission_denials) - set(turn.guard_denials)
+        for tool in sorted(unexpected):
+            filed.append(await _file_signal(
                 user_slug,
                 f"Agent was denied permission to use: {tool}",
                 f"The agent tried to use `{tool}` and was refused, in a "
@@ -263,9 +271,46 @@ async def record_turn(turn: Turn, user_slug: str) -> None:
                 f"Skills that turn used: {_skill_list(turn)}",
                 priority=1,
                 labels=("permission",),
-            )
+            ))
     except Exception:  # noqa: BLE001 - recording must never break a turn
         log.exception("failed to record signals for turn %s", turn.id)
+    return [b for b in filed if b]
+
+
+async def note_rejected_proposals(turn: Turn, user_slug: str) -> None:
+    """Immune memory: a self-edit the human reverted must not be re-proposed.
+
+    Without this the loop oscillates. Reflection reads the same evidence next
+    time, reaches the same conclusion, makes the same edit, and is reverted
+    again - forever, and each cycle looks locally reasonable.
+
+    The record goes on the signal beads themselves rather than into a separate
+    store, because that is what a reflection turn already reads.
+    """
+    if not turn.evolved:
+        return
+    summary = "; ".join(c.summary() for c in turn.evolved)
+    # Labelled `signal` as well as `evolution-rejected` so it arrives in the
+    # same `bd list --label signal` that reflection already reads. A rejection
+    # nobody looks at is not immune memory, it is just a record.
+    await _file_signal(
+        user_slug,
+        f"REJECTED self-edit: {_clip(summary, 60)}",
+        "A reflection turn made this change to its own skills and a human "
+        "reverted it:\n\n"
+        f"    {summary}\n\n"
+        f"Reflection turn: {turn.id}\nSavepoint: {turn.savepoint}\n\n"
+        "Do not make this change again. If the evidence that prompted it still "
+        "looks actionable, propose something materially different, or conclude "
+        "that no skill change is warranted - which is a correct outcome.\n\n"
+        "Without this record the loop oscillates: reflection reads the same "
+        "evidence, reaches the same conclusion, is reverted again, forever, "
+        "and every cycle looks locally reasonable.",
+        priority=1,
+        labels=("evolution-rejected",),
+        dedupe=False,
+    )
+    log.info("recorded %d rejected self-edit(s) from turn %s", len(turn.evolved), turn.id)
 
 
 async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> Optional[str]:
@@ -312,3 +357,34 @@ def _error_key(turn: Turn) -> str:
     """A stable-ish title fragment, so repeats of one error dedupe."""
     text = (turn.error or "unknown").strip().splitlines()[0]
     return _clip(text, 80)
+
+
+async def evidence_summary() -> str:
+    """Outcome rates, as text a reflection prompt can carry.
+
+    Injected rather than fetched: a reflection turn holds `Bash(bd:*)` and
+    nothing else, so it cannot call `GET /api/signals` however clearly it is
+    told to. An instruction the agent has no tool to follow does not merely
+    fail, it burns turns being retried.
+    """
+    if not _store:
+        return ""
+    try:
+        totals = await _store.turn_totals()
+        rows = await _store.skill_signal_summary()
+    except Exception:  # noqa: BLE001
+        log.exception("could not summarise signal evidence")
+        return ""
+
+    lines = [
+        f"Turns recorded: {totals.get('turns', 0)} "
+        f"(reverted {totals.get('reverted', 0)}, "
+        f"errored {totals.get('errored', 0)}, "
+        f"max_turns {totals.get('max_turns', 0)})"
+    ]
+    for row in rows:
+        lines.append(
+            f"  {row.get('skill')}: used on {row.get('turns')} turn(s), "
+            f"reverted {row.get('reverted')}, errored {row.get('errored')}"
+        )
+    return "\n".join(lines)

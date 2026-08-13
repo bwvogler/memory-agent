@@ -110,10 +110,28 @@ def unsafe_kb_write(command: str) -> Optional[str]:
     return None
 
 
-async def pre_tool_use_guard(
-    input_data: dict[str, Any],
-    tool_use_id: Optional[str],
-    context: Any,
+def kb_write_guard_for(turn: Any = None) -> Any:
+    """Build the hook, optionally recording refusals on the turn.
+
+    The turn matters because the SDK reports a hook denial through the same
+    `permission_denials` channel as a missing `allowed_tools` entry. Signals
+    files P1 beads for the latter - "check allowed_tools in _options" - so
+    without this a guard doing exactly its job reports itself as a deployment
+    defect, into the ledger reflection reads.
+    """
+
+    async def guard(
+        input_data: dict[str, Any],
+        tool_use_id: Optional[str],
+        context: Any,
+    ) -> dict[str, Any]:
+        return await _pre_tool_use(input_data, turn)
+
+    return guard
+
+
+async def _pre_tool_use(
+    input_data: dict[str, Any], turn: Any = None
 ) -> dict[str, Any]:
     """Deny shell commands that would corrupt knowledge-base files.
 
@@ -129,6 +147,8 @@ async def pre_tool_use_guard(
         if not reason:
             return {}
 
+        if turn is not None:
+            turn.guard_denials.append("Bash")
         log.warning(
             "blocked a knowledge-base write that would have corrupted a file "
             "(%s): %s",
