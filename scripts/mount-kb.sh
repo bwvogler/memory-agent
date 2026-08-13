@@ -19,6 +19,17 @@ ENV_FILE="$REPO_ROOT/.env"
 log() { printf '%s mount-kb: %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
+# True only if the mount answers a real readdir. A single path lookup is not
+# enough: tigerfs resolves individual names before the filesystem can be
+# enumerated, so probing one file reports "live" on a mount that still lists
+# empty. Requiring .build in the listing also covers a stale mountpoint whose
+# tigerfs process has died, where readdir succeeds against the bare directory.
+kb_readable() {
+  local entries
+  entries="$(ls -a "$1" 2>/dev/null)" || return 1
+  grep -qx '\.build' <<<"$entries"
+}
+
 if [[ "${1:-}" == "--kill" ]]; then
   [[ -f "$ENV_FILE" ]] && { set -a; source "$ENV_FILE"; set +a; }
   KB_MOUNT="${KB_MOUNT:-$REPO_ROOT/mnt/kb}"
@@ -53,8 +64,12 @@ if [[ "$(uname)" == "Linux" && ! -e /dev/fuse ]]; then
 fi
 
 if mount | grep -q " on $KB_MOUNT "; then
-  log "$KB_MOUNT is already mounted — nothing to do"
-  exit 0
+  if kb_readable "$KB_MOUNT"; then
+    log "$KB_MOUNT is already mounted and readable — nothing to do"
+    exit 0
+  fi
+  die "$KB_MOUNT is in the mount table but cannot be read — the mount is stale.
+  Run 'bash scripts/mount-kb.sh --kill' and then mount again."
 fi
 
 if [[ ! -d "$KB_MOUNT" ]]; then
@@ -68,7 +83,7 @@ tigerfs mount "$KB_DATABASE_URL" "$KB_MOUNT" &
 MOUNT_PID=$!
 
 for i in $(seq 1 30); do
-  if [[ -e "$KB_MOUNT/.info" ]]; then
+  if kb_readable "$KB_MOUNT"; then
     log "mount is live after ${i}s"
     break
   fi
@@ -78,7 +93,7 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-[[ -e "$KB_MOUNT/.info" ]] || die "mount never became live after 30s"
+kb_readable "$KB_MOUNT" || die "mount never became readable after 30s"
 
 # Initialise the memory workspace if this is a fresh database.
 if [[ ! -d "$KB_MOUNT/memory" ]]; then
