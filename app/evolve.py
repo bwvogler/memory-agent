@@ -217,7 +217,9 @@ def bounded_skill_edit(current: str, proposed: str) -> str | None:
             f"(was {[k for k, _ in cur_fields]}, proposed "
             f"{[k for k, _ in new_fields]})"
         )
-    for (key, before), (_, after) in zip(cur_fields, new_fields):
+    # Lengths were compared above; strict makes that a hard failure
+    # rather than a silent truncation if the check ever moves.
+    for (key, before), (_, after) in zip(cur_fields, new_fields, strict=True):
         if key == MUTABLE_FIELD or before == after:
             continue
         return f"`{key}:` may not be changed; only `{MUTABLE_FIELD}:` is mutable"
@@ -333,8 +335,8 @@ def write_guard_for(turn: Any) -> Any:
 
     async def guard(
         input_data: dict[str, Any],
-        tool_use_id: str | None,
-        context: Any,
+        _tool_use_id: str | None,
+        _context: Any,
     ) -> dict[str, Any]:
         try:
             tool = input_data.get("tool_name") or ""
@@ -564,7 +566,7 @@ FIRST_PRIORITY = 3
 MOST_URGENT = 1
 
 
-def consolidation_title(skill: str, overlay: bool = False) -> str:
+def consolidation_title(skill: str, *, overlay: bool = False) -> str:
     """The bead title for a skill's pruning job.
 
     The two forms are deliberately different strings. They are different jobs -
@@ -660,7 +662,7 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
 
         for change in learned:
             overlay = change.path.endswith(OVERLAY_FILE)
-            title = consolidation_title(change.skill, overlay)
+            title = consolidation_title(change.skill, overlay=overlay)
             entries = (
                 f"{change.learned} new entr{'y' if change.learned == 1 else 'ies'}"
             )

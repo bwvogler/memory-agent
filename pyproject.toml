@@ -35,6 +35,12 @@ ignore = [
     # long because they are sequential narratives, and splitting them to satisfy
     # a counter would scatter logic that belongs together.
     "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+    # The fail-open guards (app/guards.py, app/evolve.py) wrap a whole body -
+    # several early returns included - in one deliberate catch-all, because a
+    # guard that raised would take down the turn it was protecting. TRY300 sees
+    # only the last of those returns, so honouring it would move one return into
+    # an `else` and leave three siblings behind. See docs/decisions/0007.
+    "TRY300",
 ]
 
 [tool.ruff.lint.flake8-bugbear]

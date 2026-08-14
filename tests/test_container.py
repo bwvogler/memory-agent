@@ -12,6 +12,8 @@ Nothing here needs an API key: no model calls are made.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -270,8 +272,6 @@ def test_ready_work_excludes_blocked_beads(beads):
     blocked = bd(
         "create", "--title=smoke blocked", "--type=task", "--priority=2", "--json"
     ).stdout
-    import json
-
     blocker_id = json.loads(blocker)["id"]
     blocked_id = json.loads(blocked)["id"]
 

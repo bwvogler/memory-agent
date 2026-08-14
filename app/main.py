@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,13 +23,16 @@ from .config import config
 from .session_store import PostgresSessionStore
 from .turns import TurnState, registry, spawn
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
 log = logging.getLogger("memory-agent")
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 HEARTBEAT_SECONDS = 15  # Cloudflare's 524 is a time-to-next-byte timeout (~125s).
 
@@ -58,7 +61,6 @@ async def _start_session_store() -> PostgresSessionStore | None:
     for attempt in range(1, SESSION_STORE_ATTEMPTS + 1):
         try:
             await candidate.start()
-            return candidate
         except Exception:
             if attempt == SESSION_STORE_ATTEMPTS:
                 log.exception(
@@ -75,6 +77,8 @@ async def _start_session_store() -> PostgresSessionStore | None:
                 SESSION_STORE_BACKOFF_S,
             )
             await asyncio.sleep(SESSION_STORE_BACKOFF_S)
+        else:
+            return candidate
     return None
 
 
@@ -225,7 +229,11 @@ async def stream_turn(
 
             for event in turn.since(cursor):
                 cursor = event.seq
-                yield f"id: {event.seq}\nevent: {event.kind}\ndata: {_sse_escape(event.data)}\n\n"
+                yield (
+                    f"id: {event.seq}\n"
+                    f"event: {event.kind}\n"
+                    f"data: {_sse_escape(event.data)}\n\n"
+                )
 
             if turn.finished and cursor >= len(turn.events):
                 terminal = "done" if turn.state is TurnState.DONE else "failed"
@@ -353,13 +361,13 @@ def _sse_escape(text: str) -> str:
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/kb", dependencies=AUTHENTICATED)
 @app.get("/kb/{path:path}", dependencies=AUTHENTICATED)
 async def kb_ui() -> FileResponse:
-    return FileResponse(os.path.join(STATIC_DIR, "kb.html"))
+    return FileResponse(STATIC_DIR / "kb.html")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

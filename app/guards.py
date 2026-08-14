@@ -45,13 +45,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
-
-from claude_agent_sdk.types import SyncHookJSONOutput
+from typing import TYPE_CHECKING, Any
 
 from .config import config
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from claude_agent_sdk.types import SyncHookJSONOutput
 
 log = logging.getLogger(__name__)
 
@@ -133,8 +135,8 @@ def kb_write_guard_for(turn: Any = None) -> Any:
 
     async def guard(
         input_data: Mapping[str, Any],
-        tool_use_id: str | None,
-        context: Any,
+        _tool_use_id: str | None,
+        _context: Any,
     ) -> SyncHookJSONOutput:
         return await _pre_tool_use(input_data, turn)
 
@@ -232,8 +234,8 @@ _FILE_IT = (
 
 def _transcript_rows(path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if not line:
             continue
         try:
@@ -258,9 +260,8 @@ def _this_turn(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if message.get("role") != "user":
             continue
         content = message.get("content")
-        if (
-            isinstance(content, str)
-            or isinstance(content, list)
+        if isinstance(content, str) or (
+            isinstance(content, list)
             and any(
                 block.get("type") == "text"
                 for block in content
@@ -299,8 +300,8 @@ def unfiled_deferral(rows: list[dict[str, Any]]) -> str | None:
 # to dict[str, Any] because dict permits destructive operations. We only read.
 async def stop_guard(
     input_data: Mapping[str, Any],
-    tool_use_id: str | None,
-    context: Any,
+    _tool_use_id: str | None,
+    _context: Any,
 ) -> SyncHookJSONOutput:
     """Block a turn that named future work and did not file it.
 

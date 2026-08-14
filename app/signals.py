@@ -50,6 +50,10 @@ SIGNAL_LABEL = "signal"
 MAX_PROMPT_CHARS = 600
 MAX_DIFF_CHARS = 1500
 
+# A skill path is <skill-dir>/SKILL.md, so the name is the second-to-last
+# part and there have to be at least that many.
+_SKILL_PATH_PARTS = 2
+
 # Outcomes recorded per turn. "reverted" is set later, by the revert handler.
 OUTCOME_OK = "ok"
 OUTCOME_ERROR = "error"
@@ -105,7 +109,7 @@ def _skill_from_path(value: str) -> str | None:
     if not value.endswith(SKILL_FILE):
         return None
     parts = PurePosixPath(value).parts
-    return parts[-2] if len(parts) >= 2 else None
+    return parts[-2] if len(parts) >= _SKILL_PATH_PARTS else None
 
 
 def skills_from_tool_use(name: str, tool_input: dict) -> set[str]:
@@ -205,6 +209,7 @@ async def _file_signal(
     body: str,
     priority: int,
     labels: tuple[str, ...],
+    *,
     dedupe: bool = True,
 ) -> str | None:
     if dedupe and await _already_open(user_slug, title):
@@ -296,8 +301,8 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
         # Filing them would put P1 'check allowed_tools' beads into the very
         # ledger reflection reads, every time a guard did its job.
         unexpected = set(turn.permission_denials) - set(turn.guard_denials)
-        for tool in sorted(unexpected):
-            filed.append(
+        filed.extend(
+            [
                 await _file_signal(
                     user_slug,
                     f"Agent was denied permission to use: {tool}",
@@ -312,7 +317,9 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     priority=1,
                     labels=("permission",),
                 )
-            )
+                for tool in sorted(unexpected)
+            ]
+        )
     except Exception:  # recording must never break a turn
         log.exception("failed to record signals for turn %s", turn.id)
     return [b for b in filed if b]
@@ -425,9 +432,9 @@ async def evidence_summary() -> str:
         f"errored {totals.get('errored', 0)}, "
         f"max_turns {totals.get('max_turns', 0)})"
     ]
-    for row in rows:
-        lines.append(
-            f"  {row.get('skill')}: used on {row.get('turns')} turn(s), "
-            f"reverted {row.get('reverted')}, errored {row.get('errored')}"
-        )
+    lines.extend(
+        f"  {row.get('skill')}: used on {row.get('turns')} turn(s), "
+        f"reverted {row.get('reverted')}, errored {row.get('errored')}"
+        for row in rows
+    )
     return "\n".join(lines)

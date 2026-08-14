@@ -365,7 +365,8 @@ def _system_prompt_append(bd_context: str = "") -> str:
         f"You have a knowledge base mounted at {config.kb_mount}.",
         f"Your writeable knowledge-base workspace is `{kb.workspace_root()}`. "
         "Always use full absolute paths when creating or editing KB files — "
-        "your working directory is scratch space and is not part of the knowledge base.",
+        "your working directory is scratch space and is not part of the "
+        "knowledge base.",
         "The KB is a TigerFS filesystem backed by PostgreSQL: ordinary file tools "
         "work on it, every write is versioned, and the control directories "
         f"{config.kb_mount}/.history/, .log/, .savepoint/ and .undo/ let you "
@@ -558,18 +559,17 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
 
 async def _image_prompt(text: str, images: list[dict]):
     """Async generator yielding a single user message with image content blocks."""
-    content: list[dict] = []
-    for img in images:
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img["media_type"],
-                    "data": img["data"],
-                },
-            }
-        )
+    content: list[dict] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img["media_type"],
+                "data": img["data"],
+            },
+        }
+        for img in images
+    ]
     if text:
         content.append({"type": "text", "text": text})
     yield {

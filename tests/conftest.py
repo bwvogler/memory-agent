@@ -16,7 +16,9 @@ import subprocess
 import time
 from pathlib import Path
 
+import httpx
 import pytest
+from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -121,8 +123,6 @@ def stack(request):
     # shadow the developer's real key. Load .env first, and only fall back to
     # a placeholder when no live turn is going to be made.
     if os.environ.get("ANTHROPIC_API_KEY") is None:
-        from dotenv import load_dotenv
-
         load_dotenv(REPO_ROOT / ".env")
 
     if os.environ.get("ANTHROPIC_API_KEY") is None:
@@ -166,8 +166,6 @@ def _wait_for_health(timeout_s: int = 180) -> None:
     like unrelated flakes. Gating on `transcripts` here turns that into one
     failure, at startup, naming the subsystem.
     """
-    import httpx
-
     deadline = time.time() + timeout_s
     last = ""
     while time.time() < deadline:

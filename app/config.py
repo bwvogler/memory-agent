@@ -9,7 +9,7 @@ def _csv(name: str) -> list[str]:
     return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
 
-def _bool(name: str, default: bool = False) -> bool:
+def _bool(name: str, *, default: bool = False) -> bool:
     return os.environ.get(name, "1" if default else "0").lower() in ("1", "true", "yes")
 
 
@@ -57,7 +57,8 @@ class Config:
             # Loud, because shipping this to production would expose the agent
             # to anyone who can reach the origin.
             problems.append(
-                "DEV_BYPASS_AUTH=1 — authentication is DISABLED. Never set this in production."
+                "DEV_BYPASS_AUTH=1 — authentication is DISABLED. "
+                "Never set this in production."
             )
         else:
             if not self.cf_team_domain:

@@ -25,9 +25,11 @@ from __future__ import annotations
 import asyncio
 import enum
 import uuid
-from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 # The event loop keeps only a WEAK reference to a running task. A turn detached
 # with a bare asyncio.create_task() and no other reference can therefore be
@@ -46,7 +48,7 @@ def spawn(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio
     return task
 
 
-class TurnState(str, enum.Enum):
+class TurnState(enum.StrEnum):
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
@@ -105,7 +107,10 @@ class Turn:
             waiter.set()
         self._waiters.clear()
 
-    async def wait_for_change(self, timeout: float) -> None:
+    # ASYNC109 wants the caller to own the timeout via asyncio.timeout. Here
+    # the timeout IS the feature - it is the SSE heartbeat interval, and the
+    # method returning on it is how a keepalive frame gets sent.
+    async def wait_for_change(self, timeout: float) -> None:  # noqa: ASYNC109
         """Block until a new event arrives, the turn ends, or timeout."""
         waiter = asyncio.Event()
         self._waiters.append(waiter)
