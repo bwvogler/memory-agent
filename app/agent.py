@@ -64,7 +64,7 @@ from claude_agent_sdk.types import (
 
 from . import evolve, guards, kb, signals
 from .config import config
-from .turns import Turn, TurnState, registry
+from .turns import Turn, TurnState, registry, spawn
 
 log = logging.getLogger(__name__)
 
@@ -666,7 +666,7 @@ async def maybe_reflect(user_slug: str, trigger: str) -> str | None:
         async with _reflecting:
             await run_reflection(turn, user_slug, trigger)
 
-    asyncio.create_task(_run())
+    spawn(_run(), name=f"reflection-{turn.id}")
     return turn.id
 
 

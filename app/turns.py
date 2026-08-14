@@ -25,7 +25,25 @@ from __future__ import annotations
 import asyncio
 import enum
 import uuid
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
+from typing import Any
+
+# The event loop keeps only a WEAK reference to a running task. A turn detached
+# with a bare asyncio.create_task() and no other reference can therefore be
+# garbage-collected mid-flight: the turn stops, no exception surfaces, and the
+# SSE stream simply never reaches a terminal event. That is precisely the silent
+# failure this codebase keeps having to design against, so every detached task
+# goes through spawn() and is held until it finishes.
+_background: set[asyncio.Task] = set()
+
+
+def spawn(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task:
+    """Run a coroutine detached from its caller, keeping it alive until done."""
+    task = asyncio.create_task(coro, name=name)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
 
 
 class TurnState(str, enum.Enum):

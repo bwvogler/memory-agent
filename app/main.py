@@ -21,7 +21,7 @@ from . import agent, kb, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
-from .turns import TurnState, registry
+from .turns import TurnState, registry, spawn
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -172,14 +172,15 @@ async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
     resume = body.get("session_id") or None
 
     turn = registry.create(user_email=identity.email, session_id=resume)
-    asyncio.create_task(
+    spawn(
         agent.run_turn(
             turn,
             prompt=prompt,
             user_slug=identity.slug,
             resume=resume,
             images=images or None,
-        )
+        ),
+        name=f"turn-{turn.id}",
     )
     return JSONResponse({"turn_id": turn.id}, status_code=202)
 
@@ -293,7 +294,10 @@ async def reflect(identity: CurrentUser) -> JSONResponse:
     if registry.any_running():
         raise HTTPException(409, "a turn is already running; try again when idle")
     turn = registry.create(user_email=identity.email)
-    asyncio.create_task(agent.run_reflection(turn, identity.slug, trigger="manual"))
+    spawn(
+        agent.run_reflection(turn, identity.slug, trigger="manual"),
+        name=f"reflection-{turn.id}",
+    )
     return JSONResponse({"turn_id": turn.id}, status_code=202)
 
 
