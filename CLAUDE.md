@@ -57,6 +57,15 @@ belong on FUSE. Skills file discovered work as beads instead of reporting it
 into chat, and `memory/backlog.md` is regenerated from the graph after every
 turn as a human-readable projection.
 
+**One machine, and the reason is the volume.** The ledger, `kb.git` and
+per-user scratch all live on `/work`, which attaches to exactly one machine,
+while the KB is shared through Postgres. A second machine would diverge on all
+three — most dangerously on savepoints, where a revert routed to the wrong
+machine finds nothing to roll back for writes that are plainly there. The
+ceiling that matters is not hardware anyway: savepoints are a global
+`git add -A` over one workspace, so concurrent turns already interfere. See
+`docs/decisions/0009`.
+
 Agent instructions for `bd` come from `bd prime`, injected into the appended
 system prompt at turn start. bd would normally install a `SessionStart` hook to
 do this, but `setting_sources=[]` means it can never fire, so `run_turn` does it
