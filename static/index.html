@@ -102,6 +102,10 @@
   }
   .revert:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
   .revert:disabled { opacity: .5; cursor: default; }
+  /* Present for the whole turn, so it has to be quiet: dots plus an elapsed
+     clock, which is what separates "slow" from "hung" without guessing. */
+  .working { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .working .elapsed { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .thinking { display: flex; gap: 5px; align-items: center; padding: 2px 0; }
   .thinking span {
     width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
@@ -434,19 +438,36 @@ form.addEventListener('submit', async (e) => {
 function stream(turnId) {
   const msg = addMessage('agent', '');
 
-  // Pulsing indicator while the agent is working.
-  const thinking = el('div', 'thinking');
-  for (let i = 0; i < 3; i++) thinking.appendChild(el('span'));
-  msg.body.appendChild(thinking);
+  // Pulsing indicator, with the elapsed time beside it. It stays for the WHOLE
+  // turn and is removed only by finish().
+  //
+  // It used to be removed on the first token instead, which read as "finished"
+  // for the rest of the turn: after one sentence like "Reading the CSV now."
+  // there could be minutes of real work — a long tool call, a subagent, a long
+  // stretch of thinking — with nothing on screen moving. The only remaining hint
+  // that the turn was alive was the Revert button not being there yet, which is
+  // not a signal anyone reads. The elapsed clock is the other half: it
+  // distinguishes "slow" from "hung" without anyone having to guess.
+  const working = el('div', 'working');
+  const dots = el('div', 'thinking');
+  for (let i = 0; i < 3; i++) dots.appendChild(el('span'));
+  working.appendChild(dots);
+  const elapsed = el('span', 'elapsed', '');
+  working.appendChild(elapsed);
+  msg.wrap.appendChild(working);
+
+  const startedAt = Date.now();
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    elapsed.textContent = s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }, 1000);
 
   const es = new EventSource('/api/turns/' + turnId + '/events');
-  let hasText = false;
   let hasTextDelta = false; // true once the CLI streams at least one token
   let currentPara = null;   // the <p> currently receiving streamed tokens
   let newParaNext = true;   // start a fresh <p> on the next text chunk
 
   function appendText(raw) {
-    if (!hasText) { hasText = true; thinking.remove(); }
     if (newParaNext) {
       currentPara = el('p', '');
       msg.body.appendChild(currentPara);
@@ -459,10 +480,11 @@ function stream(turnId) {
   // Structured events carry a JSON payload; text ones stay raw strings.
   const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
 
-  // Insert into the main message, before the Revert button if it exists yet.
+  // Insert into the main message, keeping the working indicator last so it
+  // always sits below the newest thing that happened rather than above it.
   function insert(node, into) {
     if (into) { into.appendChild(node); }
-    else { msg.wrap.insertBefore(node, msg.wrap.querySelector('.revert') || null); }
+    else { msg.wrap.insertBefore(node, working); }
     scroll();
   }
 
@@ -662,8 +684,14 @@ function stream(turnId) {
   es.addEventListener('session', (e) => { sessionId = e.data; });
   es.addEventListener('status', () => {});
 
+  let finished = false;
   const finish = (failed, detail) => {
-    thinking.remove();   // no-op if already gone
+    // Idempotent: `done` and a subsequent onerror can both arrive, and a second
+    // pass would append a second Revert button to the same turn.
+    if (finished) return;
+    finished = true;
+    clearInterval(tick);
+    working.remove();
     es.close();
     send.disabled = false;
     send.textContent = 'Send';
