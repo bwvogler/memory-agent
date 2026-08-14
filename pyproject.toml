@@ -1,0 +1,63 @@
+# Tool configuration only. There is deliberately no [project] table: this repo
+# is not an installable package. The Dockerfile pip-installs requirements.txt
+# into the system interpreter and copies `app/` to /srv/app; adding packaging
+# metadata here would imply a distribution that nothing builds or consumes.
+#
+# Test configuration stays in pytest.ini, where its comments explain the three
+# opt-in tiers.
+
+[tool.ruff]
+# Match the Dockerfile's python:3.12-slim, not whatever interpreter happens to
+# be on the developer's PATH. Local .venv and mise pins have drifted to 3.13/3.14;
+# the version that matters is the one the code actually runs on in production.
+target-version = "py312"
+line-length = 88
+extend-exclude = ["mnt", "work", "static"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # This codebase documents itself in prose comments that explain *why*, not
+    # in per-symbol docstrings. Turning D on would ask for a different and
+    # worse style of comment than the one it already has.
+    "D",
+    # ty is the authority on types; ANN would only duplicate its findings and
+    # demand annotations on test helpers where they add nothing.
+    "ANN",
+    "COM",  # trailing commas — the formatter already decides these
+    "CPY",  # no copyright headers in this repo
+    "ERA",  # commented-out code: too many false positives on prose comments
+    "TD", "FIX",  # TODO formatting; work is tracked in beads, not in comments
+    # Exception messages defined inline read better than the one-use constants
+    # EM/TRY003 ask for, at this size.
+    "EM", "TRY003",
+    # Complexity metrics. The long functions here (run_turn, the guards) are
+    # long because they are sequential narratives, and splitting them to satisfy
+    # a counter would scatter logic that belongs together.
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI reads these in argument defaults by design; B008 is aimed at mutable
+# defaults, which these are not.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test idioms, not defects: pytest is built on bare `assert`, tests reach into
+# private module state on purpose, compare against literal expected values, and
+# take fixture arguments they never read.
+"tests/*" = [
+    "S101",    # assert — the entire point of pytest
+    "SLF001",  # private member access — tests verify internals deliberately
+    "PLR2004", # magic value comparison — the literal IS the expectation
+    "FBT003",  # boolean positional in call
+    "ARG001", "ARG002", "ARG005",  # unused fixture/stub arguments
+    "PT018",   # composite assertions read fine here
+    "S603", "S607",  # subprocess: these drive docker compose and bd on purpose
+]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+exclude = ["mnt", "work"]
