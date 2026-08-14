@@ -53,16 +53,19 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
+    AgentDefinition,
     AssistantMessage,
+    HookEvent,
     HookMatcher,
     ServerToolUseBlock,
     StreamEvent,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
 )
 
-from . import evolve, guards, kb, signals
+from . import evolve, guards, interact, kb, signals
 from .config import config
 from .turns import Turn, TurnState, registry, spawn
 
@@ -358,6 +361,99 @@ you are actively completing.
 """
 
 
+_ASKING = """\
+--- Reaching the human ---
+
+You can ask the person you are talking to a question mid-turn with the
+`mcp__ask__ask_user` tool, and you can be granted a tool you were not
+pre-approved for by simply calling it - they get an Allow/Deny prompt.
+
+Both cost their attention, which is the scarcest thing here, so:
+
+* Search the wiki first. A question it already answers is a question you should
+  not have asked.
+* Ask when the answer changes what you write - which of two people a task
+  belongs to, which of two readings of an ambiguous note is right. Do not ask
+  for permission to proceed, or for a decision you can defensibly make yourself.
+* One question, with suggested options where you have them. If nobody answers,
+  you will be told so and you should carry on and say that you did.
+
+Do NOT use `AskUserQuestion`. It cannot work in this deployment - it returns
+empty answers without anyone seeing it - and it is blocked for that reason.
+
+--- Delegating ---
+
+`Task` runs a subagent with its own context, which is how you read widely
+without spending yours. `kb-query` answers a question from the wiki read-only;
+`kb-lint` audits it and files beads. A general-purpose subagent is available for
+anything else. Dispatch a few at a time rather than one wide fan-out - a large
+parallel dispatch from one session hits API rate limits.
+
+A subagent cannot ask the human and its work is summarised back to you rather
+than shown, so keep anything that needs judgement or leaves a visible edit in
+this turn where you and the person can both see it.
+"""
+
+
+def _named_agents() -> dict[str, AgentDefinition]:
+    """The subagents this deployment declares, alongside the generic one.
+
+    Each prompt POINTS AT the skill in the knowledge base rather than restating
+    it. Those skills are seeded from `bootstrap/` and then edited by the human
+    (and, within its remit, by reflection), so a copy of their contents in this
+    file would be a second source of truth that silently drifts from the one the
+    human is actually maintaining.
+
+    `ingest` and `reflect` are deliberately absent even though skills exist for
+    both. `ingest` is written to check in with the person before it writes, and
+    a subagent cannot - its output is summarised, not shown. `reflect` is bounded
+    by `evolve.write_guard_for`, which is installed only in
+    `_reflection_options`, plus four things an AgentDefinition cannot express: a
+    cold start with no `resume`, the `reflect-` savepoint namespace, the
+    process-wide reflection lock, and the evolution log. Both are reachable
+    headlessly through app/mcp_server.py, which runs them as real turns.
+    """
+    workspace = kb.workspace_root()
+    return {
+        "kb-query": AgentDefinition(
+            description=(
+                "Answer a question from the knowledge base. Read-only: it never "
+                "writes a page and never files a bead. Use it for lookups, and "
+                "to read across many pages without spending your own context."
+            ),
+            prompt=(
+                f"You are a read-only researcher for the wiki at {workspace}.\n\n"
+                "Find what the wiki actually says about the question you were "
+                "given. Read the relevant pages, follow links between them, and "
+                "report what you found with the paths of the pages you used.\n\n"
+                "Two things matter more than being helpful. Say plainly when the "
+                "wiki does not answer the question, rather than filling the gap "
+                "from your own knowledge - the caller cannot tell the two apart "
+                "unless you separate them. And do not propose edits: you cannot "
+                "make them, and the turn that called you can."
+            ),
+            tools=["Read", "Glob", "Grep"],
+            model="inherit",
+        ),
+        "kb-lint": AgentDefinition(
+            description=(
+                "Audit the knowledge base for staleness, gaps and broken links, "
+                "and file what it finds as beads. Read-mostly."
+            ),
+            prompt=(
+                f"Read {workspace}/skills/lint/SKILL.md and follow it for the "
+                "scope you were given.\n\n"
+                "That skill is the specification; this prompt does not restate "
+                "it. Its own instruction stands: file findings as beads rather "
+                "than reporting them back as prose, and dedupe against the "
+                "ledger before filing. Report a short summary of what you filed."
+            ),
+            tools=["Read", "Glob", "Grep", "Bash"],
+            model="inherit",
+        ),
+    }
+
+
 def _system_prompt_append(bd_context: str = "") -> str:
     guide = _read_guide()
     memory = _read_memory()
@@ -387,6 +483,7 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "failure, re-read the file: if the content is right, you are done. "
         "Never fall back to shell redirection to work around it.",
     ]
+    parts.append(_ASKING)
     if bd_context:
         parts.append(bd_context)
         parts.append(_BEADS_OVERRIDES)
@@ -396,6 +493,24 @@ def _system_prompt_append(bd_context: str = "") -> str:
     if memory:
         parts.append("--- Accumulated memory ---\n" + memory)
     return "\n\n".join(parts)
+
+
+def _observer_hooks(turn: Turn | None) -> dict[HookEvent, list[HookMatcher]]:
+    """Hooks that only watch: tool outcomes and subagent lifecycle.
+
+    Separate from the two enforcing hooks above so it stays obvious which hooks
+    can refuse something and which cannot. These are the only route to a tool
+    RESULT: results arrive on a UserMessage, which `_render` drops wholesale, so
+    without them a failed Write and a successful one look identical in the UI.
+    """
+    if turn is None:
+        return {}
+    return {
+        "PostToolUse": [HookMatcher(hooks=[interact.tool_result_for(turn)])],
+        "PostToolUseFailure": [HookMatcher(hooks=[interact.tool_failure_for(turn)])],
+        "SubagentStart": [HookMatcher(hooks=[interact.subagent_start_for(turn)])],
+        "SubagentStop": [HookMatcher(hooks=[interact.subagent_stop_for(turn)])],
+    }
 
 
 def _options(
@@ -421,13 +536,52 @@ def _options(
             "preset": "claude_code",
             "append": _system_prompt_append(bd_context),
         },
-        # Headless: nobody is present to answer a permission prompt.
+        # Still acceptEdits, so writing the wiki never prompts - that is the
+        # product. What changed is that a tool this does NOT cover used to be
+        # refused with nobody asked, and now reaches `can_use_tool` below.
+        #
+        # Not everything outside `allowed_tools` gets there, though. The CLI
+        # approves some read-only shell commands itself, ahead of the callback -
+        # a live test asking for `echo` ran the command and raised no prompt at
+        # all. Where that line falls is the CLI's business, so do not build
+        # anything on a specific Bash command prompting.
         permission_mode="acceptEdits",
         # acceptEdits covers file writes but NOT Bash, so without this the
         # agent can write to the wiki and never once run `bd` - it asks for
         # approval nobody is there to give, and silently files nothing.
         # Scoped to bd alone rather than opening up Bash generally.
-        allowed_tools=["Bash(bd:*)"],
+        #
+        # An entry that allows a WHOLE tool auto-approves it before the
+        # permission callback is consulted, which is exactly what the three
+        # additions want: asking a question, tracking progress and spawning a
+        # subagent must never themselves raise a prompt. `Bash(bd:*)` carries a
+        # specifier, so non-bd shell commands still fall through to the callback.
+        allowed_tools=[
+            "Bash(bd:*)",
+            "mcp__ask__ask_user",
+            "TodoWrite",
+            "Task",
+        ],
+        # Present in the CLI, unusable here: with no TTY it resolves instantly
+        # with EMPTY answers and the agent believes it consulted someone. See
+        # anthropics/claude-code#50728 and app/interact.py.
+        disallowed_tools=["AskUserQuestion"],
+        # Two named subagents plus the built-in general-purpose one.
+        agents=_named_agents(),
+        # The question tool. Built per turn because it closes over the turn it
+        # puts its question on.
+        mcp_servers={"ask": interact.ask_server_for(turn)} if turn else {},
+        # cwd is the agent's own WRITABLE scratch directory, so without this it
+        # could drop a .mcp.json there and grant itself servers. setting_sources
+        # governs settings files, not this one.
+        strict_mcp_config=True,
+        # Only on a turn a human is watching. Omitted otherwise, which restores
+        # the previous behaviour exactly: unapproved tools are refused and
+        # nobody is asked. Requires the streaming prompt built below - the SDK
+        # raises ValueError if the prompt is a plain string.
+        can_use_tool=(
+            interact.can_use_tool_for(turn) if turn and turn.interactive else None
+        ),
         # Refuse shell commands that would corrupt a KB file. Passed in
         # process, so setting_sources=[] does not suppress it the way it
         # suppresses .claude/settings.json hooks - and the agent cannot author
@@ -439,6 +593,7 @@ def _options(
             # Catches the turn that names future work and then drops it. The
             # instruction below was not enough on its own; see app/guards.py.
             "Stop": [HookMatcher(hooks=[guards.stop_guard])],
+            **_observer_hooks(turn),
         },
         # Stream tokens as they arrive so the UI can show them in real time.
         include_partial_messages=True,
@@ -471,6 +626,11 @@ def _reflection_options(
     * No workspace guide and no accumulated memory in the prompt: neither is
       evidence about a skill, and both are things reflection must not treat as
       editable.
+    * None of the interaction surface from app/interact.py: no question tool, no
+      permission callback, no subagents. Reflection is triggered by a signal,
+      not by a person - `maybe_reflect` gives it the synthetic owner
+      `reflection@{slug}` - so there is nobody to answer, and a prompt could only
+      spend its timeout. It keeps the observer hooks, which ask nothing.
     """
     scratch = kb.scratch_dir_for(user_slug)
     config_dir = Path(config.work_dir) / f".claude-{user_slug}"
@@ -506,9 +666,10 @@ def _reflection_options(
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[guards.kb_write_guard_for(turn)]),
                 HookMatcher(hooks=[evolve.write_guard_for(turn)]),
-            ]
+            ],
             # Deliberately no Stop guard: reflection has no "defer the work"
             # failure mode, and filing a bead is one of its correct endings.
+            **_observer_hooks(turn),
         },
         include_partial_messages=True,
         env={
@@ -557,8 +718,15 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
         await signals.record_turn(turn, user_slug)
 
 
-async def _image_prompt(text: str, images: list[dict]):
-    """Async generator yielding a single user message with image content blocks."""
+async def _stream_prompt(text: str, images: list[dict] | None = None):
+    """Yield the turn's single user message, in the SDK's streaming-input form.
+
+    Every turn goes through this, images or not. A plain string prompt is the
+    simpler call, but `can_use_tool` is only honoured in streaming mode - the SDK
+    raises ValueError on a string - and a permission prompt nobody can answer is
+    the whole thing this replaced. Still unidirectional: one message, then the
+    generator closes.
+    """
     content: list[dict] = [
         {
             "type": "image",
@@ -568,7 +736,7 @@ async def _image_prompt(text: str, images: list[dict]):
                 "data": img["data"],
             },
         }
-        for img in images
+        for img in images or []
     ]
     if text:
         content.append({"type": "text", "text": text})
@@ -643,13 +811,10 @@ async def run_turn(
     if await kb.ensure_beads(user_slug):
         bd_context = await kb.bd_prime(user_slug)
 
-    prompt_arg: str | object = prompt
-    if images:
-        prompt_arg = _image_prompt(prompt, images)
-
     try:
         async for message in query(
-            prompt=prompt_arg, options=_options(user_slug, resume, bd_context, turn)
+            prompt=_stream_prompt(prompt, images),
+            options=_options(user_slug, resume, bd_context, turn),
         ):
             for kind, data in _render(message):
                 turn.append(kind, data)
@@ -694,7 +859,10 @@ async def maybe_reflect(user_slug: str, trigger: str) -> str | None:
         log.info("a turn is running; skipping reflection (%s)", trigger)
         return None
 
-    turn = registry.create(user_email=f"reflection@{user_slug}")
+    # Non-interactive: a signal triggered this, not a person, so there is nobody
+    # to answer a question. _reflection_options installs no question tool or
+    # permission callback either; this keeps the two statements consistent.
+    turn = registry.create(user_email=f"reflection@{user_slug}", interactive=False)
     turn.reflection = True
 
     async def _run() -> None:
@@ -718,32 +886,89 @@ def _extract_session_id(message: object) -> str | None:
 
 
 def _render(message: object) -> list[tuple[str, str]]:
-    """Flatten an SDK message into (kind, text) pairs for the event stream.
+    """Flatten an SDK message into (kind, data) pairs for the event stream.
 
     With include_partial_messages=True the SDK emits StreamEvent objects for
     each raw API event. We forward text deltas immediately so the UI streams
     tokens as they arrive. The subsequent AssistantMessage (sent once the full
     turn completes) is used only for tool events — text was already streamed.
+
+    **Subagent output must not join the reply.** Anything a subagent says
+    arrives here with `parent_tool_use_id` set, and the pre-Task version of this
+    function forwarded every delta regardless - which would have spliced a
+    subagent's tokens into the middle of a sentence the user was reading. Those
+    go out as `agent_text` and the UI nests them.
+
+    Structured kinds carry a JSON payload; `text`, `text_delta` and
+    `thinking_delta` stay raw strings, which is what the older client expects.
     """
     if isinstance(message, StreamEvent):
-        event = message.event
-        if event.get("type") == "content_block_delta":
-            delta = event.get("delta", {})
-            if delta.get("type") == "text_delta" and delta.get("text"):
-                return [("text_delta", delta["text"])]
-        return []
+        return _render_delta(message)
 
     if not isinstance(message, AssistantMessage):
         return []
 
-    # Emit text as a "text" fallback event AND tool names.
-    # The client ignores "text" events if it already received "text_delta" events
-    # (which means --include-partial-messages is working). If the bundled CLI
-    # version doesn't support that flag, "text" acts as the non-streaming path.
+    agent = message.parent_tool_use_id
     out: list[tuple[str, str]] = []
     for block in message.content:
         if isinstance(block, TextBlock) and block.text:
-            out.append(("text", block.text))
+            # "text" is the non-streaming fallback: the client ignores it once it
+            # has seen any text_delta. A subagent gets no such fallback, because
+            # its deltas are the only place its text appears.
+            if agent:
+                out.append(
+                    ("agent_text", interact.json_event(agent=agent, text=block.text))
+                )
+            else:
+                out.append(("text", block.text))
+        elif isinstance(block, ThinkingBlock) and block.thinking and not agent:
+            out.append(("thinking", block.thinking))
         elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
-            out.append(("tool", block.name))
+            out.extend(_render_tool_use(block, agent))
+    return out
+
+
+def _render_delta(message: StreamEvent) -> list[tuple[str, str]]:
+    event = message.event
+    if event.get("type") != "content_block_delta":
+        return []
+    delta = event.get("delta", {})
+    kind = delta.get("type")
+    agent = message.parent_tool_use_id
+
+    if kind == "text_delta" and delta.get("text"):
+        if agent:
+            return [
+                ("agent_text", interact.json_event(agent=agent, text=delta["text"]))
+            ]
+        return [("text_delta", delta["text"])]
+    if kind == "thinking_delta" and delta.get("thinking") and not agent:
+        return [("thinking_delta", delta["thinking"])]
+    return []
+
+
+def _render_tool_use(
+    block: ToolUseBlock | ServerToolUseBlock, agent: str | None
+) -> list[tuple[str, str]]:
+    """A tool call, plus the todo list when that is what the call was.
+
+    TodoWrite is rendered from the call's own input rather than tracked
+    separately: the list the agent just wrote IS the state, so there is nothing
+    to keep in sync. It is progress display only - the bead ledger remains the
+    only place work survives the turn, which the Stop guard still enforces.
+    """
+    tool_input = block.input or {}
+    out = [
+        (
+            "tool_use",
+            interact.json_event(
+                id=block.id,
+                name=block.name,
+                detail=interact.describe_tool_input(block.name, tool_input),
+                agent=agent or "",
+            ),
+        )
+    ]
+    if block.name == "TodoWrite" and isinstance(tool_input.get("todos"), list):
+        out.append(("todo", interact.json_event(todos=tool_input["todos"])))
     return out

@@ -19,11 +19,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, kb, signals
+from . import agent, kb, mcp_server, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
-from .turns import TurnState, registry, spawn
+from .turns import Turn, TurnState, registry, spawn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -120,7 +120,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         store = await _start_session_store()
     signals.attach_store(store)
 
-    yield
+    # The MCP surface is a MOUNTED sub-app, and a mount's own lifespan never
+    # runs. Its session manager therefore has to be started from here or every
+    # /mcp request fails on the happy path with "Task group is not initialized".
+    async with mcp_server.session_manager():
+        yield
 
     if store:
         await store.close()
@@ -160,6 +164,11 @@ async def healthz() -> JSONResponse:
             "transcripts": transcripts,
             "control_surface": kb.probe_control_surface(),
             "busy": registry.any_running(),
+            # Not part of `ok` either. The surface is always mounted and always
+            # verified; this says whether a machine caller could get past that
+            # verification, which is the difference between "MCP is off" and
+            # "MCP is on and refusing every call".
+            "mcp": mcp_server.enabled(),
         },
         status_code=200 if mounted else 503,
     )
@@ -366,6 +375,61 @@ async def revert_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     return {"reverted_to": turn.savepoint, "signal_bead": bead_id}
 
 
+def _pending_turn(turn_id: str, identity: CurrentUser) -> Turn:
+    """The turn a human is answering, or the right HTTP error.
+
+    Ownership is the same raw comparison the rest of this file uses. It matters
+    more here than on a read: these two routes let a caller unblock a *running*
+    agent, so answering someone else's question would be putting words in their
+    turn.
+    """
+    turn = registry.get(turn_id)
+    if not turn or turn.user_email != identity.email:
+        raise HTTPException(404, "no such turn")
+    return turn
+
+
+@app.post("/api/turns/{turn_id}/answer")
+async def answer_turn(
+    turn_id: str, request: Request, identity: CurrentUser
+) -> dict[str, Any]:
+    """Answer a question the agent asked mid-turn.
+
+    409 rather than 500 on a request id that is unknown or already answered,
+    because both are ordinary: two clicks on one form, or a tab that reconnected
+    and replayed the question after another tab had already answered it.
+    """
+    turn = _pending_turn(turn_id, identity)
+    body = await request.json()
+    request_id = str(body.get("request_id") or "")
+    answers = [str(a) for a in (body.get("answers") or [])]
+    notes = str(body.get("notes") or "")
+    if not request_id:
+        raise HTTPException(400, "request_id is required")
+    if not turn.resolve(request_id, {"answers": answers, "notes": notes}):
+        raise HTTPException(409, "that question is not waiting for an answer")
+    return {"answered": request_id}
+
+
+@app.post("/api/turns/{turn_id}/permission")
+async def decide_permission(
+    turn_id: str, request: Request, identity: CurrentUser
+) -> dict[str, Any]:
+    """Allow or deny a tool the agent asked to use."""
+    turn = _pending_turn(turn_id, identity)
+    body = await request.json()
+    request_id = str(body.get("request_id") or "")
+    decision = str(body.get("decision") or "")
+    if not request_id:
+        raise HTTPException(400, "request_id is required")
+    if decision not in ("allow", "deny"):
+        raise HTTPException(400, "decision must be 'allow' or 'deny'")
+    answer = {"decision": decision, "note": str(body.get("note") or "")}
+    if not turn.resolve(request_id, answer):
+        raise HTTPException(409, "that request is not waiting for a decision")
+    return {"decided": request_id, "decision": decision}
+
+
 @app.post("/api/reflect")
 async def reflect(identity: CurrentUser) -> JSONResponse:
     """Run a reflection turn now, instead of waiting for a signal to trigger one.
@@ -377,7 +441,10 @@ async def reflect(identity: CurrentUser) -> JSONResponse:
     """
     if registry.any_running():
         raise HTTPException(409, "a turn is already running; try again when idle")
-    turn = registry.create(user_email=identity.email)
+    # Non-interactive even though a person pressed the button: reflection runs
+    # under _reflection_options, which installs no question tool and no
+    # permission callback, and the flag has to say the same thing the options do.
+    turn = registry.create(user_email=identity.email, interactive=False)
     spawn(
         agent.run_reflection(turn, identity.slug, trigger="manual"),
         name=f"reflection-{turn.id}",
@@ -447,3 +514,10 @@ async def kb_ui() -> FileResponse:
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# The MCP surface, for a machine caller rather than a browser. Mounted rather
+# than routed, because it is a whole ASGI app - which is also why it carries its
+# own authentication: a mount does not run this app's dependencies, so the
+# `dependencies=AUTHENTICATED` used everywhere above would silently never fire
+# here. See app/mcp_server.py and docs/decisions/0014-the-machine-is-a-caller.md.
+app.mount("/mcp", mcp_server.asgi_app(), name="mcp")

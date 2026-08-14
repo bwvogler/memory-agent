@@ -398,3 +398,107 @@ def test_ready_work_excludes_blocked_beads(beads):
     finally:
         bd("close", blocked_id, "--reason=smoke test cleanup", check=False)
         bd("close", blocker_id, "--reason=smoke test cleanup", check=False)
+
+
+# --- the interaction surface, against the real image -------------------------
+
+
+def test_the_answer_and_permission_routes_reject_what_they_should(stack):
+    """Both let a caller unblock a RUNNING agent, so the refusals matter.
+
+    Unit tests cover `Turn.resolve` as arithmetic. What only the real stack
+    covers is that these routes exist at all, are wired to the auth dependency,
+    and answer 404/409 rather than 500 - a 500 here would mean an unhandled
+    InvalidStateError on an ordinary double click.
+    """
+    for path, body in (
+        ("answer", {"request_id": "nope", "answers": []}),
+        ("permission", {"request_id": "nope", "decision": "deny"}),
+    ):
+        missing = httpx.post(
+            f"{stack}/api/turns/deadbeef/{path}", json=body, timeout=10
+        )
+        assert missing.status_code == 404, (path, missing.text)
+
+    # A real turn, so the 409 path is reached rather than the 404 one. The turn
+    # fails immediately on the placeholder API key, which is all this needs.
+    started = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
+    assert started.status_code == 202, started.text
+    turn_id = started.json()["turn_id"]
+
+    stale = httpx.post(
+        f"{stack}/api/turns/{turn_id}/answer",
+        json={"request_id": "never-asked", "answers": ["yes"]},
+        timeout=10,
+    )
+    assert stale.status_code == 409, stale.text
+
+    malformed = httpx.post(
+        f"{stack}/api/turns/{turn_id}/permission",
+        json={"request_id": "x", "decision": "maybe"},
+        timeout=10,
+    )
+    assert malformed.status_code == 400, malformed.text
+
+
+def test_the_machine_surface_answers_a_real_mcp_handshake(stack):
+    """A real client conversation against the real image, over real HTTP.
+
+    This is the only tier where the app's own lifespan runs, and the lifespan is
+    what starts the streamable-HTTP session manager. A mounted sub-app's lifespan
+    is never run for it, so if that wiring were dropped every request here would
+    500 with "Task group is not initialized" - the happy path failing, from code
+    that imports and mounts perfectly. The unit tier has to enter the manager by
+    hand; only this proves production does it.
+
+    It also covers two things a mount breaks quietly: FastMCP serving at
+    /mcp/mcp (a 404 at the published URL) and its localhost-only Host header
+    check (a 421 to every real caller).
+    """
+    health = httpx.get(f"{stack}/healthz", timeout=10).json()
+    assert health["mcp"] is True, "the dev stack bypasses auth, so it reports on"
+
+    headers = {"Accept": "application/json, text/event-stream"}
+    opened = httpx.post(
+        f"{stack}/mcp/",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "container-probe", "version": "1"},
+            },
+        },
+        timeout=30,
+    )
+    assert opened.status_code == 200, opened.text
+    session = opened.headers.get("mcp-session-id")
+    assert session, f"no session id, so the manager never started: {opened.text}"
+
+    headers["mcp-session-id"] = session
+    httpx.post(
+        f"{stack}/mcp/",
+        headers=headers,
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        timeout=30,
+    )
+    listed = httpx.post(
+        f"{stack}/mcp/",
+        headers=headers,
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        timeout=30,
+    )
+    assert listed.status_code == 200, listed.text
+    assert _mcp_tools(listed.text) == {"ingest", "query", "lint", "reflect"}
+
+
+def _mcp_tools(body: str) -> set[str]:
+    """Tool names out of a streamable-HTTP response, which is an SSE stream."""
+    for line in body.splitlines():
+        if line.startswith("data: "):
+            payload = json.loads(line[len("data: ") :])
+            return {t["name"] for t in payload["result"]["tools"]}
+    raise AssertionError(f"no data frame in the response: {body[:300]}")

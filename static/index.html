@@ -43,7 +43,58 @@
   .msg .body p + p { margin-top: 0.6em; }
   .msg.me .body { background: transparent; border-style: dashed; }
   .tool { color: var(--tool); font-size: 13px; font-style: italic; margin: 4px 0; }
+  .tool .detail { color: var(--muted); font-style: normal; }
+  /* A failed tool call has to look different from a successful one. It used to
+     not: results arrive on a message the server dropped, so a Write that blew
+     up and a Write that worked rendered identically. */
+  .tool.failed { color: var(--err); }
+  .tool.failed .detail { color: var(--err); }
   .err { color: var(--err); }
+  details.subagent, details.thought {
+    border: 1px dashed var(--line); border-radius: 6px;
+    padding: 4px 10px; margin: 6px 0;
+  }
+  details.subagent > summary, details.thought > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+  }
+  details.thought .text {
+    white-space: pre-wrap; word-wrap: break-word;
+    color: var(--muted); font-size: 13px; margin-top: 4px;
+  }
+  details.subagent .agent-text {
+    white-space: pre-wrap; word-wrap: break-word; font-size: 13px; margin-top: 4px;
+  }
+  /* Progress only. The bead ledger is the only place work survives the turn,
+     so this list is never persisted and never replaces filing something. */
+  .todos { margin: 6px 0; font-size: 13px; }
+  .todos .item { color: var(--muted); }
+  .todos .item.in_progress { color: var(--ink); }
+  .todos .item.completed { opacity: .55; text-decoration: line-through; }
+  .ask, .perm {
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 10px 12px; margin: 8px 0; background: var(--panel);
+  }
+  .ask .q, .perm .q { font-weight: 600; margin-bottom: 2px; }
+  .ask .sub, .perm .sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .ask label { display: block; padding: 2px 0; font-size: 14px; }
+  .ask input[type=text] {
+    width: 100%; font: inherit; font-size: 14px; margin-top: 4px;
+    padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  .ask .actions, .perm .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .ask button, .perm button {
+    font: inherit; font-size: 13px; padding: 4px 13px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg);
+    color: var(--ink); cursor: pointer;
+  }
+  .perm button.allow, .ask button.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .perm button.deny:hover { color: var(--err); border-color: var(--err); }
+  .resolved { border-color: var(--line); opacity: .6; }
+  .resolved .actions { display: none; }
+  .verdict { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .revert {
     font: inherit; font-size: 12px; margin-top: 6px; padding: 3px 9px;
     border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
@@ -405,6 +456,40 @@ function stream(turnId) {
     scroll();
   }
 
+  // Structured events carry a JSON payload; text ones stay raw strings.
+  const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
+
+  // Insert into the main message, before the Revert button if it exists yet.
+  function insert(node, into) {
+    if (into) { into.appendChild(node); }
+    else { msg.wrap.insertBefore(node, msg.wrap.querySelector('.revert') || null); }
+    scroll();
+  }
+
+  const toolLines = new Map();  // tool_use id -> its .tool div
+  const forms = new Map();      // request_id -> the ask/permission element
+  const agents = new Map();     // agent key -> its <details> container
+  let lastAgentType = '';
+  let thought = null;
+  let todos = null;
+
+  // Subagent output must never land in the reply, which is why the server tags
+  // it. Containers are keyed by whatever tag the event carries: agent_start
+  // reports the SDK's agent id while message events report the Task call's
+  // tool_use id, and those are different identifiers, so with several subagents
+  // running at once attribution between blocks can be wrong. What cannot go
+  // wrong is subagent text reaching the main paragraph.
+  function agentBox(key) {
+    if (!key) return null;
+    if (!agents.has(key)) {
+      const d = el('details', 'subagent');
+      d.appendChild(el('summary', '', 'subagent' + (lastAgentType ? ': ' + lastAgentType : '') + ' — working'));
+      insert(d);
+      agents.set(key, d);
+    }
+    return agents.get(key);
+  }
+
   // Token-by-token streaming (requires --include-partial-messages support).
   es.addEventListener('text_delta', (e) => { hasTextDelta = true; appendText(e.data); });
   // Full-turn text from AssistantMessage — used when streaming isn't available,
@@ -413,17 +498,167 @@ function stream(turnId) {
     if (!hasTextDelta) { newParaNext = true; appendText(e.data); }
   });
 
-  es.addEventListener('tool', (e) => {
+  es.addEventListener('agent_text', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = agentBox(d.agent); if (!box) return;
+    let p = box.querySelector('.agent-text');
+    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); }
+    p.textContent += (d.text || '').replace(/\\n/g, '\n');
+  });
+
+  const thinkingInto = () => {
+    if (!thought) {
+      thought = el('details', 'thought');
+      thought.appendChild(el('summary', '', 'thinking'));
+      thought.appendChild(el('div', 'text', ''));
+      insert(thought);
+    }
+    return thought.querySelector('.text');
+  };
+  es.addEventListener('thinking_delta', (e) => {
+    thinkingInto().textContent += e.data.replace(/\\n/g, '\n');
+  });
+  es.addEventListener('thinking', (e) => {
+    if (!thought) thinkingInto().textContent = e.data.replace(/\\n/g, '\n');
+  });
+
+  const LABELS = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
+                   Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
+                   WebFetch: 'web fetch', Task: 'delegate', TodoWrite: 'plan' };
+
+  es.addEventListener('tool_use', (e) => {
+    const d = parse(e); if (!d) return;
     newParaNext = true;   // next text starts a new paragraph
-    const name = e.data;
-    const label = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
-                    Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
-                    WebFetch: 'web fetch' }[name] || name.toLowerCase();
-    const t = el('div', 'tool', '→ ' + label);
-    const revert = msg.wrap.querySelector('.revert');
-    msg.wrap.insertBefore(t, revert || null);
+    const label = LABELS[d.name] || String(d.name || '').toLowerCase();
+    const t = el('div', 'tool', '→ ' + label + ' ');
+    if (d.detail) t.appendChild(el('span', 'detail', d.detail));
+    if (d.id) toolLines.set(d.id, t);
+    insert(t, agentBox(d.agent));
+  });
+
+  es.addEventListener('tool_result', (e) => {
+    const d = parse(e); if (!d) return;
+    const line = toolLines.get(d.id);
+    if (!line || d.ok) return;   // successes stay quiet; only failures speak up
+    line.classList.add('failed');
+    line.appendChild(el('span', 'detail', ' — failed' + (d.detail ? ': ' + d.detail : '')));
     scroll();
   });
+
+  es.addEventListener('agent_start', (e) => {
+    const d = parse(e); if (!d) return;
+    lastAgentType = d.agent_type || '';
+    agentBox(d.agent_id);
+  });
+  es.addEventListener('agent_stop', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = agents.get(d.agent_id);
+    if (box) box.querySelector('summary').textContent =
+      'subagent' + (d.agent_type ? ': ' + d.agent_type : '') + ' — done';
+  });
+
+  es.addEventListener('todo', (e) => {
+    const d = parse(e); if (!d || !Array.isArray(d.todos)) return;
+    if (!todos) { todos = el('div', 'todos'); insert(todos); }
+    todos.innerHTML = '';
+    for (const t of d.todos) {
+      const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '·';
+      const text = t.status === 'in_progress' ? (t.activeForm || t.content) : t.content;
+      todos.appendChild(el('div', 'item ' + (t.status || ''), mark + ' ' + text));
+    }
+    scroll();
+  });
+
+  // --- the two round-trips back into the running turn --------------------
+  //
+  // Both post to the turn that is still executing, and both are disabled by the
+  // matching resolution event — which also arrives when another tab answered
+  // first, or when the request timed out on the server.
+
+  async function resolve(path, body, box, verdict) {
+    box.classList.add('resolved');
+    const r = await fetch('/api/turns/' + turnId + '/' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let note = verdict;
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.json()).detail || ''; } catch {}
+      note = detail || 'could not send that';
+    }
+    box.appendChild(el('div', 'verdict', note));
+    scroll();
+  }
+
+  es.addEventListener('ask', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = el('div', 'ask');
+    if (d.header) box.appendChild(el('div', 'sub', d.header));
+    box.appendChild(el('div', 'q', d.question || ''));
+    const type = d.multi_select ? 'checkbox' : 'radio';
+    (d.options || []).forEach((opt, i) => {
+      const label = el('label');
+      const cb = document.createElement('input');
+      cb.type = type; cb.name = 'opt-' + d.request_id; cb.value = opt;
+      if (!d.multi_select && i === 0) cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + opt));
+      box.appendChild(label);
+    });
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.placeholder = (d.options || []).length ? 'or write your own…' : 'your answer…';
+    box.appendChild(other);
+
+    const actions = el('div', 'actions');
+    const submit = el('button', 'primary', 'Answer');
+    submit.onclick = () => {
+      const picked = [...box.querySelectorAll('input[type=' + type + ']:checked')].map(i => i.value);
+      resolve('answer', { request_id: d.request_id, answers: picked, notes: other.value.trim() },
+              box, 'answered');
+    };
+    actions.appendChild(submit);
+    box.appendChild(actions);
+    forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  es.addEventListener('permission', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = el('div', 'perm');
+    box.appendChild(el('div', 'q', d.title || ('Allow ' + d.tool + '?')));
+    const sub = [d.description, d.detail, d.blocked_path, d.reason].filter(Boolean).join(' — ');
+    if (sub) box.appendChild(el('div', 'sub', sub));
+
+    const actions = el('div', 'actions');
+    const allow = el('button', 'allow', 'Allow');
+    const deny = el('button', 'deny', 'Deny');
+    allow.onclick = () => resolve('permission',
+      { request_id: d.request_id, decision: 'allow' }, box, 'allowed');
+    deny.onclick = () => resolve('permission',
+      { request_id: d.request_id, decision: 'deny' }, box, 'denied');
+    actions.appendChild(allow);
+    actions.appendChild(deny);
+    box.appendChild(actions);
+    forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  function closeForm(e, timedOutNote, resolvedNote) {
+    const d = parse(e); if (!d) return;
+    const box = forms.get(d.request_id);
+    if (!box || box.classList.contains('resolved')) return;
+    box.classList.add('resolved');
+    box.appendChild(el('div', 'verdict', d.timeout ? timedOutNote : resolvedNote(d)));
+    scroll();
+  }
+  es.addEventListener('answered', (e) =>
+    closeForm(e, 'nobody answered in time; the agent carried on', () => 'answered'));
+  es.addEventListener('permission_resolved', (e) =>
+    closeForm(e, 'not approved in time; denied', (d) => d.decision === 'allow' ? 'allowed' : 'denied'));
+
   es.addEventListener('session', (e) => { sessionId = e.data; });
   es.addEventListener('status', () => {});
 

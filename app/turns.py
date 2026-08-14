@@ -71,6 +71,13 @@ class Turn:
     error: str | None = None
     events: list[Event] = field(default_factory=list)
 
+    # Whether a human is watching this turn and can answer it. True for a turn
+    # started from the browser, False for one started by a machine caller over
+    # /mcp - which decides whether the agent gets a permission callback at all,
+    # since a prompt nobody can answer only wastes the timeout. Interactivity is
+    # a property of the CALLER, not of the deployment.
+    interactive: bool = True
+
     # Signal capture (app/signals.py). The prompt is kept because the revert
     # handler needs it long after run_turn has returned, and skills because
     # attributing a revert to anything requires knowing what the turn read.
@@ -78,6 +85,17 @@ class Turn:
     skills: set[str] = field(default_factory=set)
     terminal_reason: str | None = None
     permission_denials: list[str] = field(default_factory=list)
+    # Tools the HUMAN refused, as opposed to ones a guard or the permission
+    # system refused. Same reason guard_denials exists below: signals files a P1
+    # "check allowed_tools" bead for an unexplained denial, and a person
+    # clicking Deny is not a deployment defect.
+    human_denials: list[str] = field(default_factory=list)
+
+    # Observability captured from hooks rather than from the message stream:
+    # which subagents ran, and which tool calls failed. Both are things the UI
+    # showed no trace of before.
+    subagents: list[dict] = field(default_factory=list)
+    tool_failures: list[str] = field(default_factory=list)
 
     # Self-evolution (app/evolve.py). `evolved` holds the bounded skill edits
     # this turn was allowed to make - empty for every ordinary turn, and the
@@ -89,6 +107,13 @@ class Turn:
     # reporting itself as a deployment defect.
     guard_denials: list[str] = field(default_factory=list)
 
+    # Questions and permission requests this turn is blocked on, keyed by
+    # request id. `resolved` keeps the answers so a client replaying the event
+    # stream from Last-Event-ID can tell an answered question from a live one
+    # and does not draw a second form for it.
+    pending: dict[str, asyncio.Future] = field(default_factory=dict, repr=False)
+    resolved: dict[str, dict] = field(default_factory=dict)
+
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
 
     def append(self, kind: str, data: str) -> Event:
@@ -97,7 +122,34 @@ class Turn:
         self._wake()
         return event
 
+    def open_request(self, request_id: str) -> asyncio.Future:
+        """Register a question or permission request and return its future."""
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = future
+        return future
+
+    def resolve(self, request_id: str, answer: dict) -> bool:
+        """Answer a pending request. False if it is unknown or already answered.
+
+        Returning a bool rather than raising is what lets the HTTP route reply
+        409 for a double submit - two clicks on the same form, or a form
+        submitted from a tab that reconnected - instead of turning it into a 500.
+        """
+        future = self.pending.pop(request_id, None)
+        if future is None or future.done():
+            return False
+        self.resolved[request_id] = answer
+        future.set_result(answer)
+        return True
+
     def finish(self, state: TurnState, error: str | None = None) -> None:
+        # Cancel before waking: a turn that errored while something was blocked
+        # on a human leaves that coroutine awaiting a future nobody will ever
+        # resolve, and the browser form waits on a turn that is already gone.
+        for future in self.pending.values():
+            if not future.done():
+                future.cancel()
+        self.pending.clear()
         self.state = state
         self.error = error
         self._wake()
@@ -140,6 +192,9 @@ class Turn:
             "skills": sorted(self.skills),
             "reflection": self.reflection,
             "evolved": [c.summary() for c in self.evolved],
+            "interactive": self.interactive,
+            "subagents": self.subagents,
+            "pending": sorted(self.pending),
         }
 
 
@@ -150,8 +205,19 @@ class Registry:
         self._turns: dict[str, Turn] = {}
         self._max = max_turns
 
-    def create(self, user_email: str, session_id: str | None = None) -> Turn:
-        turn = Turn(id=uuid.uuid4().hex, user_email=user_email, session_id=session_id)
+    def create(
+        self,
+        user_email: str,
+        session_id: str | None = None,
+        *,
+        interactive: bool = True,
+    ) -> Turn:
+        turn = Turn(
+            id=uuid.uuid4().hex,
+            user_email=user_email,
+            session_id=session_id,
+            interactive=interactive,
+        )
         self._turns[turn.id] = turn
         self._evict()
         return turn

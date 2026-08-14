@@ -17,9 +17,12 @@ the TigerFS workspace.
   filing it
 - `app/evolve.py` — bounded self-evolution: what a reflection turn may change
   about its own skills, enforced as a hook, plus the evolution log
+- `app/interact.py` — the round-trips to the human (a question tool, a
+  permission callback) and the hooks that report tool results and subagents
+- `app/mcp_server.py` — the four capabilities as MCP tools, for a machine caller
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
-- `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint); editable in the KB
+- `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint, reflect); editable in the KB
 - `static/` — web UI (chat at `/`, wiki view at `/kb`)
 
 ## Key design decisions
@@ -54,10 +57,10 @@ the SDK's CLAUDE.md discovery (which is disabled via `setting_sources=[]` and
 `GUIDE.md` inside each subdirectory (e.g. `memory/recipes/GUIDE.md`). The
 agent reads these before writing. The human creates them by asking the agent.
 
-**Bootstrap skills.** `bootstrap/skills/` contains example skills (ingest,
-lint) seeded into `memory/skills/` at startup. They live in the KB so the human
-can edit and improve them over time. They are NOT auto-loaded into every
-session — the user invokes them explicitly.
+**Bootstrap skills.** `bootstrap/skills/` contains example skills (ingest, lint,
+reflect) seeded into `memory/skills/` at startup. They live in the KB so the
+human can edit and improve them over time. They are NOT auto-loaded into every
+session — the user invokes them explicitly, or `app/mcp_server.py` names them.
 
 Seeding tracks a hash of what it last shipped (`.bootstrap-state.json`) so an
 improved skill actually reaches existing deployments: an unmodified file is
@@ -132,6 +135,91 @@ Every refusal states the safe alternative. A bare denial is what drove the
 agent into inventing the shell workaround in the first place, and both guards
 fail open — a guard that raised would take down the turn it was protecting.
 See `docs/decisions/0007`.
+
+**The human is a tool the agent can call.** "Headless: nobody is present to
+answer a permission prompt" was true of the subprocess and false of the product —
+there is a person holding an SSE stream open. `app/interact.py` gives the agent
+`mcp__ask__ask_user`, an in-process SDK MCP tool that appends an `ask` event and
+blocks on a future which `POST /api/turns/{id}/answer` resolves; `can_use_tool`
+does the same for an unapproved tool, answered at
+`POST /api/turns/{id}/permission`. `permission_mode` stays `acceptEdits`, so wiki
+edits still never prompt.
+
+The callback sees less than "everything outside `allowed_tools`", and this was
+measured rather than assumed: the CLI approves some read-only shell commands
+itself, ahead of the callback — a live test asking for `echo` ran it and raised no
+prompt at all. `WebFetch` does reach the callback, which is what the live tier
+asserts on. Do not build anything on a *particular* Bash command prompting; where
+that line falls belongs to the CLI.
+
+The built-in `AskUserQuestion` is in `disallowed_tools`, and that is not
+tidiness: with no TTY it **resolves instantly with empty answers**
+(anthropics/claude-code#50728), so the agent believes it consulted someone who
+was never asked.
+
+The two timeouts resolve in **opposite** directions, which is the part to
+preserve. An unanswered question returns text telling the agent to proceed and
+say that it did; an unanswered permission request is denied. A stalled turn is
+the worse failure for the first, and a wasted turn budget for the second.
+
+`can_use_tool` is only honoured in streaming mode — the SDK raises `ValueError`
+on a string prompt — so `_stream_prompt` now wraps every turn, not just image
+ones. Interactivity lives on the `Turn`, not in config: a browser turn is
+interactive, an `/mcp` turn and a reflection turn are not, and a non-interactive
+turn gets no callback at all while `ask_user` tells it plainly that it is alone.
+
+A human clicking **Deny** files a `deferred` P3 signal bead, and is subtracted
+from `permission_denials` alongside guard denials — without that, a person saying
+no filed a P1 bead telling a future reflection to "check `allowed_tools`".
+`strict_mcp_config=True` became necessary rather than tidy once `mcp_servers`
+existed: `cwd` is the agent's own *writable* scratch, so it could otherwise write
+a `.mcp.json` there and grant itself servers. See `docs/decisions/0013`.
+
+**Delegation, and the bug that enabling it would have caused.** `Task` is
+allowed, so the generic subagent works, and two named ones are declared:
+`kb-query` (read-only) and `kb-lint`. Their prompts *point at* the KB skill file
+rather than restating it, because those skills are human-edited and a copy in the
+image would drift invisibly. `ingest` and `reflect` are deliberately not
+subagents — `ingest` is written to check in with a person mid-task, and
+`reflect`'s remit lives in `evolve.write_guard_for` plus four things an
+`AgentDefinition` cannot express. Both are reachable headlessly instead.
+
+Switching `Task` on alone would have corrupted the transcript: `_render`
+forwarded every `text_delta` regardless of `parent_tool_use_id`, so a subagent's
+tokens would have spliced into the middle of a sentence the user was reading.
+Subagent output now goes out as `agent_text` and the UI nests it.
+
+**The event stream carries structure now.** New event kinds (`tool_use`,
+`tool_result`, `thinking`, `todo`, `agent_start`/`agent_stop`, `ask`,
+`permission`) carry a `json.dumps` payload, which passes through `_sse_escape`
+untouched because it never contains a raw newline; `text_delta` and friends keep
+their raw-string shape. Tool *results* come from `PostToolUse` /
+`PostToolUseFailure` hooks rather than the message stream, because results arrive
+on a `UserMessage` that `_render` drops — which is why a failed `Write` and a
+successful one used to render identically. `TodoWrite` is allowed and rendered as
+in-turn progress only: it is never persisted and never substitutes for a bead,
+and the `Stop` guard still enforces that.
+
+**A machine can call this app, which first required giving it an identity.**
+`verify()` required a non-empty `email` claim, and a Cloudflare Access *service
+token* carries `common_name` — so a token Access had already admitted got a 403
+one layer later, which is what blocked `kb-068`. An allowlisted `common_name` now
+maps to `MCP_IDENTITY_EMAIL`; empty `MCP_CLIENT_IDS` (the default) keeps the old
+refusal exactly, and the mapped email still faces ADR 0005's allowlist.
+
+`app/mcp_server.py` mounts `ingest`, `query`, `lint` and `reflect` at `/mcp` over
+streamable HTTP. Each runs a **real turn** — savepoint, guards, signals, backlog
+— so an MCP call is revertable from the web UI, and the response carries the
+savepoint name for that. `reflect` goes through `maybe_reflect` rather than
+imitating reflection. Auth there is hand-rolled because a *mounted* ASGI app does
+not run FastAPI's dependencies, so `dependencies=AUTHENTICATED` would look right
+and never fire. One turn at a time, and a busy instance **refuses** rather than
+queueing: savepoints are workspace-wide, so two turns interfere.
+
+Every MCP turn acts as one identity, so `MCP_IDENTITY_EMAIL` must be a real
+household member's address — a synthetic one puts every bead `lint` files into a
+graph nobody's `bd ready` shows, which is ADR 0012's defect through a third door.
+See `docs/decisions/0014`.
 
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
@@ -260,6 +348,13 @@ The live tier is the only thing that catches permission regressions —
 blocked from ever running `bd`. It asserts on mechanism (a bd command ran, the
 ledger changed), never on what the model chose to say.
 
+It is also the only tier that can prove `can_use_tool` is wired at all, for the
+same reason: the callback is only honoured in streaming mode, so a regression
+that put a plain string back into `query(prompt=...)` raises `ValueError` on
+every turn and no unit test would see it. The live tests answer a real
+permission prompt through the real route and then assert the tool ran, and
+separately assert that a real subagent's output never reached the reply.
+
 ## Linting and types
 
 ```sh
@@ -300,7 +395,16 @@ See `app/config.py` for the full list. Required: `ANTHROPIC_API_KEY`,
 `KB_DATABASE_URL`. Notable optional: `KB_MOUNT` (default `/mnt/kb`),
 `WORK_DIR` (default `/work`), `AGENT_MODEL` (default `claude-sonnet-4-6`),
 `MAX_UPLOAD_BYTES` / `MAX_UPLOAD_TOTAL_BYTES` (10 MB per attachment, 25 MB per
-request — the UI mirrors the first of these, and the server is the authority).
+request — the UI mirrors the first of these, and the server is the authority),
+`ASK_TIMEOUT_SECONDS` / `PERMISSION_TIMEOUT_SECONDS` (600 / 300 — how long a turn
+waits for a person, and they resolve in opposite directions).
+
+`MCP_CLIENT_IDS` and `MCP_IDENTITY_EMAIL` together enable the `/mcp` surface, and
+must be set together: the `common_name` values of the Cloudflare Access service
+tokens allowed in, and the household member every machine call acts as. Leaving
+`MCP_CLIENT_IDS` empty (the default) refuses every machine caller exactly as
+before. `/healthz` reports `mcp` so "off" is distinguishable from "on and
+refusing everything".
 
 ## Deploying
 

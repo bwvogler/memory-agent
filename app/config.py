@@ -42,6 +42,24 @@ class Config:
 
     max_turns: int = int(os.environ.get("MAX_TURNS", "30"))
 
+    # How long a turn waits for a human. The two differ because their timeouts
+    # resolve in opposite directions: an unanswered *question* proceeds on the
+    # agent's judgement, so waiting longer costs only latency; an unanswered
+    # *permission request* is denied, so waiting longer wastes a turn's budget
+    # on something that was never going to be allowed.
+    ask_timeout_seconds: float = float(os.environ.get("ASK_TIMEOUT_SECONDS", "600"))
+    permission_timeout_seconds: float = float(
+        os.environ.get("PERMISSION_TIMEOUT_SECONDS", "300")
+    )
+
+    # Identity for a machine caller (the /mcp surface). Cloudflare Access
+    # service tokens carry `common_name`, not `email`, so verify() would reject
+    # one outright; these two turn an allowlisted token into a real identity.
+    # Empty MCP_CLIENT_IDS - the default - keeps that rejection exactly as it
+    # was. See docs/decisions/0014-the-machine-is-a-caller.md.
+    mcp_client_ids: list[str] = field(default_factory=lambda: _csv("MCP_CLIENT_IDS"))
+    mcp_identity_email: str = os.environ.get("MCP_IDENTITY_EMAIL", "")
+
     # Attachments arrive base64-encoded inside a JSON body, which has no
     # natural size limit: without a cap, one large file is decoded into memory
     # and written to the volume before anything can object. The per-request cap
@@ -74,6 +92,13 @@ class Config:
                 problems.append("CF_ACCESS_TEAM_DOMAIN is not set")
             if not self.cf_aud:
                 problems.append("CF_ACCESS_AUD is not set")
+        if self.mcp_client_ids and not self.mcp_identity_email:
+            # Fails closed either way - an empty email cannot pass the allowlist
+            # check - but silently, and the operator believes they enabled MCP.
+            problems.append(
+                "MCP_CLIENT_IDS is set but MCP_IDENTITY_EMAIL is not, so every "
+                "machine caller will be rejected"
+            )
         return problems
 
 

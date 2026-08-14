@@ -297,10 +297,41 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                 )
             )
 
+        # A human who refused a tool is evidence, not a defect - the same
+        # species of signal as a Revert, and it belongs in the ledger the same
+        # way. Filed deferred, so it never reaches `bd ready`, and NOT deduped:
+        # each refusal is a distinct judgement and the count is the data.
+        filed.extend(
+            [
+                await _file_signal(
+                    user_slug,
+                    f"The human refused a tool: {tool}",
+                    f"The agent asked to use `{tool}` and the person watching "
+                    f"said no (or let the request time out).\n\n"
+                    f"Skills that turn used: {_skill_list(turn)}\n\n"
+                    f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
+                    "Worth reading as guidance, not as breakage: a skill that "
+                    "keeps steering the agent toward a tool this household does "
+                    "not want it using is the thing to change.",
+                    priority=3,
+                    labels=("permission", "human-denied"),
+                    dedupe=False,
+                )
+                for tool in sorted(set(turn.human_denials))
+            ]
+        )
+
         # Denials our own hooks made are the guards working, not a defect.
         # Filing them would put P1 'check allowed_tools' beads into the very
-        # ledger reflection reads, every time a guard did its job.
-        unexpected = set(turn.permission_denials) - set(turn.guard_denials)
+        # ledger reflection reads, every time a guard did its job. Human
+        # denials are subtracted for the same reason, one layer up: the SDK
+        # reports them through this identical channel, and a person clicking
+        # Deny is not a missing allowlist entry.
+        unexpected = (
+            set(turn.permission_denials)
+            - set(turn.guard_denials)
+            - set(turn.human_denials)
+        )
         filed.extend(
             [
                 await _file_signal(

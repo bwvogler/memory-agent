@@ -1,15 +1,15 @@
 ---
 name: kb-curator
 description: >
-  Navigate, extend and correct the TigerFS knowledge base mounted at /mnt/kb,
-  and track wiki work in beads. Use this before writing anything into the
-  knowledge base; when answering a question that might already be documented;
+  Extend and correct the TigerFS knowledge base mounted at /mnt/kb, and track
+  wiki work in beads. Use this before writing anything into the knowledge base;
   when the user says something worth remembering; when asked what needs doing,
-  what is outstanding, or what the backlog looks like; when you notice a
-  problem you are not fixing right now; and when asked to review, diff, or undo
-  a recent change. Triggers include "add this to the wiki", "what do we know
-  about X", "remember that", "what should I work on", "what's left", "clean
-  this up", and "what changed recently".
+  what is outstanding, or what the backlog looks like; when you notice a problem
+  you are not fixing right now; and when asked to review, diff, or undo a recent
+  change. Triggers include "add this to the wiki", "remember that", "what should
+  I work on", "what's left", and "what changed recently". For answering a
+  question the wiki may already document, delegate to the kb-query subagent
+  instead of loading this.
 ---
 
 # Curating the knowledge base
@@ -40,6 +40,16 @@ bd close <id> --reason="..."   # when actually done, not before
 
 For a quick question ("what does the wiki say about X?") skip this. The ledger
 is for work, not for lookups.
+
+## Delegate the reading
+
+Answering a question from the wiki is a job for the `kb-query` subagent: it
+reads and reports, and cannot write, so it costs you none of your own context
+and can do nothing you would need to review. Auditing the wiki is `kb-lint`'s.
+
+Dispatch a few at a time. A wide parallel fan-out from one session hits API rate
+limits, and a subagent cannot ask the user anything — so anything needing a
+judgement call, or leaving an edit the user should see happen, stays here.
 
 ## File what you notice
 

@@ -14,6 +14,7 @@ differently or reasonably chose not to file.
 
 from __future__ import annotations
 
+import json
 import time
 
 import httpx
@@ -227,6 +228,152 @@ def _run_turn_at(url: str, timeout_s: int = 300) -> dict:
     base = url.rsplit("/api/", 1)[0]
     while time.time() < deadline:
         turn = httpx.get(f"{base}/api/turns/{turn_id}", timeout=30).json()
+        if turn["state"] != "running":
+            return turn
+        time.sleep(2)
+    pytest.fail(f"turn {turn_id} did not finish within {timeout_s}s")
+
+
+# --- the interaction surface, against a real model ---------------------------
+
+
+def test_an_unapproved_tool_asks_the_human_instead_of_failing_silently(stack):
+    """The premise this change reversed, proved end to end.
+
+    Before it, a tool outside `allowed_tools` was refused with nobody asked, and
+    signals filed a P1 bead calling it a deployment defect. `can_use_tool` only
+    fires in streaming mode - a string prompt raises ValueError - so a regression
+    that reverted `_stream_prompt` would make every turn fail here, and nothing
+    in the unit tier would notice.
+
+    Answers Allow through the real route, then asserts the tool actually ran.
+    Mechanism only: never that the agent phrased the request a particular way.
+
+    Drives WebFetch rather than a shell command on purpose. An earlier version of
+    this test asked for `echo` and the turn completed with no prompt at all: the
+    CLI approves some read-only shell commands itself, before the callback is
+    consulted. WebFetch is absent from `allowed_tools` entirely, so nothing short
+    of the callback can approve it.
+    """
+    turn_id = httpx.post(
+        f"{stack}/api/turns",
+        json={
+            "message": "Use the WebFetch tool on https://example.com and tell me "
+            "the page title. Nothing else.",
+        },
+        timeout=30,
+    ).json()["turn_id"]
+
+    request_id = _await_event(stack, turn_id, "permission")
+    granted = httpx.post(
+        f"{stack}/api/turns/{turn_id}/permission",
+        json={"request_id": request_id, "decision": "allow"},
+        timeout=30,
+    )
+    assert granted.status_code == 200, granted.text
+
+    turn = _await_finish(stack, turn_id)
+    assert turn["state"] == "done", turn.get("error")
+
+    kinds = [e["kind"] for e in turn["events"]]
+    assert "permission_resolved" in kinds
+    ran = [
+        json.loads(e["data"])
+        for e in turn["events"]
+        if e["kind"] == "tool_use" and json.loads(e["data"])["name"] == "WebFetch"
+    ]
+    assert ran, f"the tool was approved but never ran: {kinds}"
+
+
+def test_denying_a_tool_files_evidence_and_not_a_deployment_defect(beads, stack):
+    """A person saying no must not produce a P1 'check allowed_tools' bead."""
+    before = {i["id"] for i in bd_json("list", "--label", "signal")}
+
+    turn_id = httpx.post(
+        f"{stack}/api/turns",
+        json={
+            "message": "Use the WebFetch tool on https://example.org and tell me "
+            "the page title. Nothing else.",
+        },
+        timeout=30,
+    ).json()["turn_id"]
+
+    request_id = _await_event(stack, turn_id, "permission")
+    httpx.post(
+        f"{stack}/api/turns/{turn_id}/permission",
+        json={"request_id": request_id, "decision": "deny", "note": "not this time"},
+        timeout=30,
+    )
+    turn = _await_finish(stack, turn_id)
+    assert turn["state"] == "done", turn.get("error")
+
+    filed = [i for i in bd_json("list", "--label", "signal") if i["id"] not in before]
+    titles = [i["title"] for i in filed]
+    assert any("human refused" in t.lower() for t in titles), titles
+    assert not any("was denied permission" in t for t in titles), (
+        f"a human refusal was filed as a deployment defect: {titles}"
+    )
+
+
+def test_a_subagent_reports_separately_from_the_reply(stack):
+    """The transcript-corruption invariant, against real subagent output.
+
+    A unit test pins `_render`'s routing. Only this proves the SDK actually sets
+    `parent_tool_use_id` on subagent messages - if it stopped, subagent tokens
+    would splice into the middle of the reply and no unit test would see it.
+    """
+    turn = _run_turn(
+        stack,
+        "Use the kb-query subagent to find out what the wiki says about tea, "
+        "then tell me in one sentence.",
+        timeout_s=300,
+    )
+    assert turn["state"] == "done", turn.get("error")
+
+    kinds = [e["kind"] for e in turn["events"]]
+    assert "agent_start" in kinds, (
+        "no subagent ran; kb-query may not be declared in agents= any more"
+    )
+    assert "agent_stop" in kinds
+
+    reply = "".join(
+        e["data"] for e in turn["events"] if e["kind"] in ("text_delta", "text")
+    )
+    agent_said = [
+        json.loads(e["data"])["text"]
+        for e in turn["events"]
+        if e["kind"] == "agent_text"
+    ]
+    for chunk in agent_said:
+        if len(chunk.strip()) > 40:
+            assert chunk not in reply, (
+                "subagent output reached the reply; parent_tool_use_id routing "
+                f"is broken: {chunk[:80]!r}"
+            )
+
+
+def _await_event(base_url: str, turn_id: str, kind: str, timeout_s: int = 240) -> str:
+    """Wait for a request event and return its request_id."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        turn = httpx.get(f"{base_url}/api/turns/{turn_id}", timeout=30).json()
+        for event in turn["events"]:
+            if event["kind"] == kind:
+                return json.loads(event["data"])["request_id"]
+        if turn["state"] != "running":
+            pytest.fail(
+                f"turn {turn_id} finished without ever emitting {kind!r}. Either "
+                f"can_use_tool is not wired, or the tool was auto-approved: "
+                f"{[e['kind'] for e in turn['events']]}"
+            )
+        time.sleep(2)
+    pytest.fail(f"no {kind!r} event within {timeout_s}s")
+
+
+def _await_finish(base_url: str, turn_id: str, timeout_s: int = 240) -> dict:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        turn = httpx.get(f"{base_url}/api/turns/{turn_id}", timeout=30).json()
         if turn["state"] != "running":
             return turn
         time.sleep(2)

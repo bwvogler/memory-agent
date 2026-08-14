@@ -104,7 +104,18 @@ async def verify(token: str) -> Identity:
 
     email = (claims.get("email") or "").lower()
     if not email:
-        raise HTTPException(403, "Access token has no email claim")
+        # A Cloudflare Access SERVICE token carries `common_name`, never
+        # `email`, so this branch is the only thing that ever let a machine
+        # caller in - and until MCP_CLIENT_IDS is set it still refuses one,
+        # byte-for-byte as before. Access itself remains the gate; all this does
+        # is stop rejecting a token Access already vouched for, and give it a
+        # real identity so scratch, ledger and config dir resolve like anyone
+        # else's. See docs/decisions/0014-the-machine-is-a-caller.md.
+        common_name = (claims.get("common_name") or "").lower()
+        if common_name and common_name in config.mcp_client_ids:
+            email = config.mcp_identity_email.lower()
+        if not email:
+            raise HTTPException(403, "Access token has no email claim")
 
     # This is a SECOND allowlist check, defence in depth behind the Cloudflare
     # Access policy itself (see docs/decisions/0005-explicit-email-allowlist.md
@@ -119,7 +130,12 @@ async def verify(token: str) -> Identity:
         if not (domain_ok or email_ok):
             raise HTTPException(403, f"{email!r} is not on the allowlist")
 
-    return Identity(email=email, subject=claims.get("sub", ""))
+    # `sub` is empty for a service token, so fall back to the token name. The
+    # email is the household identity every caller shares; the subject is the
+    # only record of WHICH caller it was.
+    return Identity(
+        email=email, subject=claims.get("sub") or claims.get("common_name") or ""
+    )
 
 
 async def current_identity(request: Request) -> Identity:

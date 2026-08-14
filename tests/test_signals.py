@@ -148,3 +148,70 @@ def test_a_broken_ledger_does_not_swallow_the_signal_beads(monkeypatch):
 
 async def _empty_list(*args, **kwargs):
     return []
+
+
+# --- a person saying no is not a deployment defect ---------------------------
+
+
+def test_a_human_denial_does_not_file_a_p1_deployment_defect(monkeypatch):
+    """The SDK reports a human Deny through the same channel as a missing
+    allowlist entry. Before this distinction, clicking Deny filed a P1 bead
+    telling a future reflection to go and 'check allowed_tools in _options' -
+    against a person who had simply said no.
+    """
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("priority")))
+        return f"kb-{len(created)}"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(
+        state=TurnState.DONE,
+        permission_denials=["Bash"],
+        human_denials=["Bash"],
+    )
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert len(created) == 1, created
+    title, priority = created[0]
+    assert "human refused" in title.lower()
+    assert priority == 3, "evidence, not a P1 defect report"
+    assert not any("allowed_tools" in t for t, _ in created)
+
+
+def test_an_unexplained_denial_is_still_a_p1(monkeypatch):
+    """The original signal must survive the new subtraction."""
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("priority")))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(state=TurnState.DONE, permission_denials=["WebFetch"])
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert created == [("Agent was denied permission to use: WebFetch", 1)]
+
+
+def test_repeated_refusals_are_each_recorded(monkeypatch):
+    """Not deduped, for the same reason reverts are not: the count is the data."""
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        return "kb-1"
+
+    async def already_open(*args, **kwargs):
+        return [{"title": "The human refused a tool: Bash", "status": "open"}]
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", already_open)
+
+    turn = _turn(state=TurnState.DONE, human_denials=["Bash"])
+    filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert filed == ["kb-1"], "an open bead with the same title must not suppress this"
