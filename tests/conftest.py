@@ -62,14 +62,29 @@ def pytest_collection_modifyitems(config, items):
 
 
 def compose(*args, check=True, capture=True):
-    """Run a docker compose subcommand against the test project."""
-    return subprocess.run(
+    """Run a docker compose subcommand against the test project.
+
+    `check` is handled here rather than by subprocess, because
+    CalledProcessError prints the command and the exit status and drops the
+    stderr - so a failure inside the container arrives as sixty lines of
+    subprocess internals ending in "returned non-zero exit status 1", and the
+    Python traceback that actually says what went wrong is thrown away. That
+    happened, cost a diagnosis, and is the reason this is not `check=check`.
+    """
+    result = subprocess.run(
         [*_COMPOSE, *args],
-        check=check,
+        check=False,
         capture_output=capture,
         text=True,
         cwd=REPO_ROOT,
     )
+    if check and result.returncode != 0:
+        pytest.fail(
+            f"docker compose {' '.join(args)}\nexit {result.returncode}\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+            pytrace=False,
+        )
+    return result
 
 
 def app_exec(*argv: str, workdir: str | None = None, check=True):
@@ -133,6 +148,15 @@ def beads(stack):
 
 
 def _wait_for_health(timeout_s: int = 180) -> None:
+    """Wait for every subsystem the suite goes on to assert about.
+
+    `kb_mounted` alone was not enough. The session store starts once, and when
+    it lost a boot race the app logged it, set the store to None and carried on
+    reporting a healthy mount - so the suite started against a stack that could
+    not record anything, and failed twelve tests later in two places that read
+    like unrelated flakes. Gating on `transcripts` here turns that into one
+    failure, at startup, naming the subsystem.
+    """
     import httpx
 
     deadline = time.time() + timeout_s
@@ -140,7 +164,8 @@ def _wait_for_health(timeout_s: int = 180) -> None:
     while time.time() < deadline:
         try:
             r = httpx.get(f"{BASE_URL}/healthz", timeout=5)
-            if r.status_code == 200 and r.json().get("kb_mounted"):
+            body = r.json() if r.status_code == 200 else {}
+            if body.get("kb_mounted") and body.get("transcripts") == "ready":
                 return
             last = r.text
         except Exception as exc:  # noqa: BLE001 - still starting

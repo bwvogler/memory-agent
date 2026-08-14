@@ -220,11 +220,24 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
     filed: list[str] = []
     try:
         outcome = _outcome(turn)
+        # Two independent jobs, and they must fail independently. These used to
+        # share this function's `try`, with the ledger write first - so a
+        # session store that was down took the signal beads with it, and the
+        # only trace was one log line. Losing the denominator is survivable;
+        # losing the evidence a turn went wrong is the thing this module
+        # exists to prevent. Found by two container tests failing together and
+        # looking like two unrelated flakes.
         if _store:
-            await _store.record_turn_outcome(
-                turn.id, turn.user_email, outcome, turn.terminal_reason,
-                sorted(turn.skills),
-            )
+            try:
+                await _store.record_turn_outcome(
+                    turn.id, turn.user_email, outcome, turn.terminal_reason,
+                    sorted(turn.skills),
+                )
+            except Exception:  # noqa: BLE001 - the beads below still matter
+                log.exception(
+                    "could not record the turn outcome for %s; filing signals "
+                    "anyway", turn.id,
+                )
 
         if outcome == OUTCOME_ERROR:
             filed.append(await _file_signal(

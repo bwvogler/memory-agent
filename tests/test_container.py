@@ -55,6 +55,14 @@ if reason:
 """
 
 
+def test_the_durable_store_is_reachable_and_says_so(stack):
+    """The ledger is the denominator every signal rate is read against, and a
+    store that failed to start is invisible at runtime by design - kb.py
+    logs-and-continues so a turn can still answer the user. `transcripts` is
+    how that state stops being silent."""
+    assert httpx.get(f"{stack}/healthz", timeout=10).json()["transcripts"] == "ready"
+
+
 def test_stack_is_healthy_and_the_kb_is_mounted(stack):
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
 

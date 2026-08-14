@@ -7,6 +7,8 @@ ledger without erroring anywhere. These tests pin the shapes we rely on.
 
 from __future__ import annotations
 
+import asyncio
+
 from app import signals
 from app.turns import Turn, TurnState
 
@@ -86,3 +88,44 @@ def test_long_prompts_are_clipped_for_bead_bodies():
 def test_skill_list_is_readable_when_nothing_was_recorded():
     assert signals._skill_list(_turn()) == "none recorded"
     assert signals._skill_list(_turn(skills={"b", "a"})) == "a, b"
+
+
+# --- the ledger and the evidence fail independently -------------------------
+
+
+class _BrokenStore:
+    async def record_turn_outcome(self, *args, **kwargs):
+        raise RuntimeError("session store is down")
+
+
+def test_a_broken_ledger_does_not_swallow_the_signal_beads(monkeypatch):
+    """Regression, and the failure mode was the usual one here: silence.
+
+    The store write and the bead filing shared one `try`, with the store first.
+    A session store that was down therefore filed no beads at all and left one
+    log line behind - so a turn that hit a permission denial, the signal most
+    likely to be a real deployment defect, recorded nothing anywhere. It
+    surfaced as two container tests failing together and reading like two
+    unrelated flakes.
+    """
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append(title)
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+    signals.attach_store(_BrokenStore())
+    try:
+        turn = _turn(state=TurnState.DONE, permission_denials=["Bash"])
+        filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+    finally:
+        signals.attach_store(None)
+
+    assert filed == ["kb-1"]
+    assert "Bash" in created[0]
+
+
+async def _empty_list(*args, **kwargs):
+    return []

@@ -98,6 +98,15 @@ reaches `bd ready`, and *every* turn is recorded, not just failing ones —
 `kb-curator` loads on every turn, so without the denominator it appears in
 every revert by construction. See the amendment in `docs/decisions/0006`.
 
+The ledger write and the bead filing are separate `try` blocks, and the order
+matters: losing the denominator is survivable, losing the evidence that a turn
+went wrong is not. They shared one block once, with the ledger first, so a
+session store that lost its boot race silently filed no signals at all. The
+store now retries at startup and `/healthz` reports `transcripts` as `ready`,
+`unconfigured` or `unavailable` — deliberately not folded into `ok`, since a
+turn that cannot reach its ledger should still answer the user, but never again
+invisible. `_wait_for_health` in the test suite gates on it.
+
 **The agent rewrites its own skills, within a remit it cannot exceed.** A
 reflection turn may rewrite one skill's `description` and append under a
 `## Learned` heading. That is the entire vocabulary of self-modification, and

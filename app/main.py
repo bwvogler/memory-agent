@@ -34,6 +34,39 @@ HEARTBEAT_SECONDS = 15  # Cloudflare's 524 is a time-to-next-byte timeout (~125s
 store: PostgresSessionStore | None = None
 
 
+# Compose gates the app on `pg_isready`, which answers for the postmaster and
+# not for the database this DSN names, so the first connection can lose a race
+# the healthcheck already declared won. One attempt at boot made that permanent
+# for the life of the process: no transcripts, no skill ledger, and a stack
+# that reported itself completely healthy. Retry briefly instead.
+SESSION_STORE_ATTEMPTS = 5
+SESSION_STORE_BACKOFF_S = 2.0
+
+
+async def _start_session_store() -> PostgresSessionStore | None:
+    """Connect the durable store, or give up and say so loudly."""
+    candidate = PostgresSessionStore(config.session_database_url)
+    for attempt in range(1, SESSION_STORE_ATTEMPTS + 1):
+        try:
+            await candidate.start()
+            return candidate
+        except Exception:
+            if attempt == SESSION_STORE_ATTEMPTS:
+                log.exception(
+                    "session store unavailable after %d attempts; transcripts "
+                    "will not be durable and the skill ledger will be empty. "
+                    "/healthz reports transcripts=unavailable.",
+                    SESSION_STORE_ATTEMPTS,
+                )
+                return None
+            log.warning(
+                "session store not ready (attempt %d/%d); retrying in %.0fs",
+                attempt, SESSION_STORE_ATTEMPTS, SESSION_STORE_BACKOFF_S,
+            )
+            await asyncio.sleep(SESSION_STORE_BACKOFF_S)
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     problems = config.validate()
@@ -60,12 +93,7 @@ async def lifespan(app: FastAPI):
 
     global store
     if config.session_database_url:
-        store = PostgresSessionStore(config.session_database_url)
-        try:
-            await store.start()
-        except Exception:
-            log.exception("session store unavailable; transcripts will not be durable")
-            store = None
+        store = await _start_session_store()
     signals.attach_store(store)
 
     yield
@@ -85,12 +113,27 @@ async def healthz():
     Exposes `busy` so an external pinger can avoid suspending the host while a
     detached turn is still running. See the "Do not suspend mid-turn" section
     of docs/architecture.md - this endpoint is the hook, not the solution.
+
+    `transcripts` reports the durable store as one of `ready`, `unconfigured`
+    or `unavailable`. It is deliberately NOT part of `ok`: a turn that cannot
+    reach its ledger should still answer the user, which is the same call kb.py
+    makes about beads. But it has to be *visible*, because the alternative is
+    what already happened - a stack whose store failed to start reported itself
+    perfectly healthy, and the only symptom was two tests failing much later
+    for reasons that looked unrelated to each other and to the cause.
     """
     mounted = kb.is_mounted()
+    if store is not None:
+        transcripts = "ready"
+    elif not config.session_database_url:
+        transcripts = "unconfigured"
+    else:
+        transcripts = "unavailable"
     return JSONResponse(
         {
             "ok": mounted,
             "kb_mounted": mounted,
+            "transcripts": transcripts,
             "control_surface": kb.probe_control_surface(),
             "busy": registry.any_running(),
         },
