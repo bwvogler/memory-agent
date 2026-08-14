@@ -548,14 +548,29 @@ function stream(turnId) {
                    Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
                    WebFetch: 'web fetch', Task: 'delegate', TodoWrite: 'plan' };
 
+  // Two events arrive per tool call, both carrying the same id: one the instant
+  // the call starts (name only, from content_block_start) and one when the
+  // assistant message completes (with the arguments). The first is what makes a
+  // slow tool visible at all; the second fills it in. Keyed by id so the line is
+  // updated rather than drawn twice.
   es.addEventListener('tool_use', (e) => {
     const d = parse(e); if (!d) return;
     newParaNext = true;   // next text starts a new paragraph
-    const label = LABELS[d.name] || String(d.name || '').toLowerCase();
-    const t = el('div', 'tool', '→ ' + label + ' ');
-    if (d.detail) t.appendChild(el('span', 'detail', d.detail));
-    if (d.id) toolLines.set(d.id, t);
-    insert(t, agentBox(d.agent));
+    let t = d.id ? toolLines.get(d.id) : null;
+    if (!t) {
+      const label = LABELS[d.name] || String(d.name || '').toLowerCase();
+      t = el('div', 'tool', '→ ' + label + ' ');
+      if (d.id) toolLines.set(d.id, t);
+      insert(t, agentBox(d.agent));
+    }
+    if (d.detail) {
+      // .args, not .detail: tool_result appends its own .detail span for a
+      // failure, and this must never overwrite that.
+      let args = t.querySelector('.args');
+      if (!args) { args = el('span', 'detail args', ''); t.appendChild(args); }
+      args.textContent = d.detail;
+      scroll();
+    }
   });
 
   es.addEventListener('tool_result', (e) => {

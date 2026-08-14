@@ -189,6 +189,20 @@ forwarded every `text_delta` regardless of `parent_tool_use_id`, so a subagent's
 tokens would have spliced into the middle of a sentence the user was reading.
 Subagent output now goes out as `agent_text` and the UI nests it.
 
+**A tool call is announced before it runs, not after.** `content_block_start`
+carries the tool's name and id before its arguments and before it executes, so
+`_render` emits `tool_use` there and again from the `AssistantMessage` with the
+arguments filled in — same `id`, so the UI updates the line rather than drawing
+two. Two events instead of a server-side accumulator keeps `_render` pure and
+keeps `describe_tool_input` in one language.
+
+This exists because a turn looked hung: the agent said "Reading the CSV now.",
+then read a large file. Text streams first, the message carrying the tool call
+does not arrive until the model's response completes, and a *successful* tool
+result is deliberately quiet — so nothing moved for the length of the read. The
+other half of the fix is in the UI: the working indicator now lives for the whole
+turn with an elapsed clock, rather than being removed on the first token.
+
 **The event stream carries structure now.** New event kinds (`tool_use`,
 `tool_result`, `thinking`, `todo`, `agent_start`/`agent_stop`, `ask`,
 `permission`) carry a `json.dumps` payload, which passes through `_sse_escape`
@@ -311,8 +325,15 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY, KB_DATABASE_URL
 docker compose up
 ```
 
-Chat: http://localhost:8000  
-Wiki: http://localhost:8000/kb
+Chat: http://localhost:8080  
+Wiki: http://localhost:8080/kb
+
+`docker-compose.override.yml` bind-mounts `static/` over the copy in the image,
+so a CSS or JS change needs only a reload. Compose loads that file automatically
+for a bare `docker compose up` and **not** when a file list is passed with `-f`,
+which is how the container test tier invokes it (`tests/conftest.py`) — so the
+tier keeps exercising what the image actually contains. `app/` is not mounted, so
+a Python change still needs `docker compose up -d --build app`.
 
 **`docker compose down -v` destroys the local ledger.** The dev stack's `/work`
 is a named volume, so the bead graph, `kb.git` and every savepoint go with it.

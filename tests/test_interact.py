@@ -444,3 +444,97 @@ def test_a_broken_observer_does_not_break_the_turn(factory):
     # A payload of the wrong type entirely, which is the shape drift these
     # hooks would hit if the SDK renamed a field.
     _run_hook(hook, {"tool_name": object(), "agent_id": object()})
+
+
+# --- a tool call has to be visible before it finishes ------------------------
+
+
+def _block_start(block: dict, parent: str | None = None) -> StreamEvent:
+    return StreamEvent(
+        uuid="u1",
+        session_id="s1",
+        event={"type": "content_block_start", "content_block": block},
+        parent_tool_use_id=parent,
+    )
+
+
+def test_a_tool_call_is_announced_the_moment_it_starts():
+    """The earliest possible signal, and the fix for a turn that looked hung.
+
+    The reported case: the agent said "Reading the CSV now.", then read a large
+    file. Text streams first, the AssistantMessage carrying the tool call does
+    not arrive until the model's response completes, and a successful tool
+    result is deliberately quiet - so nothing moved on screen for the length of
+    the read. `content_block_start` carries the name and id before the arguments
+    and before the tool runs, which is what closes that window.
+    """
+    rendered = agent._render(
+        _block_start({"type": "tool_use", "id": "toolu_1", "name": "Read"})
+    )
+
+    assert _kinds(rendered) == ["tool_use"]
+    payload = json.loads(rendered[0][1])
+    assert payload["id"] == "toolu_1"
+    assert payload["name"] == "Read"
+    assert payload["detail"] == "", "the arguments have not arrived yet"
+
+
+def test_the_start_and_the_completed_call_share_an_id():
+    """That shared id lets the UI fill the line in rather than duplicate it."""
+    start = json.loads(
+        agent._render(
+            _block_start({"type": "tool_use", "id": "toolu_7", "name": "Read"})
+        )[0][1]
+    )
+    complete = json.loads(
+        agent._render(
+            AssistantMessage(
+                content=[
+                    ToolUseBlock(
+                        id="toolu_7",
+                        name="Read",
+                        input={"file_path": "/work/dev/deck.csv"},
+                    )
+                ],
+                model="m",
+            )
+        )[0][1]
+    )
+
+    assert start["id"] == complete["id"] == "toolu_7"
+    assert complete["detail"] == "/work/dev/deck.csv", (
+        "the second event carries the detail"
+    )
+
+
+def test_a_subagents_tool_call_is_announced_against_the_subagent():
+    rendered = agent._render(
+        _block_start({"type": "tool_use", "id": "toolu_2", "name": "Grep"}, parent="p1")
+    )
+
+    assert json.loads(rendered[0][1])["agent"] == "p1"
+
+
+def test_a_thinking_block_start_is_not_a_tool_call():
+    assert agent._render(_block_start({"type": "thinking"})) == []
+
+
+def test_a_text_block_start_is_not_a_tool_call():
+    assert agent._render(_block_start({"type": "text"})) == []
+
+
+def test_input_json_deltas_are_not_forwarded():
+    """The arguments are assembled by the SDK; we take them whole.
+
+    Forwarding fragments would mean reimplementing describe_tool_input in
+    JavaScript and keeping the two in step.
+    """
+    event = StreamEvent(
+        uuid="u1",
+        session_id="s1",
+        event={
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": '{"file_path": "/a'},
+        },
+    )
+    assert agent._render(event) == []

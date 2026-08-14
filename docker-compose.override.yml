@@ -1,0 +1,14 @@
+# Dev-only conveniences. Compose loads this automatically for a bare
+# `docker compose up`, and NOT when a file list is given with -f - which is how
+# the container test tier invokes compose (see tests/conftest.py). That split is
+# the whole point of putting this in a separate file: the test tier keeps
+# exercising what the image actually contains, while `docker compose up` serves
+# the working tree.
+services:
+  app:
+    volumes:
+      # The image COPYs static/ to /srv/static, so without this a one-line CSS
+      # or JS change needs a full `--build` before it is visible - which is how
+      # a UI fix gets tested against the old page and reported as not working.
+      # Read-only: the app only ever serves these.
+      - ./static:/srv/static:ro

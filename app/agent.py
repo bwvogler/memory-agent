@@ -903,7 +903,7 @@ def _render(message: object) -> list[tuple[str, str]]:
     `thinking_delta` stay raw strings, which is what the older client expects.
     """
     if isinstance(message, StreamEvent):
-        return _render_delta(message)
+        return _render_stream(message)
 
     if not isinstance(message, AssistantMessage):
         return []
@@ -928,8 +928,40 @@ def _render(message: object) -> list[tuple[str, str]]:
     return out
 
 
-def _render_delta(message: StreamEvent) -> list[tuple[str, str]]:
+def _render_stream(message: StreamEvent) -> list[tuple[str, str]]:
+    """Forward the raw API stream events worth showing as they arrive.
+
+    `content_block_start` for a tool_use block is the EARLIEST moment anything
+    can be said about a tool call: the name and id are there, the arguments are
+    not yet, and the tool has not run. Announcing it here is what stops a slow
+    tool looking like a finished turn - the reported case was an agent that said
+    "Reading the CSV now.", then read a large file with nothing on screen moving.
+
+    The detail arrives later, on the AssistantMessage, which the CLI sends once
+    the model's response completes and still before the tool executes. Both
+    events carry the same `id`, so the client fills the line in rather than
+    drawing a second one. Two events instead of one accumulator: it keeps this
+    function pure, and keeps `describe_tool_input` in one language.
+    """
     event = message.event
+    agent = message.parent_tool_use_id
+
+    if event.get("type") == "content_block_start":
+        block = event.get("content_block") or {}
+        if block.get("type") != "tool_use":
+            return []
+        return [
+            (
+                "tool_use",
+                interact.json_event(
+                    id=block.get("id") or "",
+                    name=block.get("name") or "",
+                    detail="",
+                    agent=agent or "",
+                ),
+            )
+        ]
+
     if event.get("type") != "content_block_delta":
         return []
     delta = event.get("delta", {})

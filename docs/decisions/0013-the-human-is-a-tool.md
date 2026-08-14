@@ -121,6 +121,26 @@ untouched while `text_delta` and friends keep their existing raw-string shape.
 Tool inputs, tool results, thinking, todo lists and subagent lifecycle all reach
 the UI. Failures are styled; successes stay quiet.
 
+**A tool call is announced before it runs.** This was an amendment, prompted by a
+real turn that looked hung: the agent said "Reading the CSV now.", then read a
+large file, and nothing on screen moved. The event order explains it — text
+streams as deltas first, the `AssistantMessage` carrying the tool call does not
+arrive until the model's response completes, and a *successful* tool result is
+deliberately quiet, so the gap between "some text" and "any further sign of life"
+is as long as the tool takes.
+
+`content_block_start` carries the tool's name and id before its arguments and
+before it executes, so `_render` emits `tool_use` there too. Both events share an
+`id` and the client fills the line in rather than drawing a second one. Two
+events rather than a server-side accumulator, deliberately: `_render` stays a pure
+function, and `describe_tool_input` is not reimplemented in JavaScript to be kept
+in step. The `input_json_delta` fragments are dropped for the same reason.
+
+The other half is the UI, and it was the larger error: the working indicator was
+removed on the first streamed token, so a turn read as finished for the rest of
+its life. It now lives for the whole turn and carries an elapsed clock, which is
+what separates "slow" from "hung" without the reader having to guess.
+
 **`strict_mcp_config=True`.** Adding `mcp_servers` made this necessary rather
 than tidy: `cwd` is the agent's own *writable* scratch directory, so without it
 the agent could write a `.mcp.json` there and grant itself servers.
