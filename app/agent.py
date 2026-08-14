@@ -52,7 +52,15 @@ import os
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, query
-from claude_agent_sdk.types import HookMatcher
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    HookMatcher,
+    ServerToolUseBlock,
+    StreamEvent,
+    SystemMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 
 from . import evolve, guards, kb, signals
 from .config import config
@@ -656,8 +664,6 @@ async def maybe_reflect(user_slug: str, trigger: str) -> str | None:
 
 def _extract_session_id(message: object) -> str | None:
     """Pull the session id out of an SDK message."""
-    from claude_agent_sdk.types import AssistantMessage, SystemMessage
-
     if isinstance(message, AssistantMessage) and message.session_id:
         return message.session_id
     if isinstance(message, SystemMessage) and message.subtype == "init":
@@ -676,14 +682,6 @@ def _render(message: object) -> list[tuple[str, str]]:
     tokens as they arrive. The subsequent AssistantMessage (sent once the full
     turn completes) is used only for tool events — text was already streamed.
     """
-    from claude_agent_sdk.types import (
-        AssistantMessage,
-        ServerToolUseBlock,
-        StreamEvent,
-        TextBlock,
-        ToolUseBlock,
-    )
-
     if isinstance(message, StreamEvent):
         event = message.event
         if event.get("type") == "content_block_delta":

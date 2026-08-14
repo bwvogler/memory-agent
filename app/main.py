@@ -102,7 +102,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         agent.seed_guide()
         agent.seed_bootstrap()
 
-    global store
+    global store  # noqa: PLW0603 - the store outlives every request
     if config.session_database_url:
         store = await _start_session_store()
     signals.attach_store(store)

@@ -35,6 +35,8 @@ import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolUseBlock
+
 from . import kb
 from .turns import Turn, TurnState
 
@@ -66,7 +68,7 @@ def attach_store(store: PostgresSessionStore | None) -> None:
     main imports agent, which imports this; a reverse import would be a cycle.
     The ledger degrades to bead-only if no store is configured.
     """
-    global _store
+    global _store  # noqa: PLW0603 - set once at startup; see the docstring
     _store = store
 
 
@@ -119,12 +121,6 @@ def _denied_tool(denial: object) -> str:
 def observe_message(turn: Turn, message: object) -> None:
     """Fold one SDK message into the turn's signal state. Never raises."""
     try:
-        from claude_agent_sdk.types import (
-            AssistantMessage,
-            ResultMessage,
-            ToolUseBlock,
-        )
-
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, ToolUseBlock):

@@ -50,7 +50,7 @@ class Identity:
 
 
 async def _get_jwks(force: bool = False) -> dict:
-    global _jwks_cache, _jwks_fetched_at
+    global _jwks_cache, _jwks_fetched_at  # noqa: PLW0603 - process-wide JWKS cache
     fresh = (
         _jwks_cache is not None and (time.time() - _jwks_fetched_at) < _JWKS_TTL_SECONDS
     )

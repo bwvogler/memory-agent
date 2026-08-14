@@ -403,14 +403,14 @@ ORDER  BY path
 
 
 async def _pool() -> asyncpg.Pool:
-    global _kb_pool
+    global _kb_pool  # noqa: PLW0603 - one connection pool per process
     if _kb_pool is None:
         _kb_pool = await asyncpg.create_pool(config.kb_database_url)
     return _kb_pool
 
 
 async def close_pool() -> None:
-    global _kb_pool
+    global _kb_pool  # noqa: PLW0603 - one connection pool per process
     if _kb_pool:
         await _kb_pool.close()
         _kb_pool = None
