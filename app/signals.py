@@ -138,7 +138,7 @@ def observe_message(turn: Turn, message: object) -> None:
             turn.permission_denials = [
                 _denied_tool(d) for d in (message.permission_denials or [])
             ]
-    except Exception:  # noqa: BLE001 - observation must never break a turn
+    except Exception:  # observation must never break a turn
         log.exception("failed to observe message for turn %s", turn.id)
 
 
@@ -234,7 +234,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     turn.terminal_reason,
                     sorted(turn.skills),
                 )
-            except Exception:  # noqa: BLE001 - the beads below still matter
+            except Exception:  # the beads below still matter
                 log.exception(
                     "could not record the turn outcome for %s; filing signals anyway",
                     turn.id,
@@ -292,7 +292,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     labels=("permission",),
                 )
             )
-    except Exception:  # noqa: BLE001 - recording must never break a turn
+    except Exception:  # recording must never break a turn
         log.exception("failed to record signals for turn %s", turn.id)
     return [b for b in filed if b]
 
@@ -370,7 +370,7 @@ async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> str | None:
             labels=("revert",),
             dedupe=False,
         )
-    except Exception:  # noqa: BLE001 - a failed recording must not fail the revert
+    except Exception:  # a failed recording must not fail the revert
         log.exception("failed to record revert signal for turn %s", turn.id)
         return None
 
@@ -394,7 +394,7 @@ async def evidence_summary() -> str:
     try:
         totals = await _store.turn_totals()
         rows = await _store.skill_signal_summary()
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("could not summarise signal evidence")
         return ""
 

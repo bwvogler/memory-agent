@@ -405,7 +405,7 @@ def write_guard_for(turn: Any) -> Any:
             turn.evolved.append(change)
             log.info("reflection accepted a bounded self-edit: %s", change.summary())
             return {}
-        except Exception:  # noqa: BLE001 - see ADR 0007; guards fail open
+        except Exception:  # see ADR 0007; guards fail open
             log.exception("evolution guard failed")
             return {}
 
@@ -685,5 +685,5 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
                     priority=FIRST_PRIORITY,
                     labels=(CONSOLIDATE_LABEL,),
                 )
-    except Exception:  # noqa: BLE001 - never break a reflection over bookkeeping
+    except Exception:  # never break a reflection over bookkeeping
         log.exception("could not record a consolidation request")

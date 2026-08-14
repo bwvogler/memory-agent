@@ -167,7 +167,7 @@ async def _pre_tool_use(input_data: dict[str, Any], turn: Any = None) -> dict[st
                 "permissionDecisionReason": (f"Refused: {reason}.\n\n{_GUIDANCE}"),
             }
         }
-    except Exception:  # noqa: BLE001 - a broken guard must not break the turn
+    except Exception:  # a broken guard must not break the turn
         log.exception("KB write guard failed; allowing the command through")
         return {}
 
@@ -316,6 +316,6 @@ async def stop_guard(
             "decision": "block",
             "reason": (f'You wrote "{phrase}" but ran no `bd` command.\n\n{_FILE_IT}'),
         }
-    except Exception:  # noqa: BLE001 - a broken guard must not break the turn
+    except Exception:  # a broken guard must not break the turn
         log.exception("deferred-work guard failed; letting the turn end")
         return {}

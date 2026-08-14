@@ -532,7 +532,7 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
         log.info("reflection %s finished with %d change(s)", turn.id, len(turn.evolved))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("reflection turn %s failed", turn.id)
         turn.append("error", str(exc))
         turn.finish(TurnState.ERROR, error=str(exc))
@@ -609,7 +609,7 @@ async def run_turn(
                 turn.append("session", session_id)
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
-    except Exception as exc:  # noqa: BLE001 - surface everything to the client
+    except Exception as exc:  # surface everything to the client
         log.exception("turn %s failed", turn.id)
         turn.append("error", str(exc))
         turn.finish(TurnState.ERROR, error=str(exc))

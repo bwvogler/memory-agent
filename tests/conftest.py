@@ -177,7 +177,7 @@ def _wait_for_health(timeout_s: int = 180) -> None:
             if body.get("kb_mounted") and body.get("transcripts") == "ready":
                 return
             last = r.text
-        except Exception as exc:  # noqa: BLE001 - still starting
+        except Exception as exc:  # noqa: BLE001 - the stack is still starting
             last = str(exc)
         time.sleep(2)
 
