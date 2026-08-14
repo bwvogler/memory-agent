@@ -28,6 +28,20 @@ the TigerFS workspace.
 NOT the KB mount. This keeps temp files out of the versioned wiki. KB writes
 must use absolute paths to `$KB_MOUNT/memory/`.
 
+**Attachments are files on disk, not content blocks.** An image pasted into the
+chat becomes a base64 block in the message, which is right for a screenshot. A
+document does not: `POST /api/turns` takes `files: [{name, data}]`, writes each
+one to `$WORK_DIR/{user_slug}/uploads/{turn_id}/`, and the prompt names the
+paths. A 5 MB CSV then costs nothing until the agent decides to `Read` it, and
+`turn.prompt` — which a revert bead quotes — records what the turn was given.
+
+The filename is attacker-controlled and is treated that way: `kb.safe_upload_name`
+reduces it to a single path component and `kb.resolve_upload_path` asserts
+containment, because `../../.beads/issues.jsonl` would otherwise overwrite the
+ledger. Size is the other unbounded input — base64 in a JSON body has no natural
+limit, so `MAX_UPLOAD_BYTES` and `MAX_UPLOAD_TOTAL_BYTES` are checked *before*
+`registry.create`, so a rejected upload leaves no orphan turn streaming forever.
+
 **Two-layer system prompt.** The universal layer in `agent.py` covers TigerFS
 mechanics and the workspace path. The per-instance layer is loaded at runtime
 from `$KB_MOUNT/memory/AGENT_GUIDE.md` — a plain markdown file the human edits
@@ -181,6 +195,27 @@ facts the agent wrote down to survive across conversations. The agent prunes it
 when it touches it. It is separate from `AGENT_GUIDE.md`, which is the stable
 operator-written schema document.
 
+**Proposed, not built: the Fair Play deck as the wiki's spine.** ADR 0011
+argues that a Fair Play card is a capability contract, because the system's own
+Conception / Planning / Execution split is already an agent-capability split —
+Planning is beads and works, Execution has skills but no integrations, and
+Conception has nothing at all, since there is no scheduler in `app/`. Cards
+would carry YAML frontmatter (a documented exception to the wiki's prose
+convention, because code reads them across 105 files), skills would be earned
+rather than generated one-per-card, and the deck reaches every turn through one
+line in `memory/skills/kb-curator/LEARNED.md` rather than a new skill.
+
+ADR 0012 is its blocker, and it is a live defect rather than a design
+preference. `bd` discovers its graph by walking up from cwd, so each user's
+scratch holds a private ledger, while `kb.export_backlog` writes the *shared*
+`memory/backlog.md` from whichever user just took a turn. A second login makes
+the two overwrite each other — the exact failure ADR 0009 documented for two
+machines, arriving through a different door. The fix is to initialise one graph
+at `$WORK_DIR`, on the discovery path of every user, which makes this deployment
+explicitly one household rather than many tenants.
+
+Neither is implemented. Both are `**Status:** proposed`.
+
 ## Local dev
 
 ```sh
@@ -263,7 +298,9 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs   # skip the format commi
 
 See `app/config.py` for the full list. Required: `ANTHROPIC_API_KEY`,
 `KB_DATABASE_URL`. Notable optional: `KB_MOUNT` (default `/mnt/kb`),
-`WORK_DIR` (default `/work`), `AGENT_MODEL` (default `claude-sonnet-4-6`).
+`WORK_DIR` (default `/work`), `AGENT_MODEL` (default `claude-sonnet-4-6`),
+`MAX_UPLOAD_BYTES` / `MAX_UPLOAD_TOTAL_BYTES` (10 MB per attachment, 25 MB per
+request — the UI mirrors the first of these, and the server is the authority).
 
 ## Deploying
 
