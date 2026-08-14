@@ -177,9 +177,7 @@ async def _already_open(user_slug: str, title: str) -> bool:
         # matter much - but claim "already open" so a broken ledger cannot
         # produce a flood once it recovers.
         return True
-    return any(
-        i.get("title") == title and i.get("status") != "closed" for i in issues
-    )
+    return any(i.get("title") == title and i.get("status") != "closed" for i in issues)
 
 
 async def _file_signal(
@@ -230,61 +228,70 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
         if _store:
             try:
                 await _store.record_turn_outcome(
-                    turn.id, turn.user_email, outcome, turn.terminal_reason,
+                    turn.id,
+                    turn.user_email,
+                    outcome,
+                    turn.terminal_reason,
                     sorted(turn.skills),
                 )
             except Exception:  # noqa: BLE001 - the beads below still matter
                 log.exception(
-                    "could not record the turn outcome for %s; filing signals "
-                    "anyway", turn.id,
+                    "could not record the turn outcome for %s; filing signals anyway",
+                    turn.id,
                 )
 
         if outcome == OUTCOME_ERROR:
-            filed.append(await _file_signal(
-                user_slug,
-                f"Turn failed: {_error_key(turn)}",
-                f"A turn ended in error rather than completing.\n\n"
-                f"Skills that turn used: {_skill_list(turn)}\n\n"
-                f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
-                f"Error:\n```\n{_clip(turn.error or '', 500)}\n```\n\n"
-                "Weak evidence about any skill: most errors are infrastructure "
-                "or model failures, not bad guidance.",
-                priority=3,
-                labels=("error",),
-            ))
+            filed.append(
+                await _file_signal(
+                    user_slug,
+                    f"Turn failed: {_error_key(turn)}",
+                    f"A turn ended in error rather than completing.\n\n"
+                    f"Skills that turn used: {_skill_list(turn)}\n\n"
+                    f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
+                    f"Error:\n```\n{_clip(turn.error or '', 500)}\n```\n\n"
+                    "Weak evidence about any skill: most errors are infrastructure "
+                    "or model failures, not bad guidance.",
+                    priority=3,
+                    labels=("error",),
+                )
+            )
 
         elif outcome == OUTCOME_MAX_TURNS:
-            filed.append(await _file_signal(
-                user_slug,
-                "Turn exhausted max_turns without finishing",
-                f"The agent used its entire turn budget and stopped without "
-                f"finishing. That usually means it was going in circles, "
-                f"which can indicate guidance that sends it round a loop.\n\n"
-                f"Skills that turn used: {_skill_list(turn)}\n\n"
-                f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}",
-                priority=3,
-                labels=("max-turns",),
-            ))
+            filed.append(
+                await _file_signal(
+                    user_slug,
+                    "Turn exhausted max_turns without finishing",
+                    f"The agent used its entire turn budget and stopped without "
+                    f"finishing. That usually means it was going in circles, "
+                    f"which can indicate guidance that sends it round a loop.\n\n"
+                    f"Skills that turn used: {_skill_list(turn)}\n\n"
+                    f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}",
+                    priority=3,
+                    labels=("max-turns",),
+                )
+            )
 
         # Denials our own hooks made are the guards working, not a defect.
         # Filing them would put P1 'check allowed_tools' beads into the very
         # ledger reflection reads, every time a guard did its job.
         unexpected = set(turn.permission_denials) - set(turn.guard_denials)
         for tool in sorted(unexpected):
-            filed.append(await _file_signal(
-                user_slug,
-                f"Agent was denied permission to use: {tool}",
-                f"The agent tried to use `{tool}` and was refused, in a "
-                f"headless context where nobody can grant it. This is almost "
-                f"always a deployment defect rather than anything the model "
-                f"did: check `allowed_tools` in `_options` in app/agent.py.\n\n"
-                f"This exact failure once made the agent silently unable to "
-                f"run `bd` at all while looking completely healthy, which is "
-                f"why it is worth a bead rather than a log line.\n\n"
-                f"Skills that turn used: {_skill_list(turn)}",
-                priority=1,
-                labels=("permission",),
-            ))
+            filed.append(
+                await _file_signal(
+                    user_slug,
+                    f"Agent was denied permission to use: {tool}",
+                    f"The agent tried to use `{tool}` and was refused, in a "
+                    f"headless context where nobody can grant it. This is almost "
+                    f"always a deployment defect rather than anything the model "
+                    f"did: check `allowed_tools` in `_options` in app/agent.py.\n\n"
+                    f"This exact failure once made the agent silently unable to "
+                    f"run `bd` at all while looking completely healthy, which is "
+                    f"why it is worth a bead rather than a log line.\n\n"
+                    f"Skills that turn used: {_skill_list(turn)}",
+                    priority=1,
+                    labels=("permission",),
+                )
+            )
     except Exception:  # noqa: BLE001 - recording must never break a turn
         log.exception("failed to record signals for turn %s", turn.id)
     return [b for b in filed if b]
@@ -323,7 +330,9 @@ async def note_rejected_proposals(turn: Turn, user_slug: str) -> None:
         labels=("evolution-rejected",),
         dedupe=False,
     )
-    log.info("recorded %d rejected self-edit(s) from turn %s", len(turn.evolved), turn.id)
+    log.info(
+        "recorded %d rejected self-edit(s) from turn %s", len(turn.evolved), turn.id
+    )
 
 
 async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> Optional[str]:

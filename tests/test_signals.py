@@ -33,9 +33,12 @@ def test_kb_hosted_skills_are_attributed_too():
 
 
 def test_ordinary_file_reads_are_not_skills():
-    assert signals.skills_from_tool_use(
-        "Read", {"file_path": "/mnt/kb/memory/wiki/notes/tea.md"}
-    ) == set()
+    assert (
+        signals.skills_from_tool_use(
+            "Read", {"file_path": "/mnt/kb/memory/wiki/notes/tea.md"}
+        )
+        == set()
+    )
 
 
 def test_a_bare_skill_md_with_no_parent_directory_is_ignored():

@@ -417,9 +417,7 @@ def _options(
         # this one, because it is not in its writable cwd. See app/guards.py.
         hooks={
             "PreToolUse": [
-                HookMatcher(
-                    matcher="Bash", hooks=[guards.kb_write_guard_for(turn)]
-                )
+                HookMatcher(matcher="Bash", hooks=[guards.kb_write_guard_for(turn)])
             ],
             # Catches the turn that names future work and then drops it. The
             # instruction below was not enough on its own; see app/guards.py.
@@ -533,9 +531,7 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
         await evolve.request_consolidation(user_slug, evolve.merge(turn.evolved))
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
-        log.info(
-            "reflection %s finished with %d change(s)", turn.id, len(turn.evolved)
-        )
+        log.info("reflection %s finished with %d change(s)", turn.id, len(turn.evolved))
     except Exception as exc:  # noqa: BLE001
         log.exception("reflection turn %s failed", turn.id)
         turn.append("error", str(exc))
@@ -548,14 +544,16 @@ async def _image_prompt(text: str, images: list[dict]):
     """Async generator yielding a single user message with image content blocks."""
     content: list[dict] = []
     for img in images:
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": img["media_type"],
-                "data": img["data"],
-            },
-        })
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            }
+        )
     if text:
         content.append({"type": "text", "text": text})
     yield {

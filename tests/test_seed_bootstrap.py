@@ -168,9 +168,7 @@ def test_legacy_state_with_an_unknown_version_leaves_the_file_alone(
     """Cannot tell a stale copy from a human edit, so must not guess."""
     agent.seed_bootstrap()
     on_disk = _lint(workspace).read_text()
-    _state(workspace).write_text(
-        json.dumps({"shipped": {"lint/SKILL.md": "0" * 64}})
-    )
+    _state(workspace).write_text(json.dumps({"shipped": {"lint/SKILL.md": "0" * 64}}))
 
     shipped_source("v2 body")
     agent.seed_bootstrap()

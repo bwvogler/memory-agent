@@ -107,7 +107,9 @@ def test_the_image_skill_overlay_is_seeded_and_can_be_appended_to(stack):
     assert "## Learned" in overlay
 
     out = app_exec("python", "-c", OVERLAY_APPEND_SCRIPT, check=False)
-    assert out.returncode == 0, f"appending to the stored overlay was refused: {out.stdout}"
+    assert out.returncode == 0, (
+        f"appending to the stored overlay was refused: {out.stdout}"
+    )
 
 
 def test_seeded_skills_are_the_beads_aware_versions(stack):
@@ -133,7 +135,8 @@ def test_bead_graph_is_created_outside_the_kb(beads):
 def test_ensure_beads_is_idempotent(beads):
     """It runs on every single turn; a second call must not fail or reset."""
     app_exec(
-        "python", "-c",
+        "python",
+        "-c",
         "import asyncio;from app import kb;"
         f"assert asyncio.run(kb.ensure_beads('{USER_SLUG}'))",
     )
@@ -149,13 +152,15 @@ def test_bd_prime_returns_context_for_the_system_prompt(beads):
 def test_backlog_page_is_exported_into_the_kb(beads):
     """The durable, human-readable copy of a graph that lives on a volume."""
     app_exec(
-        "python", "-c",
+        "python",
+        "-c",
         "import asyncio;from app import kb;"
         f"assert asyncio.run(kb.export_backlog('{USER_SLUG}'))",
     )
 
-    body = httpx.get(f"{beads}/api/kb/file", params={"path": "backlog.md"},
-                     timeout=10).json()["content"]
+    body = httpx.get(
+        f"{beads}/api/kb/file", params={"path": "backlog.md"}, timeout=10
+    ).json()["content"]
     assert body.startswith("# Backlog")
 
 
@@ -200,7 +205,8 @@ def test_a_revert_files_a_signal_bead(beads):
     before = {i["id"] for i in bd_json("list", "--label", "signal")}
 
     app_exec(
-        "python", "-c",
+        "python",
+        "-c",
         "import asyncio;from app import signals;from app.turns import Turn;"
         "t=Turn(id='sig-smoke', user_email='dev@localhost');"
         "t.prompt='add a page about oolong';t.skills={'kb-curator'};"
@@ -209,10 +215,7 @@ def test_a_revert_files_a_signal_bead(beads):
         "' memory/wiki/tea.md | 2 +-')))",
     )
 
-    filed = [
-        i for i in bd_json("list", "--label", "signal")
-        if i["id"] not in before
-    ]
+    filed = [i for i in bd_json("list", "--label", "signal") if i["id"] not in before]
     assert filed, "a revert filed no bead"
     bead = filed[0]
     try:
@@ -242,9 +245,7 @@ def test_repeated_identical_failures_do_not_flood_the_ledger(beads):
     app_exec("python", "-c", snippet)
     app_exec("python", "-c", snippet)
 
-    filed = [
-        i for i in bd_json("list", "--label", "signal") if i["id"] not in before
-    ]
+    filed = [i for i in bd_json("list", "--label", "signal") if i["id"] not in before]
     try:
         assert len(filed) == 1, f"expected one deduped bead, got {len(filed)}"
     finally:
@@ -263,11 +264,14 @@ def test_the_skill_ledger_records_every_turn_not_just_bad_ones(stack):
 
 def test_ready_work_excludes_blocked_beads(beads):
     """Sequencing must live in edges: `bd ready` is what a fresh session reads."""
-    blocker = bd("create", "--title=smoke blocker", "--type=task",
-                 "--priority=2", "--json").stdout
-    blocked = bd("create", "--title=smoke blocked", "--type=task",
-                 "--priority=2", "--json").stdout
+    blocker = bd(
+        "create", "--title=smoke blocker", "--type=task", "--priority=2", "--json"
+    ).stdout
+    blocked = bd(
+        "create", "--title=smoke blocked", "--type=task", "--priority=2", "--json"
+    ).stdout
     import json
+
     blocker_id = json.loads(blocker)["id"]
     blocked_id = json.loads(blocked)["id"]
 

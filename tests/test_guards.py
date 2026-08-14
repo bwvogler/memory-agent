@@ -149,7 +149,9 @@ def _user(text: str) -> dict:
 
 
 def _says(text: str) -> dict:
-    return {"message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    return {
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    }
 
 
 def _runs(command: str) -> dict:
@@ -179,7 +181,9 @@ def test_the_exact_turn_that_lost_the_work():
         _user("Add a page. Separately, wiki/notes/ has no GUIDE.md - not now."),
         _runs("cat /mnt/kb/memory/AGENT_GUIDE.md"),
         _tool_result(),
-        _says("Done. The missing GUIDE.md is noted as a follow-up for a later session."),
+        _says(
+            "Done. The missing GUIDE.md is noted as a follow-up for a later session."
+        ),
     ]
     assert guards.unfiled_deferral(rows) == "follow-up"
 
@@ -206,7 +210,10 @@ def test_annotating_an_existing_bead_counts_as_filing():
 
 
 def test_an_ordinary_turn_is_not_blocked():
-    rows = [_user("What does the wiki say about tea?"), _says("Oolong steeps 4 minutes.")]
+    rows = [
+        _user("What does the wiki say about tea?"),
+        _says("Oolong steeps 4 minutes."),
+    ]
     assert guards.unfiled_deferral(rows) is None
 
 
@@ -235,7 +242,7 @@ def test_a_tool_result_does_not_start_a_new_turn():
 
 
 def test_bare_later_is_not_enough_to_block():
-    """"later" turns up in ordinary prose ("a later version", "later in the
+    """ "later" turns up in ordinary prose ("a later version", "later in the
     file"). Blocking on it would fire on turns with nothing to file."""
     rows = [_user("Explain the format."), _says("A later version changed this.")]
     assert guards.unfiled_deferral(rows) is None
@@ -266,30 +273,38 @@ def test_the_block_names_the_phrase_and_the_command_to_run(tmp_path):
 def test_the_guard_blocks_at_most_once(tmp_path):
     """Without this it re-fires on its own re-prompt until max_turns."""
     transcript = tmp_path / "t.jsonl"
-    transcript.write_text(
-        json.dumps(_says("a follow-up for later")), encoding="utf-8"
-    )
-    assert asyncio.run(
-        guards.stop_guard(
-            {"stop_hook_active": True, "transcript_path": str(transcript)}, None, None
+    transcript.write_text(json.dumps(_says("a follow-up for later")), encoding="utf-8")
+    assert (
+        asyncio.run(
+            guards.stop_guard(
+                {"stop_hook_active": True, "transcript_path": str(transcript)},
+                None,
+                None,
+            )
         )
-    ) == {}
+        == {}
+    )
 
 
 def test_an_unreadable_transcript_lets_the_turn_end(tmp_path):
     """The transcript format is a CLI internal. If it drifts, the turn still
     finishes - a stuck turn would be far worse than a missed bead."""
     assert asyncio.run(guards.stop_guard({}, None, None)) == {}
-    assert asyncio.run(
-        guards.stop_guard({"transcript_path": str(tmp_path / "nope.jsonl")}, None, None)
-    ) == {}
+    assert (
+        asyncio.run(
+            guards.stop_guard(
+                {"transcript_path": str(tmp_path / "nope.jsonl")}, None, None
+            )
+        )
+        == {}
+    )
 
 
 def test_a_half_written_final_line_is_skipped(tmp_path):
     """The CLI appends to this file while we read it."""
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(
-        json.dumps(_says("a follow-up for later")) + "\n{\"partial\": ",
+        json.dumps(_says("a follow-up for later")) + '\n{"partial": ',
         encoding="utf-8",
     )
     out = asyncio.run(

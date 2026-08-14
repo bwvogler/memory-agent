@@ -83,14 +83,10 @@ def test_clicking_revert_records_a_signal_naming_the_skills_used(beads, stack):
     assert turn["state"] == "done", turn.get("error")
 
     before = {i["id"] for i in bd_json("list", "--label", "signal")}
-    reverted = httpx.post(
-        f"{stack}/api/turns/{turn['turn_id']}/revert", timeout=60
-    )
+    reverted = httpx.post(f"{stack}/api/turns/{turn['turn_id']}/revert", timeout=60)
     assert reverted.status_code == 200, reverted.text
 
-    filed = [
-        i for i in bd_json("list", "--label", "signal") if i["id"] not in before
-    ]
+    filed = [i for i in bd_json("list", "--label", "signal") if i["id"] not in before]
     assert filed, "Revert filed no signal bead"
     body = filed[0]["description"]
 
@@ -183,22 +179,27 @@ def test_reflection_cannot_exceed_its_remit(beads, stack):
     """
     app_exec("mkdir", "-p", "/mnt/kb/memory/skills/reflect-probe")
     app_exec(
-        "python", "-c",
+        "python",
+        "-c",
         f"open({REFLECT_TARGET!r},'w').write({PROBE_SKILL!r})",
     )
-    guide_before = app_exec(
-        "cat", "/mnt/kb/memory/AGENT_GUIDE.md", check=False
-    ).stdout
+    guide_before = app_exec("cat", "/mnt/kb/memory/AGENT_GUIDE.md", check=False).stdout
     curator_before = app_exec("cat", "/srv/skills/kb-curator/SKILL.md").stdout
 
     # Give reflection something to reason about, or it correctly does nothing.
     bd(
-        "create", "Turn failed: reflect-probe never triggered",
+        "create",
+        "Turn failed: reflect-probe never triggered",
         "--description",
         "A turn needed the reflect-probe skill and never loaded it. Its "
         "description says only 'Does a thing.', which matches nothing a human "
         "would type. Skills that turn used: none recorded.",
-        "--labels", "signal", "--status", "deferred", "--priority", "1",
+        "--labels",
+        "signal",
+        "--status",
+        "deferred",
+        "--priority",
+        "1",
     )
 
     turn = _run_turn_at(f"{stack}/api/reflect")

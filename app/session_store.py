@@ -159,7 +159,10 @@ class PostgresSessionStore:
                         SET outcome = EXCLUDED.outcome,
                             terminal_reason = EXCLUDED.terminal_reason
                     """,
-                    turn_id, user_email, outcome, terminal_reason,
+                    turn_id,
+                    user_email,
+                    outcome,
+                    terminal_reason,
                 )
                 if skills:
                     await conn.executemany(
@@ -174,7 +177,8 @@ class PostgresSessionStore:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE turn_outcomes SET outcome = $2 WHERE turn_id = $1",
-                turn_id, outcome,
+                turn_id,
+                outcome,
             )
 
     async def skill_signal_summary(self) -> list[dict]:

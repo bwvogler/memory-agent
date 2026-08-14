@@ -29,20 +29,28 @@ BASE_URL = "http://localhost:18080"
 USER_SLUG = "dev_localhost"
 
 _COMPOSE = [
-    "docker", "compose",
-    "-p", PROJECT,
-    "-f", str(REPO_ROOT / "docker-compose.yml"),
-    "-f", str(REPO_ROOT / "tests" / "compose.test.yml"),
+    "docker",
+    "compose",
+    "-p",
+    PROJECT,
+    "-f",
+    str(REPO_ROOT / "docker-compose.yml"),
+    "-f",
+    str(REPO_ROOT / "tests" / "compose.test.yml"),
 ]
 
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--container", action="store_true", default=False,
+        "--container",
+        action="store_true",
+        default=False,
         help="run the Docker smoke tier (slow, ~3 min, no API key needed)",
     )
     parser.addoption(
-        "--live", action="store_true", default=False,
+        "--live",
+        action="store_true",
+        default=False,
         help="run one real agent turn (spends tokens; implies --container)",
     )
 
@@ -140,7 +148,8 @@ def beads(stack):
     ensure_beads itself.
     """
     app_exec(
-        "python", "-c",
+        "python",
+        "-c",
         "import asyncio;from app import kb;"
         f"assert asyncio.run(kb.ensure_beads('{USER_SLUG}'))",
     )

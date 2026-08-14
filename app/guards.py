@@ -56,20 +56,28 @@ log = logging.getLogger(__name__)
 # `>` is deliberately absent - a truncating redirect writes the whole file from
 # offset 0, which is exactly the safe pattern.
 _HAZARDS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r">>"),
-     "`>>` appends, which zeroes everything already in the file"),
-    (re.compile(r"\btee\s+(-a\b|--append\b)"),
-     "`tee -a` appends, which zeroes everything already in the file"),
-    (re.compile(r"\bsed\s+(-[a-zA-Z]*i|--in-place)"),
-     "`sed -i` rewrites in place and cannot be trusted on this mount"),
-    (re.compile(r"\bdd\b.*\b(seek|conv=notrunc)"),
-     "`dd` writing at an offset leaves the untouched bytes as NULs"),
-    (re.compile(r"\btruncate\b"),
-     "`truncate` resizes without rewriting the content"),
-    (re.compile(r"\bpatch\b"),
-     "`patch` edits in place and cannot be trusted on this mount"),
-    (re.compile(r"""open\s*\([^)]*['"]a['"]?"""),
-     "opening a file in append mode zeroes everything already in it"),
+    (re.compile(r">>"), "`>>` appends, which zeroes everything already in the file"),
+    (
+        re.compile(r"\btee\s+(-a\b|--append\b)"),
+        "`tee -a` appends, which zeroes everything already in the file",
+    ),
+    (
+        re.compile(r"\bsed\s+(-[a-zA-Z]*i|--in-place)"),
+        "`sed -i` rewrites in place and cannot be trusted on this mount",
+    ),
+    (
+        re.compile(r"\bdd\b.*\b(seek|conv=notrunc)"),
+        "`dd` writing at an offset leaves the untouched bytes as NULs",
+    ),
+    (re.compile(r"\btruncate\b"), "`truncate` resizes without rewriting the content"),
+    (
+        re.compile(r"\bpatch\b"),
+        "`patch` edits in place and cannot be trusted on this mount",
+    ),
+    (
+        re.compile(r"""open\s*\([^)]*['"]a['"]?"""),
+        "opening a file in append mode zeroes everything already in it",
+    ),
 ]
 
 _GUIDANCE = (
@@ -130,9 +138,7 @@ def kb_write_guard_for(turn: Any = None) -> Any:
     return guard
 
 
-async def _pre_tool_use(
-    input_data: dict[str, Any], turn: Any = None
-) -> dict[str, Any]:
+async def _pre_tool_use(input_data: dict[str, Any], turn: Any = None) -> dict[str, Any]:
     """Deny shell commands that would corrupt knowledge-base files.
 
     Returns an empty dict to allow, which is the default for everything this
@@ -150,8 +156,7 @@ async def _pre_tool_use(
         if turn is not None:
             turn.guard_denials.append("Bash")
         log.warning(
-            "blocked a knowledge-base write that would have corrupted a file "
-            "(%s): %s",
+            "blocked a knowledge-base write that would have corrupted a file (%s): %s",
             reason,
             command[:200],
         )
@@ -159,9 +164,7 @@ async def _pre_tool_use(
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    f"Refused: {reason}.\n\n{_GUIDANCE}"
-                ),
+                "permissionDecisionReason": (f"Refused: {reason}.\n\n{_GUIDANCE}"),
             }
         }
     except Exception:  # noqa: BLE001 - a broken guard must not break the turn
@@ -211,9 +214,9 @@ _FILE_IT = (
     "bead ledger exists to end - the next session has no memory of this one and "
     "will never see it.\n\n"
     "File it now:\n\n"
-    "    bd create --title=\"Short, specific title\" \\\n"
-    "      --description=\"What needs doing, where, and why - written for "
-    "someone with no memory of this conversation.\" \\\n"
+    '    bd create --title="Short, specific title" \\\n'
+    '      --description="What needs doing, where, and why - written for '
+    'someone with no memory of this conversation." \\\n'
     "      --type=task --priority=2\n\n"
     "Then finish your reply as normal. If on reflection there is genuinely no "
     "durable work here - you were describing what you just did, or the user "
@@ -307,9 +310,7 @@ async def stop_guard(
         log.info("stop guard: deferred work (%r) was never filed as a bead", phrase)
         return {
             "decision": "block",
-            "reason": (
-                f'You wrote "{phrase}" but ran no `bd` command.\n\n{_FILE_IT}'
-            ),
+            "reason": (f'You wrote "{phrase}" but ran no `bd` command.\n\n{_FILE_IT}'),
         }
     except Exception:  # noqa: BLE001 - a broken guard must not break the turn
         log.exception("deferred-work guard failed; letting the turn end")

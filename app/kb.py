@@ -92,7 +92,11 @@ async def _run(
         env=env,
     )
     out, err = await proc.communicate()
-    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+    return (
+        proc.returncode or 0,
+        out.decode(errors="replace"),
+        err.decode(errors="replace"),
+    )
 
 
 async def create_savepoint(name: str) -> bool:
@@ -103,7 +107,9 @@ async def create_savepoint(name: str) -> bool:
     answer because bookkeeping failed - is worse.
     """
     await _run(*_git_args(), "add", "-A")
-    rc, _, err = await _run(*_git_args(), "commit", "-m", f"savepoint:{name}", "--allow-empty")
+    rc, _, err = await _run(
+        *_git_args(), "commit", "-m", f"savepoint:{name}", "--allow-empty"
+    )
     if rc != 0:
         log.warning("savepoint commit failed: %s", err)
         return False
@@ -209,10 +215,12 @@ async def ensure_beads(user_slug: str) -> bool:
     """
     scratch = scratch_dir_for(user_slug)
     rc, _, err = await _run(
-        "bd", "init",
+        "bd",
+        "init",
         "--init-if-missing",
         "--non-interactive",
-        "--prefix", BEADS_PREFIX,
+        "--prefix",
+        BEADS_PREFIX,
         cwd=scratch,
         env=_bd_env(),
     )
@@ -240,7 +248,9 @@ async def bd_prime(user_slug: str) -> str:
     return out.strip()
 
 
-async def list_beads(user_slug: str, label: Optional[str] = None) -> Optional[list[dict]]:
+async def list_beads(
+    user_slug: str, label: Optional[str] = None
+) -> Optional[list[dict]]:
     """Return the bead graph as dicts, optionally filtered to one label.
 
     Returns None - not [] - when bd could not be reached. The distinction
@@ -278,9 +288,13 @@ async def create_bead(
     codebase: it opens $EDITOR and a headless turn would hang forever.
     """
     argv = [
-        "bd", "create", title,
-        "--type", issue_type,
-        "--priority", str(priority),
+        "bd",
+        "create",
+        title,
+        "--type",
+        issue_type,
+        "--priority",
+        str(priority),
     ]
     if description:
         argv += ["--description", description]
@@ -344,9 +358,7 @@ def _render_backlog(issues: list[dict]) -> str:
         by_status.setdefault(issue.get("status", "open"), []).append(issue)
 
     # Unknown statuses sort last rather than vanishing.
-    for status in sorted(
-        by_status, key=lambda s: (_STATUS_ORDER + [s]).index(s)
-    ):
+    for status in sorted(by_status, key=lambda s: (_STATUS_ORDER + [s]).index(s)):
         lines.append(f"## {status.replace('_', ' ').title()}")
         lines.append("")
         for issue in sorted(by_status[status], key=lambda i: i.get("priority", 4)):
@@ -427,8 +439,12 @@ async def sql_read_file(path: str) -> Optional[str]:
 async def note_bead(user_slug: str, bead_id: str, text: str) -> bool:
     """Append a note to an existing bead. Never raises."""
     rc, _, err = await _run(
-        "bd", "note", bead_id, text,
-        cwd=scratch_dir_for(user_slug), env=_bd_env(),
+        "bd",
+        "note",
+        bead_id,
+        text,
+        cwd=scratch_dir_for(user_slug),
+        env=_bd_env(),
     )
     if rc != 0:
         log.warning("bd note failed for %s/%s: %s", user_slug, bead_id, err.strip())
@@ -438,8 +454,13 @@ async def note_bead(user_slug: str, bead_id: str, text: str) -> bool:
 async def set_priority(user_slug: str, bead_id: str, priority: int) -> bool:
     """Raise or lower a bead's priority. Never raises."""
     rc, _, err = await _run(
-        "bd", "update", bead_id, "--priority", str(priority),
-        cwd=scratch_dir_for(user_slug), env=_bd_env(),
+        "bd",
+        "update",
+        bead_id,
+        "--priority",
+        str(priority),
+        cwd=scratch_dir_for(user_slug),
+        env=_bd_env(),
     )
     if rc != 0:
         log.warning("bd update failed for %s/%s: %s", user_slug, bead_id, err.strip())

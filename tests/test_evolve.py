@@ -222,9 +222,7 @@ def test_image_skills_are_out_of_reach(monkeypatch, tmp_path):
 
 def test_traversal_out_of_the_skills_dir_is_refused(monkeypatch, tmp_path):
     monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
-    assert (
-        evolve.mutable_skill_path(f"{tmp_path}/skills/../../etc/SKILL.md") is None
-    )
+    assert evolve.mutable_skill_path(f"{tmp_path}/skills/../../etc/SKILL.md") is None
 
 
 # --- the hook --------------------------------------------------------------
@@ -285,8 +283,11 @@ def test_refusing_an_image_write_names_the_overlay(monkeypatch, tmp_path):
     the last time (ADR 0007). The refusal must say where the lesson does go."""
     monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
     guard = evolve.write_guard_for(_Turn())
-    out = _run(guard, "Write", {"file_path": "/srv/skills/kb-curator/SKILL.md",
-                                "content": SKILL})
+    out = _run(
+        guard,
+        "Write",
+        {"file_path": "/srv/skills/kb-curator/SKILL.md", "content": SKILL},
+    )
     assert evolve.OVERLAY_FILE in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
@@ -305,15 +306,20 @@ def test_refusals_are_recorded_as_ours(monkeypatch, tmp_path):
     turn = _Turn()
     guard = evolve.write_guard_for(turn)
     _run(guard, "Edit", {"file_path": "x"})
-    _run(guard, "Write", {"file_path": str(tmp_path / "AGENT_GUIDE.md"), "content": "x"})
+    _run(
+        guard, "Write", {"file_path": str(tmp_path / "AGENT_GUIDE.md"), "content": "x"}
+    )
     assert turn.guard_denials == ["Edit", "Write"]
 
 
 def test_the_hook_refuses_a_write_outside_the_remit(monkeypatch, tmp_path):
     monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
     guard = evolve.write_guard_for(_Turn())
-    out = _run(guard, "Write", {"file_path": str(tmp_path / "AGENT_GUIDE.md"),
-                                "content": "anything"})
+    out = _run(
+        guard,
+        "Write",
+        {"file_path": str(tmp_path / "AGENT_GUIDE.md"), "content": "anything"},
+    )
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "file a bead" in reason.lower()
 
@@ -323,8 +329,11 @@ def test_the_hook_refuses_creating_a_new_skill(monkeypatch, tmp_path):
     monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
     (tmp_path / "skills").mkdir(parents=True)
     guard = evolve.write_guard_for(_Turn())
-    out = _run(guard, "Write", {"file_path": str(tmp_path / "skills/new/SKILL.md"),
-                                "content": SKILL})
+    out = _run(
+        guard,
+        "Write",
+        {"file_path": str(tmp_path / "skills/new/SKILL.md"), "content": SKILL},
+    )
     assert "does not exist" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
@@ -391,8 +400,16 @@ class _FakeBd:
     async def list_beads(self, user_slug, label=None):
         return self.beads
 
-    async def create_bead(self, user_slug, title, description="", priority=2,
-                          labels=(), status=None, issue_type="task"):
+    async def create_bead(
+        self,
+        user_slug,
+        title,
+        description="",
+        priority=2,
+        labels=(),
+        status=None,
+        issue_type="task",
+    ):
         self.created.append((title, priority, description))
         return "kb-new"
 
@@ -435,17 +452,25 @@ def test_appending_a_lesson_asks_for_it_to_be_folded_back_in(monkeypatch):
 def test_a_description_only_change_asks_for_nothing():
     """Nothing accumulated, so nothing to prune."""
     fake = _FakeBd()
-    asyncio.run(evolve.request_consolidation("u", [evolve.Change("lint", "p", True, 0)]))
+    asyncio.run(
+        evolve.request_consolidation("u", [evolve.Change("lint", "p", True, 0)])
+    )
     assert fake.created == []
 
 
 def test_more_lessons_escalate_one_bead_rather_than_filing_more(monkeypatch):
     """Five lessons in one skill is one job that got more urgent, not five
     jobs. Filing per lesson would recreate the scrolling list beads replaced."""
-    fake = _FakeBd([
-        {"id": "kb-abc", "title": evolve.consolidation_title("lint"),
-         "status": "open", "priority": 3},
-    ])
+    fake = _FakeBd(
+        [
+            {
+                "id": "kb-abc",
+                "title": evolve.consolidation_title("lint"),
+                "status": "open",
+                "priority": 3,
+            },
+        ]
+    )
     _patch_bd(monkeypatch, fake)
 
     asyncio.run(evolve.request_consolidation("u", [_learned_change(n=2)]))
@@ -456,10 +481,16 @@ def test_more_lessons_escalate_one_bead_rather_than_filing_more(monkeypatch):
 
 
 def test_escalation_stops_at_the_top(monkeypatch):
-    fake = _FakeBd([
-        {"id": "kb-abc", "title": evolve.consolidation_title("lint"),
-         "status": "open", "priority": evolve.MOST_URGENT},
-    ])
+    fake = _FakeBd(
+        [
+            {
+                "id": "kb-abc",
+                "title": evolve.consolidation_title("lint"),
+                "status": "open",
+                "priority": evolve.MOST_URGENT,
+            },
+        ]
+    )
     _patch_bd(monkeypatch, fake)
     asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
     assert fake.priorities == []
@@ -468,10 +499,16 @@ def test_escalation_stops_at_the_top(monkeypatch):
 
 def test_a_closed_bead_does_not_suppress_a_new_one(monkeypatch):
     """Consolidation done once does not mean it never needs doing again."""
-    fake = _FakeBd([
-        {"id": "kb-old", "title": evolve.consolidation_title("lint"),
-         "status": "closed", "priority": 3},
-    ])
+    fake = _FakeBd(
+        [
+            {
+                "id": "kb-old",
+                "title": evolve.consolidation_title("lint"),
+                "status": "closed",
+                "priority": 3,
+            },
+        ]
+    )
     _patch_bd(monkeypatch, fake)
     asyncio.run(evolve.request_consolidation("u", [_learned_change()]))
     assert len(fake.created) == 1
@@ -504,9 +541,11 @@ def test_the_two_shapes_do_not_share_a_bead(monkeypatch):
     fake = _FakeBd()
     _patch_bd(monkeypatch, fake)
 
-    asyncio.run(evolve.request_consolidation(
-        "u", [_learned_change("probe"), _overlay_change("probe")]
-    ))
+    asyncio.run(
+        evolve.request_consolidation(
+            "u", [_learned_change("probe"), _overlay_change("probe")]
+        )
+    )
 
     assert len({title for title, _, _ in fake.created}) == 2
 

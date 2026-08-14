@@ -44,12 +44,16 @@ class Identity:
     @property
     def slug(self) -> str:
         """Filesystem-safe identifier, for per-user scratch directories."""
-        return "".join(c if c.isalnum() or c in "-_" else "_" for c in self.email.lower())
+        return "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in self.email.lower()
+        )
 
 
 async def _get_jwks(force: bool = False) -> dict:
     global _jwks_cache, _jwks_fetched_at
-    fresh = _jwks_cache is not None and (time.time() - _jwks_fetched_at) < _JWKS_TTL_SECONDS
+    fresh = (
+        _jwks_cache is not None and (time.time() - _jwks_fetched_at) < _JWKS_TTL_SECONDS
+    )
     if fresh and not force:
         return _jwks_cache  # type: ignore[return-value]
     async with httpx.AsyncClient(timeout=10.0) as client:

@@ -32,7 +32,9 @@ class Config:
     # the addresses aren't on a domain you control (e.g. personal Gmail
     # accounts) - allowlisting "gmail.com" would let in every Gmail user alive.
     # Leaving both empty allows anyone Access itself lets through.
-    allowed_email_domains: list[str] = field(default_factory=lambda: _csv("ALLOWED_EMAIL_DOMAINS"))
+    allowed_email_domains: list[str] = field(
+        default_factory=lambda: _csv("ALLOWED_EMAIL_DOMAINS")
+    )
     allowed_emails: list[str] = field(default_factory=lambda: _csv("ALLOWED_EMAILS"))
 
     dev_bypass_auth: bool = _bool("DEV_BYPASS_AUTH")

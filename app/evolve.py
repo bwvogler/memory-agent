@@ -343,7 +343,8 @@ def write_guard_for(turn: Any) -> Any:
             if tool in _REFUSED_TOOLS:
                 return _deny(
                     f"`{tool}` is not available while reflecting. {_WRITE_WHOLE}",
-                    turn, tool,
+                    turn,
+                    tool,
                 )
             if tool != "Write":
                 return {}
@@ -362,7 +363,7 @@ def write_guard_for(turn: Any) -> Any:
                     "which the skill reads when it loads. AGENT_GUIDE.md "
                     "belongs to the human. If the fix is somewhere else "
                     "entirely, file a bead describing it instead of making the "
-                    "change."
+                    "change.",
                 )
 
             try:
@@ -373,7 +374,7 @@ def write_guard_for(turn: Any) -> Any:
                     f"{path} does not exist yet. Reflection improves existing "
                     "skills; it does not create new ones, and it does not "
                     "create an overlay for a skill that has none. File a bead "
-                    "if that is what is needed."
+                    "if that is what is needed.",
                 )
 
             proposed = tool_input.get("content") or ""
@@ -397,7 +398,7 @@ def write_guard_for(turn: Any) -> Any:
                     f"Refused: {reason}.\n\n{allowed} If the skill needs a "
                     "deeper change than that, say so and file a bead for a "
                     "human - that is a successful outcome of reflecting, not a "
-                    "failure."
+                    "failure.",
                 )
 
             change = describe_edit(current, proposed, path)
@@ -660,7 +661,9 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
         for change in learned:
             overlay = change.path.endswith(OVERLAY_FILE)
             title = consolidation_title(change.skill, overlay)
-            entries = f"{change.learned} new entr{'y' if change.learned == 1 else 'ies'}"
+            entries = (
+                f"{change.learned} new entr{'y' if change.learned == 1 else 'ies'}"
+            )
             if bead := open_by_title.get(title):
                 await kb.note_bead(
                     user_slug,
@@ -672,13 +675,9 @@ async def request_consolidation(user_slug: str, changes: list[Change]) -> None:
                 current = bead.get("priority")
                 if isinstance(current, int) and current > MOST_URGENT:
                     await kb.set_priority(user_slug, bead["id"], current - 1)
-                    log.info(
-                        "escalated %s to P%d (%s)", bead["id"], current - 1, title
-                    )
+                    log.info("escalated %s to P%d (%s)", bead["id"], current - 1, title)
             else:
-                body = (
-                    _overlay_consolidation_body if overlay else _consolidation_body
-                )
+                body = _overlay_consolidation_body if overlay else _consolidation_body
                 await kb.create_bead(
                     user_slug,
                     title,

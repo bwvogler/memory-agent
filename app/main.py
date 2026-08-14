@@ -61,7 +61,9 @@ async def _start_session_store() -> PostgresSessionStore | None:
                 return None
             log.warning(
                 "session store not ready (attempt %d/%d); retrying in %.0fs",
-                attempt, SESSION_STORE_ATTEMPTS, SESSION_STORE_BACKOFF_S,
+                attempt,
+                SESSION_STORE_ATTEMPTS,
+                SESSION_STORE_BACKOFF_S,
             )
             await asyncio.sleep(SESSION_STORE_BACKOFF_S)
     return None
@@ -162,7 +164,13 @@ async def create_turn(request: Request, identity: Identity = Depends(current_ide
 
     turn = registry.create(user_email=identity.email, session_id=resume)
     asyncio.create_task(
-        agent.run_turn(turn, prompt=prompt, user_slug=identity.slug, resume=resume, images=images or None)
+        agent.run_turn(
+            turn,
+            prompt=prompt,
+            user_slug=identity.slug,
+            resume=resume,
+            images=images or None,
+        )
     )
     return JSONResponse({"turn_id": turn.id}, status_code=202)
 
