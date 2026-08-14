@@ -1,0 +1,49 @@
+# What must never enter the build context.
+#
+# The Dockerfile copies seven explicit paths (app, static, skills, bootstrap,
+# entrypoint.sh, scripts, docs/shipped-beads.jsonl). Everything below is either
+# irrelevant to those or actively dangerous to walk.
+#
+# The dangerous one is `mnt/`. scripts/mount-kb.sh mounts the knowledge base
+# there - usually the PRODUCTION database, since .env points at the same one the
+# deployed machine uses. Without this file, `fly deploy` packs the build context
+# by walking that mount: it reads the entire wiki out of Postgres over FUSE, and
+# descends into TigerFS's control surface at `.schemas`, where an index
+# directory contains itself. The walk does not terminate, the NFS server stalls
+# ("nfs server 127.0.0.1:/: not responding"), and the deploy hangs before the
+# image starts building. It also means the contents of the production knowledge
+# base were being uploaded to the builder.
+mnt/
+
+# The Fly volume's local twin: the bead ledger, kb.git savepoint history and
+# per-user scratch. Large, machine-local, and meaningless inside an image.
+work/
+work-dev/
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets. Fly gets these as secrets, never baked into a layer.
+.env
+.env.*
+!.env.example
+
+.git/
+.github/
+.pre-commit-config.yaml
+tests/
+docs/decisions/
+*.log
+.DS_Store
+.vscode/
+.claude/
+
+# Dolt/beads working files. .beads/issues.jsonl is committed, but nothing in
+# the image reads it - the deployed ledger lives on the volume.
+.beads/
+.dolt/
+*.db
+*.gate.lock*
+.beads-credential-key
