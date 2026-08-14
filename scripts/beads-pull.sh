@@ -16,28 +16,22 @@
 # Usage: scripts/beads-pull.sh [user_slug]
 set -euo pipefail
 
-SLUG="${1:-dev_localhost}"
-APP="${FLY_APP:-memory-agent-proud-island-3747}"
-
 cd "$(dirname "$0")/.."
 
 for tool in flyctl jq bd; do
     command -v "$tool" >/dev/null || { echo "need $tool on PATH" >&2; exit 1; }
 done
 
-# fly.toml runs min_machines_running = 0, so the machine is usually suspended
-# and `fly ssh` reports a forcibly-closed session rather than a stopped host.
-# One request wakes it, and auto_start_machines does the rest.
-echo "waking $APP..." >&2
-curl -fsS -m 90 -o /dev/null "https://${APP}.fly.dev/healthz" || {
-    echo "could not reach $APP; is it deployed?" >&2
-    exit 1
-}
+# Waking the suspended machine, discovering which /work directory holds the
+# ledger, and getting a quoted command past `flyctl ssh -C` all live in
+# scripts/fly.sh. They were inline here first; a second caller is exactly when
+# that stops being fine, and the slug in particular was a default that happened
+# to be right rather than something anybody had checked.
+export FLY_USER_SLUG="${1:-}"
 
-# `bd export` has no --label filter, so filter here. flyctl prefixes its own
-# "Connecting to ..." line, which is not JSON; drop anything that is not.
-echo "exporting from /work/${SLUG}/.beads..." >&2
-raw="$(flyctl ssh console --app "$APP" -C "bd -C /work/${SLUG} export")"
+# `bd export` has no --label filter, so filter here. Anything that is not JSON
+# is not ours.
+raw="$(scripts/fly.sh bd export)"
 
 image="$(printf '%s\n' "$raw" \
     | grep '^{' \

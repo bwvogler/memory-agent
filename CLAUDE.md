@@ -66,6 +66,13 @@ ceiling that matters is not hardware anyway: savepoints are a global
 `git add -A` over one workspace, so concurrent turns already interfere. See
 `docs/decisions/0009`.
 
+That split decides how you reach each tier from a laptop. The KB mounts locally
+(`scripts/mount-kb.sh`, which now names the database and makes production
+opt-in). The volume needs `scripts/fly.sh` — read-only by default, and the only
+place that knows how to wake a suspended machine and get a quoted command past
+`flyctl ssh -C`, which runs no shell and strips quotes. `scripts/beads-pull.sh`
+goes through it rather than repeating either trick.
+
 **Ideas about the image live in a second ledger, in git.** The agent is the
 only user who sees this product from the inside, and most of what it files is
 about the app rather than the wiki — which it cannot touch: no repo, no git, a

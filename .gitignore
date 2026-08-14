@@ -7,6 +7,9 @@ __pycache__/
 venv/
 work/
 mnt/
+# scripts/mount-kb.sh --dev keeps its mountpoint and savepoints apart from the
+# production ones, so it needs its own pair here.
+work-dev/
 *.log
 .DS_Store
 .vscode/

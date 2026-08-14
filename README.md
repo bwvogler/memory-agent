@@ -155,6 +155,48 @@ make it a post-deploy smoke test, not a one-time check.
 **`/healthz` reports `kb_mounted: true`.** A knowledge base that is not mounted
 produces no errors anywhere. The agent just quietly knows nothing.
 
+## Working against the deployed machine
+
+State is split across two tiers, and only one of them is reachable from a
+laptop by default.
+
+**The knowledge base is in Postgres**, so it needs no special access — mount it
+locally and browse it with ordinary tools:
+
+```bash
+bash scripts/mount-kb.sh --dev    # the throwaway Postgres from docker compose
+bash scripts/mount-kb.sh --prod   # whatever .env points at
+```
+
+`.env` usually points at the *same* database the deployed machine writes to. If
+so, everything under the mountpoint is production: an editor save lands there
+with no review and no deploy in between. That is why `--prod` has to be said out
+loud, and why the script prints which host it mounted every time.
+
+**Everything else is on the Fly volume** — the bead ledger, `kb.git`, per-user
+scratch, the SDK transcripts — attached to exactly one machine
+(`docs/decisions/0009`). Reach it with:
+
+```bash
+scripts/fly.sh doctor            # slug, volume usage, bd versions
+scripts/fly.sh bd ready --json   # the deployed ledger
+scripts/fly.sh run ls -la /work
+scripts/fly.sh shell
+```
+
+It is read-only by default: `bd close` and friends need `--write`, because that
+graph sits on an unreplicated volume and no savepoint covers it. Two things it
+handles that a hand-written `fly ssh` does not — the machine is suspended
+(`min_machines_running = 0`, and SSH is not proxy traffic, so it must be woken
+over HTTP first), and `flyctl ssh console -C` runs no shell, strips quote
+characters and splits on whitespace, so any argument containing a space arrives
+mangled unless it is encoded.
+
+Keep local `bd` on the version the `Dockerfile` pins. bd refuses to open a
+database written by a newer schema, and this repo now has a `.beads` of its own
+— a newer local bd would upgrade it in place. `scripts/fly.sh doctor` prints
+both versions side by side.
+
 ## Layout
 
 ```
