@@ -192,6 +192,40 @@ The live tier is the only thing that catches permission regressions —
 blocked from ever running `bd`. It asserts on mechanism (a bd command ran, the
 ledger changed), never on what the model chose to say.
 
+## Linting and types
+
+```sh
+ruff check app tests          # lint
+ruff format app tests         # format
+ty check app tests            # types
+```
+
+Config is in `pyproject.toml`, which exists for these two tools and nothing
+else — there is no `[project]` table, because the image pip-installs
+`requirements.txt` and copies `app/` rather than installing a package.
+
+ruff selects `ALL` and then opts out, with the reason written next to each
+ignore. The reason is the part that goes stale silently, so it lives beside the
+rule rather than in a commit message. Test-only idioms (bare `assert`, reaching
+into private state, unused fixture arguments) are handled by `per-file-ignores`,
+not by weakening the rule set for `app/`.
+
+Both tools are **pinned exactly** in `requirements-dev.txt`, and the same
+versions appear in `.github/workflows/ci.yml` and `.pre-commit-config.yaml` —
+change all three together. ruff can add rules to `ALL` in a patch release and
+ty is pre-1.0; either drifting turns an unrelated PR red, which is how a team
+learns to ignore CI.
+
+CI runs four jobs on every push: ruff, ty, the fast pytest tier, and
+`pytest --container`. Pre-commit deliberately runs only the static checks — a
+commit hook that stands up Docker and Postgres gets bypassed with `--no-verify`
+until it may as well not be installed.
+
+```sh
+pip install pre-commit && pre-commit install
+git config blame.ignoreRevsFile .git-blame-ignore-revs   # skip the format commit
+```
+
 ## Environment variables
 
 See `app/config.py` for the full list. Required: `ANTHROPIC_API_KEY`,
