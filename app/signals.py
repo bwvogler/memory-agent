@@ -33,15 +33,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolUseBlock
 
 from . import kb
 from .turns import Turn, TurnState
-
-if TYPE_CHECKING:
-    from .session_store import PostgresSessionStore
 
 log = logging.getLogger(__name__)
 
@@ -59,10 +56,36 @@ OUTCOME_ERROR = "error"
 OUTCOME_MAX_TURNS = "max_turns"
 OUTCOME_REVERTED = "reverted"
 
-_store: PostgresSessionStore | None = None
+
+class TurnOutcomeStore(Protocol):
+    """Exactly what this module needs from the durable store, and no more.
+
+    Stated as a Protocol rather than importing PostgresSessionStore: main
+    imports agent, which imports this, so a real import would be a cycle - and
+    a structural type is what lets a test attach a store that raises on every
+    call, proving a broken ledger still cannot break a turn.
+    """
+
+    async def record_turn_outcome(
+        self,
+        turn_id: str,
+        user_email: str,
+        outcome: str,
+        terminal_reason: str | None,
+        skills: list[str],
+    ) -> None: ...
+
+    async def mark_turn_outcome(self, turn_id: str, outcome: str) -> None: ...
+
+    async def skill_signal_summary(self) -> list[dict]: ...
+
+    async def turn_totals(self) -> dict: ...
 
 
-def attach_store(store: PostgresSessionStore | None) -> None:
+_store: TurnOutcomeStore | None = None
+
+
+def attach_store(store: TurnOutcomeStore | None) -> None:
     """Give this module the durable store, without importing main.
 
     main imports agent, which imports this; a reverse import would be a cycle.
@@ -211,7 +234,9 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
     Returns the ids of any beads filed, which is how the caller knows whether
     this turn produced a signal worth reflecting on.
     """
-    filed: list[str] = []
+    # _file_signal returns None when it deduped against an already-open
+    # bead, so the Nones are expected here and dropped on the way out.
+    filed: list[str | None] = []
     try:
         outcome = _outcome(turn)
         # Two independent jobs, and they must fail independently. These used to

@@ -163,11 +163,19 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _read_seed_state(path: Path) -> dict[str, object]:
+# What one seed-state entry can be on disk. The dict is the current shape;
+# a bare string is legacy state from before we tracked stored-vs-source, and
+# is preserved verbatim rather than upgraded on a guess. See seed_bootstrap.
+SeedEntry = dict[str, str] | str
+
+
+def _read_seed_state(path: Path) -> dict[str, SeedEntry]:
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("shipped", {})
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    shipped = raw.get("shipped", {}) if isinstance(raw, dict) else {}
+    return shipped if isinstance(shipped, dict) else {}
 
 
 def _write_and_read_back(path: Path, payload: bytes) -> bytes:
@@ -218,7 +226,7 @@ def seed_bootstrap() -> None:
     skills_dst = kb.workspace_root() / "skills"
     state_path = skills_dst / SEED_STATE_FILE
     shipped = _read_seed_state(state_path)
-    updated: dict[str, dict[str, str]] = {}
+    updated: dict[str, SeedEntry] = {}
 
     for src_file in sorted(skills_src.rglob("*")):
         if not src_file.is_file():
@@ -262,7 +270,7 @@ def seed_bootstrap() -> None:
                             "to take the new one.",
                             dst_file,
                         )
-                        updated[key] = entry  # type: ignore[assignment]
+                        updated[key] = entry
                     continue
 
                 if current_hash != entry.get("stored"):

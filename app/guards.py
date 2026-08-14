@@ -45,8 +45,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from claude_agent_sdk.types import SyncHookJSONOutput
 
 from .config import config
 
@@ -129,16 +132,18 @@ def kb_write_guard_for(turn: Any = None) -> Any:
     """
 
     async def guard(
-        input_data: dict[str, Any],
+        input_data: Mapping[str, Any],
         tool_use_id: str | None,
         context: Any,
-    ) -> dict[str, Any]:
+    ) -> SyncHookJSONOutput:
         return await _pre_tool_use(input_data, turn)
 
     return guard
 
 
-async def _pre_tool_use(input_data: dict[str, Any], turn: Any = None) -> dict[str, Any]:
+async def _pre_tool_use(
+    input_data: Mapping[str, Any], turn: Any = None
+) -> SyncHookJSONOutput:
     """Deny shell commands that would corrupt knowledge-base files.
 
     Returns an empty dict to allow, which is the default for everything this
@@ -290,11 +295,13 @@ def unfiled_deferral(rows: list[dict[str, Any]]) -> str | None:
     return match.group(0) if match else None
 
 
+# Mapping, not dict: the SDK hands hooks a TypedDict, which is not assignable
+# to dict[str, Any] because dict permits destructive operations. We only read.
 async def stop_guard(
-    input_data: dict[str, Any],
+    input_data: Mapping[str, Any],
     tool_use_id: str | None,
     context: Any,
-) -> dict[str, Any]:
+) -> SyncHookJSONOutput:
     """Block a turn that named future work and did not file it.
 
     Blocks at most once per turn: `stop_hook_active` is set on the re-entry,

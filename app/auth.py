@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import httpx
 import jwt
+import jwt.algorithms
 from fastapi import HTTPException, Request
 
 from .config import config

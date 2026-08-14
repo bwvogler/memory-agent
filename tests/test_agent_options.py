@@ -13,10 +13,25 @@ This is a proxy: it catches the line being removed, not the SDK changing what
 from __future__ import annotations
 
 import types
+from typing import cast
 
 import pytest
 
 from app import agent
+
+
+def _appended(opts) -> str:
+    """The text _options appends to the preset system prompt.
+
+    ClaudeAgentOptions.system_prompt is a four-way union (str, preset dict,
+    file dict, None) and only one arm carries "append". _options always builds
+    the preset arm, so assert that rather than indexing into the union blind -
+    if the shape ever drifts, this fails saying so instead of TypeErroring.
+    """
+    prompt = opts.system_prompt
+    assert isinstance(prompt, dict), f"expected a preset dict, got {type(prompt)}"
+    assert prompt.get("type") == "preset", prompt
+    return cast("str", prompt["append"])
 
 
 @pytest.fixture
@@ -73,7 +88,7 @@ def test_each_user_gets_their_own_config_dir(isolated):
 def test_beads_overrides_are_appended_when_bd_context_is_present(isolated):
     """bd's own instructions contradict two decisions this deployment made."""
     opts = agent._options("alice", None, "# Beads Workflow Context")
-    appended = opts.system_prompt["append"]
+    appended = _appended(opts)
 
     assert "memory/CLAUDE.md" in appended
     assert "Never run git commands" in appended
@@ -83,4 +98,4 @@ def test_no_beads_overrides_without_bd_context(isolated):
     """If bd is unavailable, do not tell the agent to override absent rules."""
     opts = agent._options("alice", None)
 
-    assert "Overrides to the beads instructions" not in opts.system_prompt["append"]
+    assert "Overrides to the beads instructions" not in _appended(opts)

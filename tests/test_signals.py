@@ -97,7 +97,23 @@ def test_skill_list_is_readable_when_nothing_was_recorded():
 
 
 class _BrokenStore:
-    async def record_turn_outcome(self, *args, **kwargs):
+    """A store that is down, not one method of which happens to fail.
+
+    Every method on the TurnOutcomeStore protocol raises, so this stays a
+    faithful stand-in as that protocol grows rather than quietly reverting to
+    a working store for whatever was added.
+    """
+
+    async def record_turn_outcome(self, *args, **kwargs) -> None:
+        raise RuntimeError("session store is down")
+
+    async def mark_turn_outcome(self, *args, **kwargs) -> None:
+        raise RuntimeError("session store is down")
+
+    async def skill_signal_summary(self, *args, **kwargs) -> list[dict]:
+        raise RuntimeError("session store is down")
+
+    async def turn_totals(self, *args, **kwargs) -> dict:
         raise RuntimeError("session store is down")
 
 
