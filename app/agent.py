@@ -580,12 +580,36 @@ async def _image_prompt(text: str, images: list[dict]):
     }
 
 
+def _attachment_note(files: list[Path]) -> str:
+    """Tell the agent where its attachments are, without inlining them.
+
+    Paths rather than content: a document the agent has not decided to read
+    should cost nothing, and `Read` handles text, CSV and PDF from disk. It
+    cannot open .docx or .xlsx - saying so here is cheaper than the agent
+    discovering it mid-turn and guessing at a workaround.
+
+    These files are in scratch, which is writable and NOT the knowledge base.
+    Copying one into the wiki verbatim is almost never right; the agent's job
+    is to read it and write what it learned.
+    """
+    listed = "\n".join(f"- {path}" for path in files)
+    return (
+        "The user attached the following files. They are on ordinary local "
+        "disk in your working directory, not in the knowledge base:\n"
+        f"{listed}\n"
+        "Read them with the Read tool. If a file is a format you cannot read "
+        "(.docx and .xlsx are not readable here), say so plainly rather than "
+        "guessing at its contents."
+    )
+
+
 async def run_turn(
     turn: Turn,
     prompt: str,
     user_slug: str,
     resume: str | None = None,
     images: list[dict] | None = None,
+    files: list[Path] | None = None,
 ) -> None:
     """Run one agent turn to completion, streaming events into the turn buffer.
 
@@ -598,6 +622,17 @@ async def run_turn(
     savepoint = f"turn-{turn.id}"
     if await kb.create_savepoint(savepoint):
         turn.savepoint = savepoint
+
+    if files:
+        # Prepended to the prompt itself rather than to the system prompt, so
+        # the attachment is part of what a revert bead quotes. Reconstructing
+        # "which file was this turn given?" from the volume afterwards is
+        # exactly the archaeology the signal layer exists to avoid.
+        prompt = (
+            f"{_attachment_note(files)}\n\n{prompt}"
+            if prompt
+            else _attachment_note(files)
+        )
 
     # Kept for the signal layer: a revert files a bead quoting the prompt, and
     # by then run_turn is long gone.

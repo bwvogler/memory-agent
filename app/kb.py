@@ -36,6 +36,11 @@ MOUNT_PROBE = ".info"
 
 GIT_DIR = str(Path(config.work_dir) / "kb.git")
 
+# ext4 and most filesystems cap a single name at 255 bytes. Truncating here
+# turns a pathological name into a working upload rather than an ENAMETOOLONG
+# the user sees as "attachments are broken".
+MAX_UPLOAD_NAME_LENGTH = 200
+
 
 def _git_args() -> list[str]:
     return ["git", f"--git-dir={GIT_DIR}", f"--work-tree={workspace_root()}"]
@@ -172,6 +177,64 @@ def scratch_dir_for(user_slug: str) -> Path:
     path = Path(config.work_dir) / user_slug
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def uploads_dir_for(user_slug: str, turn_id: str) -> Path:
+    """Where a turn's attachments land: inside that user's scratch, per turn.
+
+    Scratch and not the KB, for the reason in docs/decisions/0003 - a file
+    written under the mount becomes a versioned row in the wiki, and an
+    attachment is raw input, not knowledge. Per turn rather than a flat
+    directory so two uploads of the same filename cannot silently overwrite
+    each other, and so a turn's inputs stay legible next to the bead a revert
+    files about it.
+    """
+    path = scratch_dir_for(user_slug) / "uploads" / turn_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def safe_upload_name(name: str) -> str | None:
+    """Reduce a client-supplied filename to a single safe path component.
+
+    The client controls this string completely, so it is treated as hostile:
+    `../../.beads/issues.jsonl` would otherwise let an upload overwrite the
+    ledger, and an absolute path would escape scratch entirely. Everything up
+    to the last separator is discarded rather than rejected, because browsers
+    legitimately send bare names and the occasional full path.
+
+    Returns None when nothing usable survives, which the caller reports as a
+    400 - guessing a name for a file the user cannot then refer to is worse
+    than refusing it.
+    """
+    # Both separators, since the name may come from a Windows client.
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    # NUL would truncate the path at the syscall boundary; the rest are
+    # ordinary control characters that have no business in a filename.
+    base = "".join(c for c in base if c.isprintable())
+    if base in {"", ".", ".."}:
+        return None
+    return base[:MAX_UPLOAD_NAME_LENGTH]
+
+
+def resolve_upload_path(user_slug: str, turn_id: str, name: str) -> Path | None:
+    """Absolute path for one attachment, or None if the name is unusable.
+
+    Belt and braces: `safe_upload_name` already removed every separator, so
+    the containment check below cannot fail today. It stays because it is the
+    invariant that actually matters - the same posture as
+    `assert_scratch_outside_kb`, which also guards a condition that is true by
+    construction until the day someone changes the construction.
+    """
+    base = safe_upload_name(name)
+    if base is None:
+        return None
+    directory = uploads_dir_for(user_slug, turn_id)
+    candidate = (directory / base).resolve()
+    if not candidate.is_relative_to(directory.resolve()):
+        log.warning("rejected upload name escaping scratch: %r", name)
+        return None
+    return candidate
 
 
 def assert_scratch_outside_kb() -> None:

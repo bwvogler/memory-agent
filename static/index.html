@@ -97,6 +97,31 @@
     max-height: 200px; max-width: 100%; border-radius: 6px;
     border: 1px solid var(--line); object-fit: contain;
   }
+  /* Attachments are chips, not thumbnails: a CSV has nothing to preview, and
+     the only facts worth showing are the name and that it is not enormous. */
+  .file-chip {
+    position: relative; display: inline-flex; align-items: center; gap: 6px;
+    max-width: 260px; padding: 5px 9px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); font-size: 12px;
+  }
+  .file-chip .name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-chip .size { color: var(--muted); flex: none; }
+  .file-chip button {
+    flex: none; width: 16px; height: 16px; border-radius: 50%; border: 0;
+    background: var(--muted); color: var(--panel);
+    font-size: 10px; line-height: 16px; text-align: center;
+    cursor: pointer; padding: 0;
+  }
+  .file-chip button:hover { background: var(--err); }
+  .msg-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  button.attach {
+    font: inherit; flex: none; padding: 0 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  }
+  button.attach:hover { color: var(--ink); }
+  form.dragover textarea { border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -114,6 +139,8 @@
     <div class="img-previews" id="previews"></div>
     <div class="input-row">
       <textarea id="input" rows="2" placeholder="Ask, or tell it something worth remembering…"></textarea>
+      <input type="file" id="filepicker" multiple hidden>
+      <button class="attach" id="attach" type="button" title="Attach files">📎</button>
       <button class="send" id="send" type="submit">Send</button>
     </div>
   </form>
@@ -130,8 +157,68 @@ const input = document.getElementById('input');
 const send = document.getElementById('send');
 const hint = document.getElementById('hint');
 const previews = document.getElementById('previews');
+const filepicker = document.getElementById('filepicker');
 let sessionId = null;
 let pendingImages = []; // [{dataUrl, mediaType, base64}]
+let pendingFiles = [];  // [{name, size, base64}]
+
+// Mirrors MAX_UPLOAD_BYTES in app/config.py. The server is the authority and
+// answers 413; this only exists so the user learns before a 10 MB upload.
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+function humanSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Images keep the vision path (inlined as content blocks); everything else is
+// written to the agent's scratch directory and referenced by path. Splitting
+// on the browser's own type is enough - the server does not care which list a
+// thing arrived in beyond that.
+function isImage(file) { return (file.type || '').startsWith('image/'); }
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('could not read ' + file.name));
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      resolve({ dataUrl, base64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function acceptFile(file) {
+  if (file.size > MAX_FILE_BYTES) {
+    hint.textContent = file.name + ' is ' + humanSize(file.size) + ' — the limit is ' + humanSize(MAX_FILE_BYTES) + '.';
+    return;
+  }
+  const { dataUrl, base64 } = await readBase64(file);
+  if (isImage(file)) addImagePreview(dataUrl, file.type, base64);
+  else addFilePreview(file.name, file.size, base64);
+}
+
+function addFilePreview(name, size, base64) {
+  const entry = { name, size, base64 };
+  pendingFiles.push(entry);
+
+  const chip = el('div', 'file-chip');
+  chip.appendChild(el('span', 'name', name));
+  chip.appendChild(el('span', 'size', humanSize(size)));
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '×';
+  btn.title = 'Remove attachment';
+  btn.onclick = () => {
+    const i = pendingFiles.indexOf(entry);
+    if (i !== -1) pendingFiles.splice(i, 1);
+    chip.remove();
+  };
+  chip.appendChild(btn);
+  previews.appendChild(chip);
+}
 
 function addImagePreview(dataUrl, mediaType, base64) {
   const idx = pendingImages.length;
@@ -160,20 +247,35 @@ input.addEventListener('paste', (e) => {
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return;
   for (const item of items) {
-    if (!item.type.startsWith('image/')) continue;
-    e.preventDefault();
+    // 'string' items are the text being pasted; only files are attachments,
+    // otherwise pasting ordinary text would be swallowed by preventDefault.
+    if (item.kind !== 'file') continue;
     const file = item.getAsFile();
     if (!file) continue;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
-      // dataUrl is "data:<mediaType>;base64,<data>"
-      const comma = dataUrl.indexOf(',');
-      const base64 = dataUrl.slice(comma + 1);
-      addImagePreview(dataUrl, item.type, base64);
-    };
-    reader.readAsDataURL(file);
+    e.preventDefault();
+    acceptFile(file);
   }
+});
+
+document.getElementById('attach').addEventListener('click', () => filepicker.click());
+filepicker.addEventListener('change', () => {
+  for (const file of filepicker.files) acceptFile(file);
+  // Reset, or picking the same file twice in a row fires no change event.
+  filepicker.value = '';
+});
+
+// Drag-and-drop onto the composer. dragover must be cancelled or the browser
+// navigates away to the dropped file, losing the conversation.
+for (const type of ['dragenter', 'dragover']) {
+  form.addEventListener(type, (e) => { e.preventDefault(); form.classList.add('dragover'); });
+}
+form.addEventListener('dragleave', (e) => {
+  if (e.target === form) form.classList.remove('dragover');
+});
+form.addEventListener('drop', (e) => {
+  e.preventDefault();
+  form.classList.remove('dragover');
+  for (const file of e.dataTransfer.files) acceptFile(file);
 });
 
 function el(tag, cls, text) {
@@ -212,9 +314,11 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   const images = pendingImages.slice();
-  if (!text && !images.length) return;
+  const files = pendingFiles.slice();
+  if (!text && !images.length && !files.length) return;
   input.value = '';
   pendingImages = [];
+  pendingFiles = [];
   previews.innerHTML = '';
   send.disabled = true;
   send.textContent = 'Working…';
@@ -229,6 +333,16 @@ form.addEventListener('submit', async (e) => {
       imgRow.appendChild(el);
     }
     youBody.appendChild(imgRow);
+  }
+  if (files.length) {
+    const fileRow = el('div', 'msg-files');
+    for (const f of files) {
+      const chip = el('div', 'file-chip');
+      chip.appendChild(el('span', 'name', f.name));
+      chip.appendChild(el('span', 'size', humanSize(f.size)));
+      fileRow.appendChild(chip);
+    }
+    youBody.appendChild(fileRow);
   }
   if (text) {
     const p = document.createElement('p');
@@ -245,9 +359,17 @@ form.addEventListener('submit', async (e) => {
         message: text,
         session_id: sessionId,
         images: images.map(i => ({ media_type: i.mediaType, data: i.base64 })),
+        files: files.map(f => ({ name: f.name, data: f.base64 })),
       }),
     });
-    if (!res.ok) throw new Error('submit failed: ' + res.status);
+    if (!res.ok) {
+      // Surface the server's own reason. A rejected attachment answers 400 or
+      // 413 with a detail that names the file, and "submit failed: 413" alone
+      // sends the user hunting for a problem the server already described.
+      let detail = '';
+      try { detail = (await res.json()).detail || ''; } catch {}
+      throw new Error(detail || 'submit failed: ' + res.status);
+    }
     turnId = (await res.json()).turn_id;
   } catch (err) {
     addMessage('error', '').body.classList.add('err');

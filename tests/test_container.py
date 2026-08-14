@@ -12,6 +12,7 @@ Nothing here needs an API key: no model calls are made.
 
 from __future__ import annotations
 
+import base64
 import json
 
 import httpx
@@ -317,6 +318,60 @@ def test_a_shipped_bead_is_closed_once_by_the_image_that_shipped_it(beads):
     finally:
         bd("close", bead_id, "--reason=smoke test cleanup", check=False)
         app_exec("rm", "-f", state, check=False)
+
+
+def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
+    """The whole point of the feature, against the real volume and real mount.
+
+    Unit tests cover the filename and size rules as arithmetic. What they
+    cannot cover is the thing that actually goes wrong here: a path that looks
+    fine in a tmp_path but resolves onto the FUSE mount in the image, turning
+    every attachment into a versioned row in the wiki.
+
+    The POST does start a turn, which fails immediately on the placeholder API
+    key. That is fine and deliberate - staging happens before the agent is
+    spawned, so the file is on disk either way and no model call is made.
+    """
+    body = base64.b64encode(b"Card,Category\nGarbage,Home\n").decode()
+    before = app_exec("ls", "/mnt/kb/memory").stdout
+
+    response = httpx.post(
+        f"{stack}/api/turns",
+        json={
+            "message": "what is in this file?",
+            "files": [{"name": "deck.csv", "data": body}],
+        },
+        timeout=30,
+    )
+    assert response.status_code == 202, response.text
+    turn_id = response.json()["turn_id"]
+
+    staged = f"/work/{USER_SLUG}/uploads/{turn_id}/deck.csv"
+    assert app_exec("cat", staged).stdout.startswith("Card,Category")
+
+    # Nothing new in the workspace, and the file is nowhere under it. Scoped to
+    # the workspace and NOT to /mnt/kb: the mount root exposes TigerFS's own
+    # control surface under .schemas, where an index directory contains itself,
+    # and a find rooted there does not terminate.
+    assert app_exec("ls", "/mnt/kb/memory").stdout == before
+    found = app_exec(
+        "find", "/mnt/kb/memory", "-name", "deck.csv", check=False
+    ).stdout.strip()
+    assert not found, f"an attachment reached the knowledge base: {found}"
+
+
+def test_an_oversized_attachment_is_refused_before_a_turn_starts(stack):
+    """413 from the real route, with no turn left behind streaming forever."""
+    oversized = base64.b64encode(b"x" * (11 * 1024 * 1024)).decode()
+
+    response = httpx.post(
+        f"{stack}/api/turns",
+        json={"message": "too big", "files": [{"name": "huge.bin", "data": oversized}]},
+        timeout=60,
+    )
+
+    assert response.status_code == 413, response.status_code
+    assert "huge.bin" in response.json()["detail"]
 
 
 def test_ready_work_excludes_blocked_beads(beads):

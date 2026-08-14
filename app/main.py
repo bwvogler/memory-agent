@@ -7,6 +7,8 @@ again here (see app/auth.py for why both).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -168,21 +170,87 @@ async def me(identity: CurrentUser) -> dict[str, str]:
     return {"email": identity.email}
 
 
+def _decode_attachments(files: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
+    """Validate and decode the `files` payload, or raise the right HTTP error.
+
+    Separate from the route and from any filesystem work so the limits can be
+    tested as arithmetic. Everything here is checked BEFORE a turn is created:
+    a rejected upload should leave no turn behind for the UI to stream.
+    """
+    decoded: list[tuple[str, bytes]] = []
+    total = 0
+    for entry in files:
+        name = kb.safe_upload_name(str(entry.get("name") or ""))
+        if name is None:
+            raise HTTPException(400, "attachment is missing a usable filename")
+        try:
+            blob = base64.b64decode(str(entry.get("data") or ""), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(400, f"attachment {name} is not valid base64") from exc
+        if not blob:
+            raise HTTPException(400, f"attachment {name} is empty")
+        if len(blob) > config.max_upload_bytes:
+            raise HTTPException(
+                413, f"attachment {name} exceeds {config.max_upload_bytes} bytes"
+            )
+        total += len(blob)
+        if total > config.max_upload_total_bytes:
+            raise HTTPException(
+                413,
+                f"attachments exceed {config.max_upload_total_bytes} bytes in total",
+            )
+        decoded.append((name, blob))
+    return decoded
+
+
+def _stage_attachments(
+    user_slug: str, turn_id: str, decoded: list[tuple[str, bytes]]
+) -> list[Path]:
+    """Write decoded attachments into the turn's upload directory."""
+    staged: list[Path] = []
+    for name, blob in decoded:
+        path = kb.resolve_upload_path(user_slug, turn_id, name)
+        if path is None:
+            raise HTTPException(400, f"attachment {name} has an unusable filename")
+        path.write_bytes(blob)
+        staged.append(path)
+    return staged
+
+
 @app.post("/api/turns")
 async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
     """Submit a message. Returns immediately with a turn id.
 
     The agent runs detached so that no single HTTP request has to survive for
     the whole turn.
+
+    Attachments take a different route from images and deliberately so. An
+    image becomes a base64 content block in the message, which is right for a
+    screenshot; a document is written to the agent's scratch directory and only
+    its path is mentioned, so a 5 MB CSV costs nothing until the agent decides
+    to read it. See `agent._attachment_note`.
     """
     body = await request.json()
     prompt = (body.get("message") or "").strip()
     images = body.get("images") or []  # list of {"media_type": str, "data": str}
-    if not prompt and not images:
+    files = body.get("files") or []  # list of {"name": str, "data": str}
+    if not prompt and not images and not files:
         raise HTTPException(400, "message is required")
     resume = body.get("session_id") or None
 
+    # Before registry.create, so a 400 or 413 leaves no orphan turn behind.
+    decoded = _decode_attachments(files)
+
     turn = registry.create(user_email=identity.email, session_id=resume)
+    try:
+        staged = _stage_attachments(identity.slug, turn.id, decoded)
+    except OSError as exc:
+        # The turn exists but will never run, and an unfinished turn streams
+        # forever. Terminate it here rather than leaving the UI waiting.
+        log.exception("could not stage attachments for turn %s", turn.id)
+        turn.finish(TurnState.ERROR, error=f"could not save attachments: {exc}")
+        raise HTTPException(500, "could not save attachments") from exc
+
     spawn(
         agent.run_turn(
             turn,
@@ -190,6 +258,7 @@ async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
             user_slug=identity.slug,
             resume=resume,
             images=images or None,
+            files=staged or None,
         ),
         name=f"turn-{turn.id}",
     )

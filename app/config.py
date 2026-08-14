@@ -42,6 +42,15 @@ class Config:
 
     max_turns: int = int(os.environ.get("MAX_TURNS", "30"))
 
+    # Attachments arrive base64-encoded inside a JSON body, which has no
+    # natural size limit: without a cap, one large file is decoded into memory
+    # and written to the volume before anything can object. The per-request cap
+    # is what stops ten files each just under the per-file one.
+    max_upload_bytes: int = int(os.environ.get("MAX_UPLOAD_BYTES", str(10 * 1024**2)))
+    max_upload_total_bytes: int = int(
+        os.environ.get("MAX_UPLOAD_TOTAL_BYTES", str(25 * 1024**2))
+    )
+
     @property
     def certs_url(self) -> str:
         return f"https://{self.cf_team_domain}/cdn-cgi/access/certs"
