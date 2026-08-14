@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from . import kb
 from .turns import Turn, TurnState
@@ -57,10 +57,10 @@ OUTCOME_ERROR = "error"
 OUTCOME_MAX_TURNS = "max_turns"
 OUTCOME_REVERTED = "reverted"
 
-_store: Optional["PostgresSessionStore"] = None
+_store: PostgresSessionStore | None = None
 
 
-def attach_store(store: Optional["PostgresSessionStore"]) -> None:
+def attach_store(store: PostgresSessionStore | None) -> None:
     """Give this module the durable store, without importing main.
 
     main imports agent, which imports this; a reverse import would be a cycle.
@@ -75,7 +75,7 @@ def attach_store(store: Optional["PostgresSessionStore"]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _skill_from_path(value: str) -> Optional[str]:
+def _skill_from_path(value: str) -> str | None:
     """Return the skill name for a path to a SKILL.md, else None."""
     if not value.endswith(SKILL_FILE):
         return None
@@ -187,7 +187,7 @@ async def _file_signal(
     priority: int,
     labels: tuple[str, ...],
     dedupe: bool = True,
-) -> Optional[str]:
+) -> str | None:
     if dedupe and await _already_open(user_slug, title):
         log.info("signal bead already open, not filing again: %s", title)
         return None
@@ -201,7 +201,7 @@ async def _file_signal(
         title,
         description=body + footer,
         priority=priority,
-        labels=(SIGNAL_LABEL,) + labels,
+        labels=(SIGNAL_LABEL, *labels),
         status="deferred",
     )
 
@@ -335,7 +335,7 @@ async def note_rejected_proposals(turn: Turn, user_slug: str) -> None:
     )
 
 
-async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> Optional[str]:
+async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> str | None:
     """Record a Revert click. The highest-value signal in the system.
 
     `diff_stat` must be captured BEFORE the undo runs - afterwards the working

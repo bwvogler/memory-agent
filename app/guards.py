@@ -46,7 +46,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .config import config
 
@@ -105,7 +105,7 @@ def _mentions_kb(command: str) -> bool:
     return config.kb_mount in command
 
 
-def unsafe_kb_write(command: str) -> Optional[str]:
+def unsafe_kb_write(command: str) -> str | None:
     """Return why this command endangers the KB, or None if it is fine.
 
     Pure and string-only, so the hazard list can be tested without an agent.
@@ -130,7 +130,7 @@ def kb_write_guard_for(turn: Any = None) -> Any:
 
     async def guard(
         input_data: dict[str, Any],
-        tool_use_id: Optional[str],
+        tool_use_id: str | None,
         context: Any,
     ) -> dict[str, Any]:
         return await _pre_tool_use(input_data, turn)
@@ -253,16 +253,20 @@ def _this_turn(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if message.get("role") != "user":
             continue
         content = message.get("content")
-        if isinstance(content, str):
-            start = i
-        elif isinstance(content, list) and any(
-            block.get("type") == "text" for block in content if isinstance(block, dict)
+        if (
+            isinstance(content, str)
+            or isinstance(content, list)
+            and any(
+                block.get("type") == "text"
+                for block in content
+                if isinstance(block, dict)
+            )
         ):
             start = i
     return rows[start:]
 
 
-def unfiled_deferral(rows: list[dict[str, Any]]) -> Optional[str]:
+def unfiled_deferral(rows: list[dict[str, Any]]) -> str | None:
     """Return the deferral phrase that was never filed, or None.
 
     Pure over parsed transcript rows so the whole decision is unit-testable
@@ -288,7 +292,7 @@ def unfiled_deferral(rows: list[dict[str, Any]]) -> Optional[str]:
 
 async def stop_guard(
     input_data: dict[str, Any],
-    tool_use_id: Optional[str],
+    tool_use_id: str | None,
     context: Any,
 ) -> dict[str, Any]:
     """Block a turn that named future work and did not file it.

@@ -93,7 +93,7 @@ class Turn:
         self._waiters.append(waiter)
         try:
             await asyncio.wait_for(waiter.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         finally:
             if waiter in self._waiters:

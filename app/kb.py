@@ -22,7 +22,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 import asyncpg
 
@@ -82,7 +81,7 @@ def probe_control_surface() -> dict[str, bool]:
 
 
 async def _run(
-    *argv: str, cwd: Optional[Path] = None, env: Optional[dict[str, str]] = None
+    *argv: str, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -117,7 +116,7 @@ async def create_savepoint(name: str) -> bool:
     return True
 
 
-async def _savepoint_sha(name: str) -> Optional[str]:
+async def _savepoint_sha(name: str) -> str | None:
     _, out, _ = await _run(*_git_args(), "log", "--format=%H %s")
     for line in out.splitlines():
         sha, _, subject = line.partition(" ")
@@ -248,9 +247,7 @@ async def bd_prime(user_slug: str) -> str:
     return out.strip()
 
 
-async def list_beads(
-    user_slug: str, label: Optional[str] = None
-) -> Optional[list[dict]]:
+async def list_beads(user_slug: str, label: str | None = None) -> list[dict] | None:
     """Return the bead graph as dicts, optionally filtered to one label.
 
     Returns None - not [] - when bd could not be reached. The distinction
@@ -278,9 +275,9 @@ async def create_bead(
     description: str = "",
     priority: int = 2,
     labels: tuple[str, ...] = (),
-    status: Optional[str] = None,
+    status: str | None = None,
     issue_type: str = "task",
-) -> Optional[str]:
+) -> str | None:
     """Create one bead and return its id, or None if bd could not be reached.
 
     Arguments go through argv, never a shell, so newlines and quotes in the
@@ -358,7 +355,7 @@ def _render_backlog(issues: list[dict]) -> str:
         by_status.setdefault(issue.get("status", "open"), []).append(issue)
 
     # Unknown statuses sort last rather than vanishing.
-    for status in sorted(by_status, key=lambda s: (_STATUS_ORDER + [s]).index(s)):
+    for status in sorted(by_status, key=lambda s: [*_STATUS_ORDER, s].index(s)):
         lines.append(f"## {status.replace('_', ' ').title()}")
         lines.append("")
         for issue in sorted(by_status[status], key=lambda i: i.get("priority", 4)):
@@ -386,7 +383,7 @@ def _render_backlog(issues: list[dict]) -> str:
 # Direct SQL access to TigerFS backing table — one query, no FUSE round trips
 # ---------------------------------------------------------------------------
 
-_kb_pool: Optional[asyncpg.Pool] = None
+_kb_pool: asyncpg.Pool | None = None
 
 _LIST_SQL = """
 WITH RECURSIVE paths AS (
@@ -426,7 +423,7 @@ async def sql_list_files() -> list[str]:
     return [r["path"] for r in rows]
 
 
-async def sql_read_file(path: str) -> Optional[str]:
+async def sql_read_file(path: str) -> str | None:
     """Return file content by workspace-relative path (single SQL query)."""
     pool = await _pool()
     rows = await pool.fetch(_LIST_SQL)

@@ -15,7 +15,6 @@ wastes a turn every time a signal arrives.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 from app import evolve
 

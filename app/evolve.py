@@ -46,7 +46,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from . import kb
 
@@ -93,7 +93,7 @@ class Change:
 # --- the bound -------------------------------------------------------------
 
 
-def _split_frontmatter(text: str) -> tuple[Optional[list[str]], str]:
+def _split_frontmatter(text: str) -> tuple[list[str] | None, str]:
     """Return (frontmatter lines, body). Frontmatter is None if absent."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -148,7 +148,7 @@ def _trimmed(lines: list[str]) -> list[str]:
     return lines
 
 
-def _bounded_learned(cur_body: str, new_body: str) -> Optional[str]:
+def _bounded_learned(cur_body: str, new_body: str) -> str | None:
     """The append-only rule, shared by skills and overlays.
 
     Defined once on purpose: a skill's `## Learned` section and an image skill's
@@ -176,7 +176,7 @@ def _learned_count(body: str) -> int:
     return len(_trimmed(_learned_split(body)[1]))
 
 
-def bounded_overlay_edit(current: str, proposed: str) -> Optional[str]:
+def bounded_overlay_edit(current: str, proposed: str) -> str | None:
     """Return why this overlay rewrite exceeds the remit, or None if allowed.
 
     An overlay carries no frontmatter and no description, so append-only is the
@@ -194,7 +194,7 @@ def bounded_overlay_edit(current: str, proposed: str) -> Optional[str]:
     return None
 
 
-def bounded_skill_edit(current: str, proposed: str) -> Optional[str]:
+def bounded_skill_edit(current: str, proposed: str) -> str | None:
     """Return why this rewrite exceeds the remit, or None if it is allowed.
 
     Pure on purpose: this is the entire self-modification policy, and it should
@@ -293,7 +293,7 @@ def merge(changes: list[Change]) -> list[Change]:
 # --- what a reflection turn may touch at all -------------------------------
 
 
-def mutable_skill_path(path_str: str) -> Optional[Path]:
+def mutable_skill_path(path_str: str) -> Path | None:
     """Return the resolved path if it is a writable skill file, else None.
 
     Two shapes qualify, both under the knowledge base's own `skills/` directory:
@@ -333,7 +333,7 @@ def write_guard_for(turn: Any) -> Any:
 
     async def guard(
         input_data: dict[str, Any],
-        tool_use_id: Optional[str],
+        tool_use_id: str | None,
         context: Any,
     ) -> dict[str, Any]:
         try:
