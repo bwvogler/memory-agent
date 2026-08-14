@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -32,6 +34,13 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 HEARTBEAT_SECONDS = 15  # Cloudflare's 524 is a time-to-next-byte timeout (~125s).
 
 store: PostgresSessionStore | None = None
+
+# Every route below is authenticated. Handlers that need the caller take
+# `identity: CurrentUser`; handlers that only need the *check* declare it as a
+# route dependency instead, so there is no unused parameter pretending to be
+# used. Both run the same verification.
+CurrentUser = Annotated[Identity, Depends(current_identity)]
+AUTHENTICATED = [Depends(current_identity)]
 
 
 # Compose gates the app on `pg_isready`, which answers for the postmaster and
@@ -70,7 +79,7 @@ async def _start_session_store() -> PostgresSessionStore | None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     problems = config.validate()
     for problem in problems:
         log.error("CONFIG: %s", problem)
@@ -109,7 +118,7 @@ app = FastAPI(title="memory-agent", lifespan=lifespan)
 
 
 @app.get("/healthz")
-async def healthz():
+async def healthz() -> JSONResponse:
     """Unauthenticated liveness probe.
 
     Exposes `busy` so an external pinger can avoid suspending the host while a
@@ -144,12 +153,12 @@ async def healthz():
 
 
 @app.get("/api/me")
-async def me(identity: Identity = Depends(current_identity)):
+async def me(identity: CurrentUser) -> dict[str, str]:
     return {"email": identity.email}
 
 
 @app.post("/api/turns")
-async def create_turn(request: Request, identity: Identity = Depends(current_identity)):
+async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
     """Submit a message. Returns immediately with a turn id.
 
     The agent runs detached so that no single HTTP request has to survive for
@@ -176,7 +185,7 @@ async def create_turn(request: Request, identity: Identity = Depends(current_ide
 
 
 @app.get("/api/turns/{turn_id}")
-async def get_turn(turn_id: str, identity: Identity = Depends(current_identity)):
+async def get_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     """Polling fallback, for when streaming misbehaves."""
     turn = registry.get(turn_id)
     if not turn or turn.user_email != identity.email:
@@ -189,8 +198,8 @@ async def get_turn(turn_id: str, identity: Identity = Depends(current_identity))
 
 @app.get("/api/turns/{turn_id}/events")
 async def stream_turn(
-    turn_id: str, request: Request, identity: Identity = Depends(current_identity)
-):
+    turn_id: str, request: Request, identity: CurrentUser
+) -> StreamingResponse:
     """SSE stream, replayable via Last-Event-ID.
 
     SSE rather than WebSocket on purpose: it survives Access cleanly with cookie
@@ -243,7 +252,7 @@ async def stream_turn(
 
 
 @app.post("/api/turns/{turn_id}/revert")
-async def revert_turn(turn_id: str, identity: Identity = Depends(current_identity)):
+async def revert_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     """Roll the knowledge base back to this turn's savepoint.
 
     Safe to expose in the UI: TigerFS undo is itself reversible.
@@ -273,7 +282,7 @@ async def revert_turn(turn_id: str, identity: Identity = Depends(current_identit
 
 
 @app.post("/api/reflect")
-async def reflect(identity: Identity = Depends(current_identity)):
+async def reflect(identity: CurrentUser) -> JSONResponse:
     """Run a reflection turn now, instead of waiting for a signal to trigger one.
 
     This exists because signal-gated reflection alone is untestable at this
@@ -289,14 +298,14 @@ async def reflect(identity: Identity = Depends(current_identity)):
 
 
 @app.get("/api/sessions")
-async def list_sessions(identity: Identity = Depends(current_identity)):
+async def list_sessions(identity: CurrentUser) -> dict[str, Any]:
     if not store:
         return {"sessions": []}
     return {"sessions": await store.sessions_for(identity.email)}
 
 
-@app.get("/api/signals")
-async def signal_summary(identity: Identity = Depends(current_identity)):
+@app.get("/api/signals", dependencies=AUTHENTICATED)
+async def signal_summary() -> dict[str, Any]:
     """What the Stage 2 ledger has actually captured so far.
 
     This exists so bead kb-3sv - "do the captured signals justify building
@@ -312,20 +321,20 @@ async def signal_summary(identity: Identity = Depends(current_identity)):
     }
 
 
-@app.get("/api/kb/log")
-async def kb_log(identity: Identity = Depends(current_identity)):
+@app.get("/api/kb/log", dependencies=AUTHENTICATED)
+async def kb_log() -> dict[str, Any]:
     """Recent knowledge-base operations, with per-user attribution."""
     return {"entries": await kb.recent_log()}
 
 
-@app.get("/api/kb/files")
-async def kb_files(identity: Identity = Depends(current_identity)):
+@app.get("/api/kb/files", dependencies=AUTHENTICATED)
+async def kb_files() -> dict[str, Any]:
     """List markdown files in the KB workspace (single SQL query)."""
     return {"files": await kb.sql_list_files()}
 
 
-@app.get("/api/kb/file")
-async def kb_file(path: str, identity: Identity = Depends(current_identity)):
+@app.get("/api/kb/file", dependencies=AUTHENTICATED)
+async def kb_file(path: str) -> dict[str, str]:
     """Return raw markdown for a KB file (single SQL query)."""
     content = await kb.sql_read_file(path)
     if content is None:
@@ -339,13 +348,13 @@ def _sse_escape(text: str) -> str:
 
 
 @app.get("/")
-async def index():
+async def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
-@app.get("/kb")
-@app.get("/kb/{path:path}")
-async def kb_ui(identity: Identity = Depends(current_identity)):
+@app.get("/kb", dependencies=AUTHENTICATED)
+@app.get("/kb/{path:path}", dependencies=AUTHENTICATED)
+async def kb_ui() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "kb.html"))
 
 
