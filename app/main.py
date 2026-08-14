@@ -106,6 +106,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         agent.seed_guide()
         agent.seed_bootstrap()
 
+    # Independent of the mount: the ledgers live on the volume, and a deploy
+    # that fixed something should say so even if the KB is unreachable. This is
+    # the return path for ideas the agent filed about the image it runs on -
+    # see docs/decisions/0010.
+    if closed := await kb.reconcile_shipped_all():
+        log.info("closed shipped beads: %s", closed)
+
     global store  # noqa: PLW0603 - the store outlives every request
     if config.session_database_url:
         store = await _start_session_store()

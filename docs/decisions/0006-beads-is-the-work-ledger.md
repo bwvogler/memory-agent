@@ -123,6 +123,21 @@ revert whether or not it had anything to do with the failure. Without the
 denominator, a per-skill failure count is a popularity contest. `GET
 /api/signals` returns the rates.
 
+## Amendment: image work is a third kind, and it leaves
+
+This ADR assumed every bead is work the agent can do. The ones it actually
+files most are not: ideas about the application it runs in, which it cannot
+touch — no repo, no git, an immutable image. Left as ordinary beads they sit in
+`bd ready` and are offered as claimable work forever.
+
+So they are labelled `image` and created `deferred`, out of the frontier by the
+same mechanism signal beads use, and pulled into a ledger in the repo where the
+work can happen. The deployed copy then tracks delivery rather than intent: it
+closes when an image that resolves it boots. See ADR 0010.
+
+Wiki beads do not travel. They stay on the volume, where the agent that filed
+them can also work them.
+
 ## Note on verification
 
 Run `pytest --container` before trusting any of this, and `--live` before

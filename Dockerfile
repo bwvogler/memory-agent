@@ -58,6 +58,11 @@ COPY skills ./skills
 COPY bootstrap ./bootstrap
 COPY entrypoint.sh .
 COPY scripts ./scripts
+# The one file from docs/ the running app reads: which beads this image
+# resolves, closed in every ledger on the volume at startup. Copied on its own
+# rather than as the whole directory - the ADRs are for readers of the repo,
+# not for the image. See docs/decisions/0010.
+COPY docs/shipped-beads.jsonl ./docs/shipped-beads.jsonl
 RUN sed -i 's/\r//' entrypoint.sh && chmod +x entrypoint.sh && chmod +x scripts/*.sh && mkdir -p "$KB_MOUNT" "$WORK_DIR"
 
 EXPOSE 8080

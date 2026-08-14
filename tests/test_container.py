@@ -264,6 +264,61 @@ def test_the_skill_ledger_records_every_turn_not_just_bad_ones(stack):
     assert any(s["skill"] == "lint" for s in summary["skills"])
 
 
+def test_the_shipped_manifest_is_in_the_image(stack):
+    """The reconciler reads this path from inside the container.
+
+    A missing COPY is exactly the kind of silence this tier exists for: the
+    manifest would be unreadable, reconcile_shipped would close nothing, and
+    every log line and health check would look completely normal.
+    """
+    app_exec(
+        "python",
+        "-c",
+        "from app import kb;assert kb.SHIPPED_MANIFEST.is_file(), kb.SHIPPED_MANIFEST",
+    )
+
+
+def test_a_shipped_bead_is_closed_once_by_the_image_that_shipped_it(beads):
+    """The return path for an idea the agent had about its own image.
+
+    Nothing else closes these beads: the agent cannot, and no human step runs
+    at deploy time. See docs/decisions/0010.
+    """
+    created = bd(
+        "create",
+        "--title=smoke shipped bead",
+        "--type=feature",
+        "--priority=3",
+        "--json",
+    ).stdout
+    bead_id = json.loads(created)["id"]
+    state = f"/work/{USER_SLUG}/.shipped-beads.json"
+
+    script = (
+        "import asyncio,json,pathlib;from app import kb;"
+        "m=pathlib.Path('/tmp/shipped.jsonl');"
+        f"m.write_text(json.dumps({{'id':'{bead_id}','summary':'smoke',"
+        "'commit':'deadbee'})+chr(10));"
+        "kb.SHIPPED_MANIFEST=m;"
+        "print(asyncio.run(kb.reconcile_shipped_all()))"
+    )
+    try:
+        first = app_exec("python", "-c", script).stdout
+        assert bead_id in first, first
+        assert bd_json("show", bead_id)[0]["status"] == "closed"
+
+        # The state file is what makes a redeploy a no-op rather than a second
+        # note - and what stops a reopened bead being closed again behind the
+        # back of whoever reopened it.
+        assert bead_id in app_exec("cat", state).stdout
+        bd("update", bead_id, "--status=open")
+        assert bead_id not in app_exec("python", "-c", script).stdout
+        assert bd_json("show", bead_id)[0]["status"] == "open"
+    finally:
+        bd("close", bead_id, "--reason=smoke test cleanup", check=False)
+        app_exec("rm", "-f", state, check=False)
+
+
 def test_ready_work_excludes_blocked_beads(beads):
     """Sequencing must live in edges: `bd ready` is what a fresh session reads."""
     blocker = bd(

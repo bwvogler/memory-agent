@@ -71,6 +71,31 @@ bd dep add <blocked-id> <blocker-id>
 Do not file a bead for every step of the task you are actively doing. Beads are
 for work that outlives the turn.
 
+### When the fix belongs in the app, not the wiki
+
+Some of what you notice is not about the knowledge base at all — it is about
+the thing you are running in. "This page contradicts that one" is wiki work.
+"The browser should render `SKILL.md` when I open a skill directory" is not:
+no amount of editing the wiki will do it, because it lives in the image.
+
+File those too, but mark them, and never claim one:
+
+```bash
+bd create --title="Short, specific title" \
+  --description="What should change, and what made you want it." \
+  --type=feature --priority=2 --labels image --status deferred
+```
+
+`deferred` keeps it out of `bd ready`, which is the frontier of work *you* can
+actually do — the same reason signal beads are deferred. You cannot ship an
+image: you have no repo, no git, and the one you are running is read-only.
+
+What happens next is that a human collects these, does the work in the repo,
+and the next deployment closes the bead with a note naming the commit. So the
+description is the whole of your case: write what you were doing, what was
+awkward, and what you wanted instead. You are the only user of this product who
+sees it from the inside, and nobody can ask you a follow-up question later.
+
 ## Read before you write
 
 Search first, always. The most common failure in an agent-maintained knowledge

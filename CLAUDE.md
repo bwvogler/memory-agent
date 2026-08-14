@@ -66,6 +66,26 @@ ceiling that matters is not hardware anyway: savepoints are a global
 `git add -A` over one workspace, so concurrent turns already interfere. See
 `docs/decisions/0009`.
 
+**Ideas about the image live in a second ledger, in git.** The agent is the
+only user who sees this product from the inside, and most of what it files is
+about the app rather than the wiki — which it cannot touch: no repo, no git, a
+read-only image. Those beads are labelled `image` and created `deferred`, out of
+`bd ready` by the same mechanism signal beads use, then pulled here with
+`scripts/beads-pull.sh` into this repo's ledger (`.beads/`, prefix `img`,
+`issues.jsonl` committed).
+
+Ids are the join key and are preserved across the pull, so `kb-` in a git diff
+means **originated on prod**, not "about the knowledge base" — `img-` means
+discovered here. Wiki beads never travel; nothing about the KB's content is
+committed to this repo.
+
+The loop closes by deploying: append a line to `docs/shipped-beads.jsonl`, and
+`kb.reconcile_shipped_all()` closes that bead in every ledger on the volume at
+startup, noting the commit and image ref. No ssh, no human step. Run
+`bd export -o .beads/issues.jsonl` before committing ledger changes — the Dolt
+database beside it is gitignored, and the JSONL is what git actually tracks.
+See `docs/decisions/0010`.
+
 Agent instructions for `bd` come from `bd prime`, injected into the appended
 system prompt at turn start. bd would normally install a `SessionStart` hook to
 do this, but `setting_sources=[]` means it can never fire, so `run_turn` does it
@@ -163,6 +183,12 @@ docker compose up
 
 Chat: http://localhost:8000  
 Wiki: http://localhost:8000/kb
+
+**`docker compose down -v` destroys the local ledger.** The dev stack's `/work`
+is a named volume, so the bead graph, `kb.git` and every savepoint go with it.
+That is how five beads cited in this file and in the ADRs came to point at
+nothing. The repo's own ledger is in git and survives; the local stack's does
+not, so treat anything it holds as scratch.
 
 ## Tests
 

@@ -433,6 +433,179 @@ async def sql_read_file(path: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Closing the loop: what this image shipped. See docs/decisions/0010.
+# ---------------------------------------------------------------------------
+
+# Repo-relative, and baked into the image by a COPY of this one file.
+SHIPPED_MANIFEST = (
+    Path(__file__).resolve().parent.parent / "docs" / "shipped-beads.jsonl"
+)
+
+# Beside .beads in the per-user scratch dir, mirroring .bootstrap-state.json.
+SHIPPED_STATE_FILE = ".shipped-beads.json"
+
+
+def _read_manifest(path: Path | None = None) -> list[dict]:
+    """Parse the shipped-beads manifest. Never raises.
+
+    The path is resolved at call time, not bound as a default: a default
+    argument is evaluated once at import and would quietly ignore any later
+    override, which is both untestable and wrong the moment anything relocates
+    the manifest.
+
+    A hand-appended file will eventually contain a bad line, and the cost of
+    that must be one skipped bead rather than a boot that closes nothing - or,
+    worse, a boot that fails. Lines carrying only `_comment` are the file's own
+    documentation and are skipped in silence.
+    """
+    path = path or SHIPPED_MANIFEST
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not read shipped manifest %s: %s", path, exc)
+        return []
+
+    entries: list[dict] = []
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            log.warning("shipped manifest line %d is not JSON; skipping", lineno)
+            continue
+        if not isinstance(entry, dict):
+            log.warning("shipped manifest line %d is not an object; skipping", lineno)
+            continue
+        if not entry.get("id"):
+            if "_comment" not in entry:
+                log.warning("shipped manifest line %d has no id; skipping", lineno)
+            continue
+        entries.append(entry)
+    return entries
+
+
+def _ledger_slugs() -> list[str]:
+    """Every user slug on this machine that has a bead ledger.
+
+    The user set is not known at startup - it is whoever has ever taken a turn -
+    so it is read off the volume. A directory with no .beads is skipped rather
+    than initialised: creating one here would put a ledger under a directory
+    that may not be a user at all (kb.git, lost+found).
+    """
+    try:
+        candidates = sorted(Path(config.work_dir).iterdir())
+    except OSError as exc:
+        log.warning("could not scan %s for ledgers: %s", config.work_dir, exc)
+        return []
+    return [d.name for d in candidates if (d / ".beads").is_dir()]
+
+
+def _read_shipped_state(path: Path) -> set[str]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    applied = raw.get("applied", []) if isinstance(raw, dict) else []
+    return {str(i) for i in applied} if isinstance(applied, list) else set()
+
+
+async def reconcile_shipped(user_slug: str) -> list[str]:
+    """Close the beads this image resolves, in one user's ledger.
+
+    An idea about the image originates on prod, where the agent can file it and
+    nothing more: it has no repo, no git, and the image it is running is
+    immutable. The work happens in the repo, and this is the return path - the
+    image itself carries the news of what it fixed, so closing the loop needs no
+    ssh, no credentials and no human step at deploy time.
+
+    Startup is the hook because a deploy is the event: it is the only moment at
+    which "what this image resolves" changes.
+
+    **Applied entries are recorded, and status is deliberately not consulted.**
+    Reopening a bead is how a human says "this did not actually ship" - and a
+    reconciler that checked status instead would close it again on the next
+    boot, overruling exactly the person it exists to inform.
+
+    Returns the ids closed on this run. Never raises: a ledger that cannot be
+    reached must not take down the boot it was only reporting to.
+    """
+    entries = _read_manifest()
+    if not entries:
+        return []
+
+    scratch = scratch_dir_for(user_slug)
+    state_path = scratch / SHIPPED_STATE_FILE
+    applied = _read_shipped_state(state_path)
+
+    pending = [e for e in entries if str(e["id"]) not in applied]
+    if not pending:
+        return []
+
+    image = os.environ.get("FLY_IMAGE_REF", "local")
+    closed: list[str] = []
+
+    for entry in pending:
+        bead_id = str(entry["id"])
+        summary = str(entry.get("summary") or "shipped")
+        commit = str(entry.get("commit") or "unknown")
+
+        rc, _, err = await _run(
+            "bd",
+            "close",
+            bead_id,
+            "--reason",
+            f"shipped in {image}",
+            cwd=scratch,
+            env=_bd_env(),
+        )
+        if rc != 0:
+            # A bead this ledger never had is the common case, not a fault:
+            # every user's ledger sees the same manifest. Record it as applied
+            # anyway - retrying forever would log the same failure on every
+            # boot, and there is nothing here that a later boot could fix.
+            log.info(
+                "shipped bead %s not closed in %s (%s)",
+                bead_id,
+                user_slug,
+                err.strip() or f"rc={rc}",
+            )
+            applied.add(bead_id)
+            continue
+
+        # The note, not the reason, carries the audit trail: a manifest entry is
+        # hand-written and can claim something that never shipped, so the commit
+        # is the thing that lets a reader check.
+        await note_bead(
+            user_slug, bead_id, f"{summary} (commit {commit}, image {image})"
+        )
+        applied.add(bead_id)
+        closed.append(bead_id)
+        log.info("closed shipped bead %s for %s", bead_id, user_slug)
+
+    try:
+        state_path.write_text(
+            json.dumps({"applied": sorted(applied)}, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        # Worth a warning: without the state file the next boot re-closes
+        # everything, which is how a deliberately reopened bead gets overruled.
+        log.warning("could not write %s: %s", state_path, exc)
+
+    return closed
+
+
+async def reconcile_shipped_all() -> dict[str, list[str]]:
+    """Run reconcile_shipped for every user ledger on this machine."""
+    results: dict[str, list[str]] = {}
+    for slug in _ledger_slugs():
+        closed = await reconcile_shipped(slug)
+        if closed:
+            results[slug] = closed
+    return results
+
+
 async def note_bead(user_slug: str, bead_id: str, text: str) -> bool:
     """Append a note to an existing bead. Never raises."""
     rc, _, err = await _run(
