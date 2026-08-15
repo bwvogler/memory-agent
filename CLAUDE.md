@@ -98,17 +98,17 @@ read-only image. Those beads are labelled `image` and created `deferred`, out of
 `scripts/beads-pull.sh` into this repo's ledger (`.beads/`, prefix `img`,
 `issues.jsonl` committed).
 
-Ids are the join key and are preserved across the pull, so `kb-` in a git diff
-means **originated on prod**, not "about the knowledge base" — `img-` means
-discovered here. Wiki beads never travel; nothing about the KB's content is
-committed to this repo.
+Ids are the join key and are preserved across the pull, so a `kb-` bead in this
+repo **also exists on the volume** — the prefix is not saying "about the
+knowledge base". That is a rule about finishing, not about provenance: closing a
+`kb-` bead here closes one of its two copies, and the other needs a manifest
+line. An `img-` bead has no second copy and needs none. Wiki beads never travel;
+nothing about the KB's content is committed to this repo.
 
 The loop closes by deploying: append a line to `docs/shipped-beads.jsonl`, and
 `kb.reconcile_shipped_all()` closes that bead in every ledger on the volume at
-startup, noting the commit and image ref. No ssh, no human step. Run
-`bd export -o .beads/issues.jsonl` before committing ledger changes — the Dolt
-database beside it is gitignored, and the JSONL is what git actually tracks.
-See `docs/decisions/0010`.
+startup, noting the commit and image ref. No ssh, no human step.
+See `docs/decisions/0010`, and **The work ledger** below for the commands.
 
 Agent instructions for `bd` come from `bd prime`, injected into the appended
 system prompt at turn start. bd would normally install a `SessionStart` hook to
@@ -436,3 +436,69 @@ fly deploy
 Bootstrap seeding (`AGENT_GUIDE.md`, `memory/skills/`) runs automatically at
 startup when the KB mount is live. It is idempotent — existing files are never
 overwritten.
+
+## The work ledger
+
+```sh
+bd ready                     # what is workable now
+bd list --all                # everything, including closed
+scripts/beads-pull.sh        # collect new image beads from prod
+scripts/fly.sh bd list --all # look at prod without pulling
+```
+
+`bd ready` is the source of truth for what is open. This file deliberately keeps
+no snapshot of the backlog — a list here would be wrong within a week.
+
+**Getting what prod has filed.** `scripts/beads-pull.sh [user_slug]` needs
+`flyctl` (logged in), `jq` and `bd` on PATH, and wakes the suspended machine
+itself, so a slow first run is not a hang. Only `image`-labelled beads travel:
+beads about the KB's *content* stay on the volume, where the agent that filed
+them can also work them, and signal beads stay there as evidence.
+
+It is an upsert and safe to re-run. A bead arriving for the first time flips
+`deferred` → `open`; one already tracked has `status` dropped from the payload,
+so prod can go on saying `deferred` without reopening work closed here. It ends
+by running `bd export`, so a real pull shows up in `git status` — and that, not
+the output, is the thing to read. `bd import` reports `Imported N issues` for
+rows it re-applied unchanged, so a pull that brought nothing still announces a
+number. A clean `git diff .beads/issues.jsonl` means nothing arrived.
+
+**Looking without pulling.** `scripts/fly.sh` reaches the deployed ledger and is
+read-only by default. Use it when you only want to see what prod has; it touches
+no local state. It is also how you spot a bead that *should* have travelled and
+did not — the `image` label is the only filter, so an idea about the image filed
+without it stays stranded on the volume.
+
+Mutating verbs need `--write`, because that graph is on an unreplicated volume
+with no savepoint covering it, and `--write` is the *whole* of that protection:
+past the flag there is no confirmation and no undo. `scripts/fly.sh --write bd
+close <id>` closes a live bead immediately, which is easy to do while meaning to
+test that the guard refuses. Recovering is two commands rather than one, because
+`bd reopen` restores a bead to `open` and not to the status it had:
+
+```sh
+scripts/fly.sh --write bd reopen <id>
+scripts/fly.sh --write bd update <id> --status deferred   # image beads only
+```
+
+Miss the second and the bead starts showing up in the prod agent's `bd ready`,
+which `deferred` exists to prevent. Rescuing a stranded bead is the one routine
+reason to reach for `--write` at all:
+`scripts/fly.sh --write bd label <id> image`, then pull.
+
+**Closing a bead after shipping.** Because ids survive the pull, a `kb-` bead
+exists in two ledgers and `bd close` here closes one of them. The volume goes on
+showing it open until a line in `docs/shipped-beads.jsonl` — `id`, `summary`,
+`commit` — reaches `reconcile_shipped` at the next startup. Shipping the code is
+not finishing the bead; appending that line is. An `img-` bead was created here,
+has no second copy, and needs no manifest line.
+
+Check the id against `bd list` before appending, because a wrong one fails
+silently and permanently. A bead the ledger never had is the common case rather
+than a fault — every user's ledger sees the same manifest — so `reconcile_shipped`
+records the id as applied and never retries it (`app/kb.py`). The only trace is
+one `log.info`.
+
+**Before committing ledger changes**, run `bd export -o .beads/issues.jsonl`. The
+Dolt database beside it is gitignored and the JSONL is what git tracks.
+`beads-pull.sh` does this for you; a bead you create or close by hand does not.
