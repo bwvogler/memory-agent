@@ -67,7 +67,7 @@ from claude_agent_sdk.types import (
 
 from . import evolve, guards, interact, kb, signals
 from .config import config
-from .turns import Turn, TurnState, registry, spawn
+from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
 log = logging.getLogger(__name__)
 
@@ -786,7 +786,47 @@ async def run_turn(
     undo away - and because TigerFS undo is itself reversible, the revert is
     safe to expose as a button in the UI. This is the single best reason to put
     a knowledge base on TigerFS rather than in a vector store.
+
+    The body lives in `_run_turn` below, wrapped here so that every path out of
+    it reaches a terminal state - including the savepoint and the beads
+    priming. Those three awaits used to sit above the try, on the theory
+    that kb.py logs-and-continues rather than raising. That theory only had to
+    be wrong once: a turn that raises before `finish()` stays RUNNING forever,
+    it is never evicted (only finished turns are), and now that Registry.begin
+    admits one turn at a time it would wedge every later turn behind it. A
+    savepoint that could not be created is a turn that should say so, not a
+    turn that silently becomes the last one this process ever runs.
     """
+    try:
+        await _run_turn(turn, prompt, user_slug, resume, images, files)
+    except Exception as exc:  # surface everything to the client
+        # Guarded on `finished` because _run_turn has an inner handler that
+        # already reported the agent loop's own failures, and the tail it runs
+        # afterwards - recording signals, maybe_reflect - happens on a turn that
+        # is deliberately already DONE. Re-finishing would rewrite a successful
+        # turn as an error for something that happened after it succeeded.
+        log.exception("turn %s failed outside the agent loop", turn.id)
+        if not turn.finished:
+            turn.append("error", str(exc))
+            turn.finish(TurnState.ERROR, error=str(exc))
+    finally:
+        # begin() refuses while this turn is unfinished, so a turn that somehow
+        # reached here still RUNNING must be closed out. Belt and braces: the
+        # paths above already finish it, and this is what stops an unforeseen
+        # fourth path from taking the whole instance down with it.
+        if not turn.finished:
+            log.error("turn %s ended without a terminal state", turn.id)
+            turn.finish(TurnState.ERROR, error="turn ended unexpectedly")
+
+
+async def _run_turn(
+    turn: Turn,
+    prompt: str,
+    user_slug: str,
+    resume: str | None,
+    images: list[dict] | None,
+    files: list[Path] | None,
+) -> None:
     savepoint = f"turn-{turn.id}"
     if await kb.create_savepoint(savepoint):
         turn.savepoint = savepoint
@@ -853,16 +893,20 @@ async def maybe_reflect(user_slug: str, trigger: str) -> str | None:
     if _reflecting.locked():
         log.info("reflection already running; not starting another (%s)", trigger)
         return None
-    if registry.any_running():
-        # The 2GB suspend ceiling is real and a second agent is not free. The
-        # user's turn wins; reflection is never urgent.
-        log.info("a turn is running; skipping reflection (%s)", trigger)
-        return None
 
     # Non-interactive: a signal triggered this, not a person, so there is nobody
     # to answer a question. _reflection_options installs no question tool or
     # permission callback either; this keeps the two statements consistent.
-    turn = registry.create(user_email=f"reflection@{user_slug}", interactive=False)
+    #
+    # Caught rather than propagated: the 2GB suspend ceiling is real and a
+    # second agent is not free, so the user's turn wins and reflection is never
+    # urgent. The signal that would have triggered this is in the ledger either
+    # way, and the next signal - or a manual POST /api/reflect - picks it up.
+    try:
+        turn = registry.begin(user_email=f"reflection@{user_slug}", interactive=False)
+    except TurnInProgressError:
+        log.info("a turn is running; skipping reflection (%s)", trigger)
+        return None
     turn.reflection = True
 
     async def _run() -> None:

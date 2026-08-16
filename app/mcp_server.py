@@ -15,7 +15,7 @@ invisible, because both would look authoritative.
 
 --- Why these run as real turns ---
 
-Each tool goes through `registry.create` and `agent.run_turn`, which is what
+Each tool goes through `registry.begin` and `agent.run_turn`, which is what
 keeps the savepoint, the guards, the signal ledger and the backlog projection.
 An MCP call is therefore revertable from the web UI like anything else, and shows
 up in the same evidence reflection reads. `reflect` goes through
@@ -33,9 +33,15 @@ handing it a tool that silently returns nothing. See app/interact.py.
 
 One turn at a time, and a tool refuses outright if anything else is running. Two
 concurrent agents do not fit under the machine's memory ceiling, and savepoints
-are a workspace-wide operation, so two turns would interfere. That is the same
-answer `POST /api/reflect` already gives, and ADR 0009 explains why the ceiling
-is shared state rather than hardware.
+are a workspace-wide operation, so two turns would interfere. ADR 0009 explains
+why the ceiling is shared state rather than hardware.
+
+This surface used to enforce that with an `asyncio.Lock` of its own. It no
+longer does: the rule lives in `turns.Registry.begin` and applies to every
+caller, because three entry points spelled it three ways and the fourth - the
+browser - did not spell it at all. What is still local to this file is the
+*answer*: a `Busy` payload rather than a raised error, for the same reason a
+failed turn returns its diagnosis instead of raising.
 
 --- Auth ---
 
@@ -60,7 +66,6 @@ Mounting is not free, and both of these look like working code:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import contextvars
 import logging
@@ -74,7 +79,7 @@ from starlette.requests import Request
 from . import agent, auth, kb
 from .auth import Identity
 from .config import config
-from .turns import TurnState, registry
+from .turns import BUSY, TurnInProgressError, TurnState, registry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -91,14 +96,11 @@ _caller: contextvars.ContextVar[Identity | None] = contextvars.ContextVar(
     "mcp_caller", default=None
 )
 
-# One agent at a time across this whole surface. Not a fairness mechanism - it
-# exists so two turns cannot savepoint over each other.
-_running = asyncio.Lock()
-
-_BUSY = (
-    "Busy: a turn is already running on this instance, and only one runs at a "
-    "time because savepoints cover the whole workspace. Try again shortly."
-)
+# One agent at a time - now enforced by Registry.begin, for every caller rather
+# than for this surface alone. The asyncio.Lock that used to live here was one
+# of four different spellings of the same rule, and the browser path had no
+# spelling of it at all. See turns.TurnInProgressError.
+_BUSY = f"Busy: {BUSY}"
 
 # streamable_http_path defaults to "/mcp", which would land the endpoint at
 # /mcp/mcp once this app is mounted at /mcp. Serving it at the mount root is what
@@ -147,23 +149,23 @@ async def _run(prompt: str) -> dict[str, Any]:
     and an MCP error would discard the events that explain it.
     """
     identity = _identity()
-    if _running.locked() or registry.any_running():
+    try:
+        turn = registry.begin(user_email=identity.email, interactive=False)
+    except TurnInProgressError:
         return {"ok": False, "error": _BUSY}
 
-    async with _running:
-        turn = registry.create(user_email=identity.email, interactive=False)
-        await agent.run_turn(turn, prompt=prompt, user_slug=identity.slug)
-        return {
-            "ok": turn.state is not TurnState.ERROR,
-            "turn_id": turn.id,
-            "reply": _text(turn),
-            "error": turn.error,
-            # The savepoint is the useful half of the answer: it is what a human
-            # needs to undo this call from the web UI.
-            "savepoint": turn.savepoint,
-            "skills": sorted(turn.skills),
-            "subagents": turn.subagents,
-        }
+    await agent.run_turn(turn, prompt=prompt, user_slug=identity.slug)
+    return {
+        "ok": turn.state is not TurnState.ERROR,
+        "turn_id": turn.id,
+        "reply": _text(turn),
+        "error": turn.error,
+        # The savepoint is the useful half of the answer: it is what a human
+        # needs to undo this call from the web UI.
+        "savepoint": turn.savepoint,
+        "skills": sorted(turn.skills),
+        "subagents": turn.subagents,
+    }
 
 
 def _skill_prompt(skill: str, body: str) -> str:

@@ -54,6 +54,35 @@ class TurnState(enum.StrEnum):
     ERROR = "error"
 
 
+BUSY = (
+    "a turn is already running, and only one runs at a time because savepoints "
+    "cover the whole workspace. Try again in a moment."
+)
+
+
+class TurnInProgressError(RuntimeError):
+    """Raised by Registry.begin when a turn is already in flight.
+
+    This is a correctness constraint wearing the costume of a throttle.
+    `kb.create_savepoint` is a `git add -A` and a commit over the single shared
+    workspace at $KB_MOUNT/memory: the savepoint NAME is per turn, the content
+    is global. So two turns at once do not merely compete for CPU - one turn's
+    half-written files are swept into the other's savepoint, and reverting
+    either rolls back both. Revert is what makes writing to the wiki reviewable
+    (ADR 0003) and bounded self-modification defensible (ADR 0008); overlapping
+    turns leave the button in place and quietly hollow it out.
+
+    Refusing is the interim answer, not the final one. Scoping savepoints per
+    user would let concurrent turns actually run - see img-lsp and ADR 0009,
+    which names this as the ceiling that has to go before a second machine
+    could ever help.
+    """
+
+    def __init__(self, running: Turn) -> None:
+        self.running = running
+        super().__init__(BUSY)
+
+
 @dataclass
 class Event:
     seq: int
@@ -205,7 +234,32 @@ class Registry:
         self._turns: dict[str, Turn] = {}
         self._max = max_turns
 
-    def create(
+    def begin(
+        self,
+        user_email: str,
+        session_id: str | None = None,
+        *,
+        interactive: bool = True,
+    ) -> Turn:
+        """Admit one turn, or raise TurnInProgressError. The only way to start one.
+
+        The check and the insert live in one method with no `await` between
+        them, which is what makes admission atomic on a single-threaded event
+        loop. A caller writing `if any_running(): refuse` and then `create()`
+        is atomic only by accident, and stops being so the first time someone
+        adds an await between the two lines.
+
+        That accident had already happened four different ways: /mcp held its
+        own asyncio.Lock, POST /api/reflect and maybe_reflect each rolled their
+        own check, and POST /api/turns - the browser path, which carries very
+        nearly all of the traffic - had no check at all. Two tabs was enough.
+        """
+        in_flight = self.running()
+        if in_flight is not None:
+            raise TurnInProgressError(in_flight)
+        return self._create(user_email, session_id=session_id, interactive=interactive)
+
+    def _create(
         self,
         user_email: str,
         session_id: str | None = None,
@@ -225,9 +279,13 @@ class Registry:
     def get(self, turn_id: str) -> Turn | None:
         return self._turns.get(turn_id)
 
+    def running(self) -> Turn | None:
+        """The turn currently in flight, if there is one."""
+        return next((t for t in self._turns.values() if not t.finished), None)
+
     def any_running(self) -> bool:
         """Used by the keepalive loop to stop the host suspending mid-turn."""
-        return any(not t.finished for t in self._turns.values())
+        return self.running() is not None
 
     def _evict(self) -> None:
         if len(self._turns) <= self._max:

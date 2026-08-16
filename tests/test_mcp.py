@@ -243,8 +243,14 @@ def test_a_failed_turn_returns_its_diagnosis_rather_than_raising(monkeypatch):
 
 
 def test_a_second_caller_is_refused_rather_than_queued(monkeypatch):
-    """Two agents do not fit under the memory ceiling, and savepoints are global."""
-    monkeypatch.setattr(mcp_server.registry, "any_running", lambda: True)
+    """Two agents do not fit under the memory ceiling, and savepoints are global.
+
+    Patches `running`, which is what Registry.begin consults. It used to patch
+    `any_running` and stub the lock this surface kept for itself; the rule now
+    lives in one place for every caller. See tests/test_concurrency.py.
+    """
+    in_flight = Turn(id="already-going", user_email="other@e.com")
+    monkeypatch.setattr(mcp_server.registry, "running", lambda: in_flight)
     token = mcp_server._caller.set(auth.Identity(email="p@e.com", subject="s"))
     try:
         result = asyncio.run(mcp_server.query("anything"))

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import httpx
 import pytest
@@ -56,6 +57,28 @@ if reason:
     print(reason)
     sys.exit(1)
 """
+
+
+def wait_until_idle(stack, timeout: float = 60.0) -> None:
+    """Block until no turn is in flight, so a POST can expect 202.
+
+    These tests share one live app, and since img-lsp only one turn runs at a
+    time - savepoints are a `git add -A` over the whole workspace, so a second
+    turn would savepoint over the first. Every earlier test that starts a real
+    turn therefore holds the gate until that turn reaches a terminal state.
+
+    Waiting rather than sleeping is the point: `busy` going false is the app
+    asserting that a turn which failed on the placeholder API key still
+    finished. A turn that never finishes is never evicted and would wedge every
+    later turn, so this timing out is a real failure, not a flake.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not httpx.get(f"{stack}/healthz", timeout=10).json()["busy"]:
+            return
+        time.sleep(0.5)
+    msg = f"a turn was still running after {timeout}s; the gate never released"
+    raise AssertionError(msg)
 
 
 def test_the_durable_store_is_reachable_and_says_so(stack):
@@ -335,6 +358,7 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
     body = base64.b64encode(b"Card,Category\nGarbage,Home\n").decode()
     before = app_exec("ls", "/mnt/kb/memory").stdout
 
+    wait_until_idle(stack)
     response = httpx.post(
         f"{stack}/api/turns",
         json={
@@ -400,6 +424,36 @@ def test_ready_work_excludes_blocked_beads(beads):
         bd("close", blocker_id, "--reason=smoke test cleanup", check=False)
 
 
+def test_a_second_turn_is_refused_by_the_real_stack(stack):
+    """The img-lsp regression, end to end: two tabs used to both get a 202.
+
+    Only the real stack proves this. A unit test can hold Registry.begin to the
+    rule, but the rule is worthless if the route reaches it after a stray await
+    or a later refactor puts an unguarded constructor back - and both of those
+    look completely fine in isolation. Here a second POST arrives while a real
+    turn is genuinely in flight in a real process.
+
+    What it protects is the revert button. Savepoints are a `git add -A` over
+    one shared workspace, so overlapping turns sweep each other's half-written
+    files into the wrong savepoint and reverting either rolls back both.
+    """
+    wait_until_idle(stack)
+    first = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
+    assert first.status_code == 202, first.text
+
+    second = httpx.post(
+        f"{stack}/api/turns", json={"message": "also hello"}, timeout=30
+    )
+
+    assert second.status_code == 409, second.text
+    # The UI renders `detail` verbatim, so it has to explain itself.
+    assert "already running" in second.json()["detail"]
+
+    # And the refusal is temporary, not a wedge: the gate reopens on its own.
+    wait_until_idle(stack)
+    assert httpx.get(f"{stack}/healthz", timeout=10).json()["busy"] is False
+
+
 # --- the interaction surface, against the real image -------------------------
 
 
@@ -422,6 +476,7 @@ def test_the_answer_and_permission_routes_reject_what_they_should(stack):
 
     # A real turn, so the 409 path is reached rather than the 404 one. The turn
     # fails immediately on the placeholder API key, which is all this needs.
+    wait_until_idle(stack)
     started = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
     assert started.status_code == 202, started.text
     turn_id = started.json()["turn_id"]

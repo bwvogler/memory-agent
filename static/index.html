@@ -427,9 +427,24 @@ form.addEventListener('submit', async (e) => {
     }
     turnId = (await res.json()).turn_id;
   } catch (err) {
+    // Put the composer back. A 409 ("a turn is already running") is an ordinary
+    // outcome now that one turn runs at a time, not an exceptional one, and
+    // losing a paragraph and its attachments to it would teach people to copy
+    // their message before every send. The submitted bubble goes too, so the
+    // log does not show a message that was never sent.
+    // Re-added through the same helpers rather than by reassigning the arrays,
+    // so each restored chip gets its remove button wired up again. Nothing
+    // pasted while the request was in flight is cleared, and the text is only
+    // restored if the box is still empty - recovering the old message must not
+    // destroy a newer one.
+    youWrap.remove();
+    if (!input.value) input.value = text;
+    for (const i of images) addImagePreview(i.dataUrl, i.mediaType, i.base64);
+    for (const f of files) addFilePreview(f.name, f.size, f.base64);
     addMessage('error', '').body.classList.add('err');
     log.lastChild.querySelector('.body').textContent = String(err);
     send.disabled = false;
+    send.textContent = 'Send';
     return;
   }
   stream(turnId);

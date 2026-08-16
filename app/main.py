@@ -23,7 +23,7 @@ from . import agent, kb, mcp_server, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
-from .turns import Turn, TurnState, registry, spawn
+from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -250,7 +250,15 @@ async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
     # Before registry.create, so a 400 or 413 leaves no orphan turn behind.
     decoded = _decode_attachments(files)
 
-    turn = registry.create(user_email=identity.email, session_id=resume)
+    # 409 rather than a queue, and the message says why. Queueing would hand the
+    # browser a turn id that streams nothing for however long the turn in front
+    # of it takes, which is the "it looked hung" failure this UI has already had
+    # to be fixed for once. Refusing is at least legible.
+    try:
+        turn = registry.begin(user_email=identity.email, session_id=resume)
+    except TurnInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     try:
         staged = _stage_attachments(identity.slug, turn.id, decoded)
     except OSError as exc:
@@ -439,12 +447,13 @@ async def reflect(identity: CurrentUser) -> JSONResponse:
     a loop that only fires on a signal would have been dead code shipped
     unexercised - the worst way to deploy self-modification. See ADR 0008.
     """
-    if registry.any_running():
-        raise HTTPException(409, "a turn is already running; try again when idle")
     # Non-interactive even though a person pressed the button: reflection runs
     # under _reflection_options, which installs no question tool and no
     # permission callback, and the flag has to say the same thing the options do.
-    turn = registry.create(user_email=identity.email, interactive=False)
+    try:
+        turn = registry.begin(user_email=identity.email, interactive=False)
+    except TurnInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
     spawn(
         agent.run_reflection(turn, identity.slug, trigger="manual"),
         name=f"reflection-{turn.id}",

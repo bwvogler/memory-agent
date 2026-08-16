@@ -105,3 +105,30 @@ The three-way split is read off the code rather than observed: `GIT_DIR` in
 `fly.toml`. Nobody has run two machines against one knowledge base, and nobody
 should, so the failure modes above are reasoned rather than measured — which is
 exactly why the decision is to not find out.
+
+## Amendment: the concurrency bug this ADR filed is now closed by refusal
+
+"That is a correctness bug today, at one machine, and it is filed rather than
+fixed here" was accurate and stayed that way until `img-lsp`. It is now fixed,
+though not in the way the Consequences section implies.
+
+The fix is admission control, not isolation. `turns.Registry.begin` refuses to
+create a turn while one is in flight, so overlapping turns cannot happen and
+therefore cannot savepoint over each other. Savepoints are still global; there
+is simply never more than one turn writing under them.
+
+Two details worth keeping. The check and the insert are one method with no
+`await` between them, because a caller writing `if any_running(): refuse` and
+then `create()` is atomic only by accident on an event loop — and that accident
+had already been spelled three different ways, while `POST /api/turns`, which
+carries nearly all the traffic, had no spelling of it at all. And admission
+control makes turn termination load-bearing: an unfinished turn is never
+evicted, so a turn that raised before `finish()` would now wedge every later
+one, which is why `run_turn` wraps the savepoint and beads priming rather than
+leaving them above its `try`.
+
+What this does *not* change is the paragraph after it. Throughput still cannot
+drive a second machine — the ceiling moved from "concurrent turns corrupt each
+other" to "concurrent turns are refused", which is a smaller failure and the
+same limit. Scoping savepoints per user is what would actually raise it, and
+`img-lsp` stays open for that.

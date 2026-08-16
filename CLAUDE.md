@@ -80,8 +80,31 @@ while the KB is shared through Postgres. A second machine would diverge on all
 three — most dangerously on savepoints, where a revert routed to the wrong
 machine finds nothing to roll back for writes that are plainly there. The
 ceiling that matters is not hardware anyway: savepoints are a global
-`git add -A` over one workspace, so concurrent turns already interfere. See
+`git add -A` over one workspace, so concurrent turns interfere. See
 `docs/decisions/0009`.
+
+**One turn at a time, and every caller goes through the same door.**
+`Registry.begin` is that door: it refuses with `TurnInProgressError` if a turn
+is already in flight, and its check and insert sit in one method with no
+`await` between them, which is what makes admission atomic on an event loop.
+There were four entry points and three different guards — `/mcp` held an
+`asyncio.Lock`, `POST /api/reflect` and `maybe_reflect` each rolled their own
+check, and `POST /api/turns` had none at all, so two browser tabs were enough
+to sweep one turn's half-written files into the other's savepoint and make
+reverting either roll back both. Each caller keeps its own *answer* — 409 for
+a browser, a `Busy` payload for a machine, a quiet skip for reflection — but
+none keeps its own rule.
+
+This is a refusal, not a queue: a queued turn hands the browser a turn id that
+streams nothing until the turn ahead finishes, which is the "it looked hung"
+failure this UI has already been fixed for once. The UI restores the composer
+on a 409 so a refusal never eats a typed message.
+
+It also makes `run_turn` reaching a terminal state load-bearing. An unfinished
+turn is never evicted, so a turn that raised before `finish()` would wedge
+every later turn — which is why the savepoint and beads priming now sit inside
+its `try` rather than above it. Scoping savepoints per user is the real fix and
+is still open as `img-lsp`.
 
 That split decides how you reach each tier from a laptop. The KB mounts locally
 (`scripts/mount-kb.sh`, which now names the database and makes production
@@ -228,7 +251,10 @@ savepoint name for that. `reflect` goes through `maybe_reflect` rather than
 imitating reflection. Auth there is hand-rolled because a *mounted* ASGI app does
 not run FastAPI's dependencies, so `dependencies=AUTHENTICATED` would look right
 and never fire. One turn at a time, and a busy instance **refuses** rather than
-queueing: savepoints are workspace-wide, so two turns interfere.
+queueing: savepoints are workspace-wide, so two turns interfere. That rule now
+lives in `Registry.begin` for every caller rather than in a lock this surface
+kept for itself; what stays here is the *answer* — a `Busy` payload rather than
+an exception, because a machine caller wants the diagnosis.
 
 Every MCP turn acts as one identity, so `MCP_IDENTITY_EMAIL` must be a real
 household member's address — a synthetic one puts every bead `lint` files into a
