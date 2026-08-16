@@ -122,12 +122,44 @@ Allowlisting a domain you don't own (`gmail.com`, `icloud.com`) admits everyone
 who has ever used that provider, not the people you meant. See
 `docs/decisions/0005-explicit-email-allowlist.md`.
 
-**3. Cloudflare Access.** In Zero Trust → Access → Applications, add a
-self-hosted app for your hostname. Add an identity provider (Google Workspace,
-or "One-time PIN" if your users are on personal addresses with no shared
-Workspace), then a policy allowing your users — either an email-domain rule or
-an Include rule listing exact addresses, matching whatever you set above. Copy
-the **AUD tag** and your team domain:
+**3. A hostname, and a certificate for it.** Access applications only exist on a
+hostname in a zone on your Cloudflare account, so you need a domain there before
+anything below works. The order matters, because Fly validates ownership over
+DNS and cannot do that through Cloudflare's proxy:
+
+```bash
+# a. In Cloudflare DNS: CNAME app -> <your-app>.fly.dev, proxy DISABLED (grey cloud)
+fly certs add app.yourdomain.com
+fly certs check app.yourdomain.com      # wait for Issued
+# b. Now enable the proxy (orange cloud), and set SSL/TLS to Full (strict)
+```
+
+Proxy the record before the certificate exists and you get Cloudflare 526s;
+leave it grey afterwards and every request bypasses Access, because Access runs
+at the edge and an unproxied record never reaches it.
+
+**4. Cloudflare Access.** First an identity provider, then the application —
+in that order, because the application form does not survive navigating away
+from it. Zero Trust → Integrations → Identity providers → Add new. Since June
+2026 new accounts get the **Cloudflare** identity provider by default and
+One-time PIN is no longer added automatically; add OTP explicitly if your users
+are on addresses you don't control, since the Cloudflare provider only admits
+members of your Cloudflare account. Google works for any Google account but
+needs a GCP OAuth client whose authorized origin is
+`https://<team>.cloudflareaccess.com` and whose redirect URI is that plus
+`/cdn-cgi/access/callback` — your application hostname appears nowhere in it.
+
+Then Access → Applications → Add → self-hosted, with the *public hostname*
+destination (not the private-hostname or private-IP options, which are for
+tunnels). Path empty, so `/api/*` and `/mcp` are covered too. Give it a policy
+per kind of caller:
+
+* **Allow**, Include → Emails listing exact addresses, for people.
+* **Service Auth**, Include → Service Token, for `/mcp`. It must be its own
+  policy: Access evaluates Service Auth before the identity policies, and a
+  token in an Allow policy is sent toward a login it cannot complete.
+
+Copy the **AUD tag** from the application and your team domain:
 
 ```bash
 fly secrets set \
@@ -135,12 +167,22 @@ fly secrets set \
   CF_ACCESS_AUD=<aud-tag>
 ```
 
-**4. Tunnel.** Create a tunnel, route your hostname to `http://localhost:8080`,
-and set `fly secrets set TUNNEL_TOKEN=...`. The entrypoint starts `cloudflared`
-automatically when that token is present. Also enable Access enforcement at the
-tunnel ingress (`access: {required: true, teamName, audTag}`) so unsigned
-requests never reach the app — belt *and* braces, because if the origin is ever
-reachable directly, header-trust alone is a full auth bypass.
+**Why there is no tunnel here.** `entrypoint.sh` still starts `cloudflared`
+when `TUNNEL_TOKEN` is set, and Cloudflare's own advice is to enforce Access at
+the tunnel ingress as well. That advice does not survive this `fly.toml`: the
+tunnel runs *inside* the machine, `auto_stop_machines = "suspend"` with
+`min_machines_running = 0` stops it along with everything else, and the only
+thing that wakes the machine is the Fly proxy receiving a request on the route
+the tunnel was meant to replace. Suspended, the tunnel is down and nothing can
+bring it back. Use the tunnel only if you also set `min_machines_running = 1`
+and accept the bill; otherwise the app-layer JWT check in `app/auth.py` is the
+gate, which is why it verifies signatures rather than trusting a header.
+
+The consequence to know: `<your-app>.fly.dev` stays publicly routable and Access
+cannot cover it. That is safe — it returns 403 without a valid token — but it
+means `DEV_BYPASS_AUTH` is the only thing standing between a fresh deploy and an
+open knowledge base. Never set it in production. `fly secrets list` is worth
+reading after every deploy for exactly that reason.
 
 **5. Seed the knowledge base.** Create `memory/CLAUDE.md` in the mount. The
 agent reads it at the start of every session.

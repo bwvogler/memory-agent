@@ -10,10 +10,12 @@ of this header is not authentication:
 So we verify the RS256 signature against the team's public keys, and check
 `aud`, `iss` and `exp`. Anything that fails is a 403.
 
-Defence in depth: also configure `cloudflared` to enforce Access at the tunnel
-ingress (see fly.toml / cloudflared config in the README), so unsigned requests
-never reach this process at all. Belt AND braces - if the origin is ever
-reachable directly, header-trust alone is a full auth bypass.
+There is deliberately no second layer behind this one. Enforcing Access at a
+tunnel ingress would be belt AND braces, but the tunnel would run inside a
+machine that suspends at idle, taking itself down with no way to be woken (see
+"Why there is no tunnel here" in the README). So the origin IS reachable
+directly, on its .fly.dev hostname, and this function is the whole gate - which
+is why it verifies the signature rather than trusting the header's presence.
 
 Docs:
   https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/
