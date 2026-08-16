@@ -489,6 +489,28 @@ the output, is the thing to read. `bd import` reports `Imported N issues` for
 rows it re-applied unchanged, so a pull that brought nothing still announces a
 number. A clean `git diff .beads/issues.jsonl` means nothing arrived.
 
+**The two ledgers are expected to disagree, and the disagreement is safe.** A
+bead worked here drifts from its prod twin immediately — rescoped, retitled,
+repointed — while prod keeps whatever the agent filed on the day it filed it.
+That looks like a sync problem and is not one, for two reasons. Both copies are
+`deferred` on prod, so nothing there ever claims them; and `bd import` compares
+`updated_at` and **skips a row older than the one it would overwrite**, saying
+so as `N stale skipped`. A locally edited bead is by definition newer, so a pull
+cannot revert deliberate local work — which is measured, not assumed: prod's
+`kb-068` still carries the pre-split title, description, priority *and the
+reversed dependency edge*, and replaying a pull against a copy of this ledger
+left all four untouched.
+
+What that leaves is one narrow case worth watching. `stale skipped` is a
+guarantee about *ages*, not about intent, so a prod-side edit made after a local
+one wins — which is exactly how `kb-nb4` correctly picked up the design doc the
+prod agent wrote. Read the changed-field list the pull prints, and never reach
+for `--allow-stale`.
+
+So: do not `--write` prod to reconcile a bead you are actively working. The
+divergence costs nothing and closes itself, because `docs/shipped-beads.jsonl`
+closes the prod copy by id and a closed bead's description no longer matters.
+
 **Looking without pulling.** `scripts/fly.sh` reaches the deployed ledger and is
 read-only by default. Use it when you only want to see what prod has; it touches
 no local state. It is also how you spot a bead that *should* have travelled and
