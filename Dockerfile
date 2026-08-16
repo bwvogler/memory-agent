@@ -24,13 +24,12 @@ RUN curl -fsSL https://install.tigerfs.io | sh \
     && install -m 755 "$TIGERFS" /usr/local/bin/tigerfs \
     && /usr/local/bin/tigerfs version
 
-# cloudflared, so the origin needs no public IP and Access cannot be bypassed
-# by hitting this container directly.
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    curl -fsSL -o /usr/local/bin/cloudflared \
-      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"; \
-    chmod +x /usr/local/bin/cloudflared
+# No cloudflared. It was here to run a tunnel in-process, which cannot work
+# under this fly.toml - the tunnel suspends with the machine and only the Fly
+# proxy can wake it, on the route the tunnel was replacing. Removing it drops an
+# UNPINNED binary (it tracked releases/latest, so every rebuild could ship a
+# different one) and its weight, which matters against the 2GB suspend ceiling.
+# See entrypoint.sh, "Why there is no tunnel here" in the README, and img-753.
 
 # bd (beads), the task ledger. Pinned: bd refuses to open a database written by
 # a newer schema, so an unpinned agent would break the graph on redeploy.

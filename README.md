@@ -11,8 +11,8 @@ your knowledge is one click from being reverted.
 Infrastructure runs around **$1–3/month**. The front end and auth are free.
 
 ```
-Browser ──► Cloudflare (Pages + Access + Tunnel, free)
-                  │  verified Google Workspace identity
+Browser ──► Cloudflare (Access at the edge, free — no tunnel)
+                  │  verified Google identity, as a signed JWT
                   ▼
             Fly.io Machine  ($1-3/mo, suspended when idle)
               ├─ FastAPI: turn queue, SSE stream
@@ -38,9 +38,11 @@ reversible. This is what makes "let an agent write to my knowledge base" a
 reviewable idea rather than a reckless one. It is the single best reason to
 choose TigerFS over a RAG pipeline.
 
-**Auth is Cloudflare Access, so there is no auth code.** Google Workspace SSO,
-policy as "allow emails ending in `@yourdomain.com`", free for 50 users, and the
-origin has no public IP so it cannot be bypassed.
+**Auth is Cloudflare Access, so there is almost no auth code.** Google SSO,
+policy as "allow emails ending in `@yourdomain.com`", free for 50 users. The
+origin *does* keep a public `.fly.dev` hostname — see "Why there is no tunnel
+here" — so `app/auth.py` verifies the JWT signature rather than trusting the
+header Cloudflare injects.
 
 ## Status: working scaffold, two unverified spots
 
@@ -167,16 +169,21 @@ fly secrets set \
   CF_ACCESS_AUD=<aud-tag>
 ```
 
-**Why there is no tunnel here.** `entrypoint.sh` still starts `cloudflared`
-when `TUNNEL_TOKEN` is set, and Cloudflare's own advice is to enforce Access at
-the tunnel ingress as well. That advice does not survive this `fly.toml`: the
-tunnel runs *inside* the machine, `auto_stop_machines = "suspend"` with
-`min_machines_running = 0` stops it along with everything else, and the only
-thing that wakes the machine is the Fly proxy receiving a request on the route
-the tunnel was meant to replace. Suspended, the tunnel is down and nothing can
-bring it back. Use the tunnel only if you also set `min_machines_running = 1`
-and accept the bill; otherwise the app-layer JWT check in `app/auth.py` is the
-gate, which is why it verifies signatures rather than trusting a header.
+**Why there is no tunnel here.** Cloudflare's own advice is to enforce Access at
+a tunnel ingress as well as at the application. That advice does not survive
+this `fly.toml`: the tunnel would run *inside* the machine,
+`auto_stop_machines = "suspend"` with `min_machines_running = 0` stops it along
+with everything else, and the only thing that wakes the machine is the Fly proxy
+receiving a request on the route the tunnel was meant to replace. Suspended, the
+tunnel is down and nothing can bring it back.
+
+So there is no tunnel: `cloudflared` is not in the image and `entrypoint.sh`
+does not start one. A leftover `TUNNEL_TOKEN` secret is warned about at startup
+rather than ignored, because a token sitting in `fly secrets list` looks exactly
+like a tunnel that is running. If you want one anyway, set
+`min_machines_running = 1`, accept the bill, and put `cloudflared` back — but
+the app-layer JWT check in `app/auth.py` is what actually protects this, which
+is why it verifies signatures rather than trusting a header.
 
 The consequence to know: `<your-app>.fly.dev` stays publicly routable and Access
 cannot cover it. That is safe — it returns 403 without a valid token — but it

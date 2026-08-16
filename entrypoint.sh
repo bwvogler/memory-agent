@@ -115,11 +115,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Optional: run the tunnel in-process so nothing about this container is
-# publicly routable. Set TUNNEL_TOKEN in your secrets to enable.
+# There is no tunnel. This used to start cloudflared in-process whenever
+# TUNNEL_TOKEN was set, on the theory that the origin would then need no public
+# IP. That cannot work under this fly.toml: the tunnel runs INSIDE the machine,
+# auto_stop_machines="suspend" with min_machines_running=0 suspends it along
+# with everything else, and the only thing that wakes the machine is the Fly
+# proxy receiving a request on the very route the tunnel was meant to replace.
+# Suspended, the tunnel is down and nothing can bring it back.
+#
+# So the .fly.dev hostname stays routable and app/auth.py's JWT verification is
+# the whole gate - which is why it checks signatures rather than trusting a
+# header. See "Why there is no tunnel here" in the README, and img-753.
+#
+# Warned about rather than ignored: a leftover TUNNEL_TOKEN in fly secrets would
+# otherwise look like a tunnel that is running, which is the most dangerous
+# thing this deployment could be wrong about.
 if [[ -n "${TUNNEL_TOKEN:-}" ]]; then
-  log "starting cloudflared tunnel"
-  cloudflared tunnel --no-autoupdate run --token "$TUNNEL_TOKEN" &
+  log "WARNING: TUNNEL_TOKEN is set but no tunnel is started - this image has"
+  log "         no cloudflared and could not keep one alive if it did."
+  log "         Access is enforced by app/auth.py alone. Unset the secret."
 fi
 
 log "starting API on :$PORT"
