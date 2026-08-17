@@ -204,6 +204,13 @@ make it a post-deploy smoke test, not a one-time check.
 **`/healthz` reports `kb_mounted: true`.** A knowledge base that is not mounted
 produces no errors anywhere. The agent just quietly knows nothing.
 
+**`/healthz` reports every configured MCP server as `ready`.** `mcp_catalog`
+lists outbound servers (`app/mcp_catalog.py`) and says `missing <VAR>` for any
+whose credential is unset. Such a server is dropped from the agent's toolset
+entirely, which from the outside is indistinguishable from never having
+configured it — this field is the difference. It ships empty, so an empty object
+here is correct until you add one. See `docs/decisions/0015`.
+
 ## Working against the deployed machine
 
 State is split across two tiers, and only one of them is reachable from a
@@ -254,6 +261,7 @@ app/
   agent.py           Agent SDK wrapper; explicit memory loading; savepoint/turn
   kb.py              Mount health, savepoints, undo, operation log
   turns.py           Detached turns with replayable event buffers
+  mcp_catalog.py     Outbound MCP servers: defined in the image, keyed from env
   session_store.py   Postgres transcript persistence
   main.py            HTTP surface
 static/index.html    Minimal chat UI, SSE, per-turn revert button

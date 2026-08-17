@@ -65,7 +65,7 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
-from . import evolve, guards, interact, kb, signals
+from . import evolve, guards, interact, kb, mcp_catalog, signals
 from .config import config
 from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
@@ -484,6 +484,11 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Never fall back to shell redirection to work around it.",
     ]
     parts.append(_ASKING)
+    # Only when a service is actually live. Returns "" otherwise rather than a
+    # paragraph explaining an absence.
+    services = mcp_catalog.summaries()
+    if services:
+        parts.append(services)
     if bd_context:
         parts.append(bd_context)
         parts.append(_BEADS_OVERRIDES)
@@ -556,11 +561,17 @@ def _options(
         # additions want: asking a question, tracking progress and spawning a
         # subagent must never themselves raise a prompt. `Bash(bd:*)` carries a
         # specifier, so non-bd shell commands still fall through to the callback.
+        #
+        # The catalog contributes the read-shaped tools of any connected
+        # service. What it deliberately leaves out still works: an unlisted
+        # tool falls through to `can_use_tool`, so a person clicks Allow. See
+        # `Server.auto_approve` in app/mcp_catalog.py.
         allowed_tools=[
             "Bash(bd:*)",
             "mcp__ask__ask_user",
             "TodoWrite",
             "Task",
+            *mcp_catalog.auto_approved_tools(),
         ],
         # Present in the CLI, unusable here: with no TTY it resolves instantly
         # with EMPTY answers and the agent believes it consulted someone. See
@@ -568,12 +579,19 @@ def _options(
         disallowed_tools=["AskUserQuestion"],
         # Two named subagents plus the built-in general-purpose one.
         agents=_named_agents(),
-        # The question tool. Built per turn because it closes over the turn it
-        # puts its question on.
-        mcp_servers={"ask": interact.ask_server_for(turn)} if turn else {},
+        # The question tool, built per turn because it closes over the turn it
+        # puts its question on, plus whatever outbound services are configured.
+        # This dict is the ONLY live way to add an MCP server in this
+        # deployment - see the two lines below and app/mcp_catalog.py.
+        mcp_servers={
+            **({"ask": interact.ask_server_for(turn)} if turn else {}),
+            **mcp_catalog.resolved(),
+        },
         # cwd is the agent's own WRITABLE scratch directory, so without this it
         # could drop a .mcp.json there and grant itself servers. setting_sources
-        # governs settings files, not this one.
+        # governs settings files, not this one. It does not constrain the dict
+        # above, which is the point: servers arrive from reviewed code in the
+        # image, never from a file anything at runtime can write.
         strict_mcp_config=True,
         # Only on a turn a human is watching. Omitted otherwise, which restores
         # the previous behaviour exactly: unapproved tools are refused and
@@ -631,6 +649,12 @@ def _reflection_options(
       not by a person - `maybe_reflect` gives it the synthetic owner
       `reflection@{slug}` - so there is nobody to answer, and a prompt could only
       spend its timeout. It keeps the observer hooks, which ask nothing.
+    * No `mcp_servers` at all, so no connected service from app/mcp_catalog.py.
+      Reflection judges evidence already in the ledger and rewrites one skill
+      within the evolve.py remit; reaching a calendar is not part of that, and a
+      turn with nobody watching is the worst one to give an outbound capability
+      to - `can_use_tool` is absent here, so anything not pre-approved is
+      refused with nobody asked.
     """
     scratch = kb.scratch_dir_for(user_slug)
     config_dir = Path(config.work_dir) / f".claude-{user_slug}"

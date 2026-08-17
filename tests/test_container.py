@@ -99,6 +99,21 @@ def test_stack_is_healthy_and_the_kb_is_mounted(stack):
     )
 
 
+def test_healthz_reports_the_outbound_mcp_catalog(stack):
+    """Empty in the shipped image, but the KEY has to be there.
+
+    An outbound server whose credential is unset is dropped from the agent's
+    toolset silently, so this field is the only difference between "the tools
+    are gone" and "the tools were never configured". Asserting the key exists
+    against the real image is what catches it being dropped from the response;
+    asserting it is empty is what catches a server being shipped by accident.
+    See docs/decisions/0015.
+    """
+    health = httpx.get(f"{stack}/healthz", timeout=10).json()
+
+    assert health["mcp_catalog"] == {}
+
+
 def test_bd_is_installed_and_pinned(stack):
     out = app_exec("bd", "version").stdout
 

@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, kb, mcp_server, signals
+from . import agent, kb, mcp_catalog, mcp_server, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
@@ -169,6 +169,13 @@ async def healthz() -> JSONResponse:
             # verification, which is the difference between "MCP is off" and
             # "MCP is on and refusing every call".
             "mcp": mcp_server.enabled(),
+            # The other direction: outbound servers this app connects to as a
+            # client. `ready`, or the name of the variable that is unset - never
+            # a secret's value. A server whose credential is missing is dropped
+            # silently from the agent's toolset, and this is the one place that
+            # says so; without it "the calendar tools are gone" and "the
+            # calendar tools never existed" look identical from outside.
+            "mcp_catalog": mcp_catalog.status(),
         },
         status_code=200 if mounted else 503,
     )

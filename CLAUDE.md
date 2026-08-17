@@ -20,6 +20,8 @@ the TigerFS workspace.
 - `app/interact.py` — the round-trips to the human (a question tool, a
   permission callback) and the hooks that report tool results and subagents
 - `app/mcp_server.py` — the four capabilities as MCP tools, for a machine caller
+- `app/mcp_catalog.py` — the opposite direction: outbound MCP servers the agent
+  may connect to, defined in the image and credentialed from the environment
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint, reflect); editable in the KB
@@ -261,6 +263,44 @@ household member's address — a synthetic one puts every bead `lint` files into
 graph nobody's `bd ready` shows, which is ADR 0012's defect through a third door.
 See `docs/decisions/0014`.
 
+**And this app can call other MCP servers, which is the opposite direction and
+easy to confuse.** `/mcp` is this app *as a server*; `app/mcp_catalog.py` is
+this app *as a client*. Nothing had been able to fill the second role at all:
+`setting_sources=[]` and `strict_mcp_config=True` between them close every
+documented way of configuring an MCP server, leaving only the `mcp_servers=`
+dict, which held one hard-coded entry. That is why `kb-068` blocked `kb-b82`
+rather than following it.
+
+Definitions now live in `CATALOG` in the image and secrets in the environment,
+where an entry *names* the variable it needs and never holds the value. It ships
+empty, so adding one is a reviewed, deployed change.
+
+That immutability is the decision, not an implementation detail. A catalog entry
+is a `command` this container executes, and launching a stdio server is the SDK
+spawning a subprocess *before* the model acts — so no `PreToolUse` hook fires and
+`can_use_tool` is never consulted. A writable catalog would be a hole straight
+through the `Bash(bd:*)` allowlist, reached by writing a file rather than by
+asking. Worse, it would not need to invent a secret to abuse one: it could aim an
+existing secret at a command of its choosing, and the resolver would inject the
+value. Splitting definitions from secrets protects the value at rest and says
+nothing about where it gets pointed. Underneath both: savepoints cover
+`$KB_MOUNT/memory` and do not cover your calendar — content is revertable so the
+agent writes it, capability is not so a human does. The agent's channel for
+wanting a server is a bead.
+
+`Server.auto_approve` is the other half. Listed tools are allowlisted by name
+(never a wildcard, which would pre-approve whatever the next version learns to
+delete with); everything else still works but falls through to `can_use_tool`,
+so a person clicks Allow. That is how "read the calendar freely, ask before
+writing" is expressed. Credentials are household-shared and this is stated rather
+than buried: enabling a server enables it for everyone, and behind one token the
+app cannot tell household members apart. Reflection gets no catalog at all.
+
+A server whose secret is unset is dropped rather than launched to fail later,
+warned about once per distinct fault, and reported by `/healthz` under
+`mcp_catalog` — because "the tools are gone" must not look like "the tools never
+existed". See `docs/decisions/0015`.
+
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
 a tool. A Revert click is the valuable one — an explicit, human-labelled "that
@@ -445,6 +485,11 @@ See `app/config.py` for the full list. Required: `ANTHROPIC_API_KEY`,
 request — the UI mirrors the first of these, and the server is the authority),
 `ASK_TIMEOUT_SECONDS` / `PERMISSION_TIMEOUT_SECONDS` (600 / 300 — how long a turn
 waits for a person, and they resolve in opposite directions).
+
+Outbound MCP servers (`app/mcp_catalog.py`) add their own variables, one set per
+entry in `CATALOG`, named by the entry rather than listed in `config.py` —
+`CATALOG` ships empty, so today there are none. `/healthz` reports each entry as
+`ready` or `missing <VAR>` under `mcp_catalog`.
 
 `MCP_CLIENT_IDS` and `MCP_IDENTITY_EMAIL` together enable the `/mcp` surface, and
 must be set together: the `common_name` values of the Cloudflare Access service
