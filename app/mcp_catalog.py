@@ -90,6 +90,30 @@ is one layer weaker than not holding the scope at all, and it is the deliberate
 price of `draft_email`. The way back is a re-auth with narrower scopes, not a
 redeploy.
 
+--- Present is not the same as alive ---
+
+`missing()` answers a question about OUR config: is the variable set. For a long
+time `status()` reported `ready` on the strength of that alone, which quietly
+claimed something it had never checked - that Google still honours the token
+inside. It does not always. A refresh token granted by a consent screen in
+Testing dies after seven days; a client can be disabled; a grant can be revoked.
+Every one of those leaves the variable exactly as set as before.
+
+So `OAuthCheck` adds two signals, and they are separate because neither one
+covers the other. The *predicted* expiry needs no network: an access token lives
+an hour, so `expiry_date - 1h` is when the grant was issued and the seven-day
+clock started. The *probe* is one HTTPS call that asks Google to refresh, and it
+is the only thing that catches revocation or a disabled client - failures with no
+date attached.
+
+Two rules hold this in place. A dead credential does NOT drop the server:
+`_live()` stays presence-only and network-free, because if an outage at Google
+could strip the agent's tools we would have rebuilt the "the tools are gone
+versus the tools never existed" confusion this module exists to prevent, arriving
+through a new door. And `/healthz` never awaits Google - it reads a cache and
+schedules a refresh, because it is unauthenticated, it drives the host's suspend
+decision, and its latency is not Google's to set.
+
 CATALOG's two entries are Google Calendar and Gmail, both pointing at one
 household account. See docs/decisions/0015 for why the credential is shared, and
 `Server` below for what each field controls.
@@ -97,20 +121,70 @@ household account. See docs/decisions/0015 for why the credential is shared, and
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from .config import config
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import date
 
     from claude_agent_sdk.types import McpServerConfig
 
 log = logging.getLogger(__name__)
+
+# Where a refresh is attempted, and how long an access token lives. The second
+# is a constant of Google's rather than ours, and it is load-bearing: it is what
+# turns the access token's `expiry_date` back into the moment the GRANT was
+# issued, which is the instant the seven-day Testing clock starts from.
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - a URL
+_ACCESS_TOKEN_LIFETIME = timedelta(hours=1)
+
+# How stale a probe result may be before /healthz schedules another, and how
+# close to the predicted expiry counts as worth shouting about. The TTL is what
+# keeps an unauthenticated endpoint from turning a pinger into load on Google:
+# one call per interval, whatever the request rate.
+_HEALTH_TTL_SECONDS = 900
+_EXPIRING_WITHIN_DAYS = 2
+
+
+@dataclass(frozen=True)
+class OAuthCheck:
+    """How to ask Google whether a server's stored grant is still good.
+
+    Declarative and per-entry, so the OAuth knowledge stays beside the server it
+    describes instead of spreading into main.py, and so a third Google entry
+    costs one more literal rather than another branch.
+
+    `token_path` is where the token object sits inside the token JSON, which the
+    two packages disagree about: the calendar server keys by account name
+    (`{"normal": {...}}`) and the gmail server nests under `{"tokens": {...}}`.
+    Read out of their sources rather than guessed. The calendar server also
+    migrates an older flat file by wrapping it, so a lookup that misses falls
+    back to the root - see `_token_object`.
+
+    `grant_ttl_days` is the seven-day clock a consent screen in Testing puts on
+    its refresh tokens. It is nullable because it is a property of the ACCOUNT
+    rather than of the API: on a Workspace domain with the consent screen set to
+    user type Internal there is no clock, and switching this to None is then the
+    whole change. It never affects the probe, which is about a different failure.
+    """
+
+    keys_var: str
+    token_var: str
+    token_path: tuple[str, ...]
+    grant_ttl_days: int | None = 7
 
 
 @dataclass(frozen=True)
@@ -145,6 +219,10 @@ class Server:
     `deny` is the tier below that: those tools never run at all. Reach for it
     only when a tool should not be reachable even with a human clicking Allow -
     today, the five Gmail tools that put mail in front of another person.
+
+    `oauth`, when set, is how `status()` finds out whether the credential is
+    still good rather than merely present. It is optional because a server
+    holding a plain bearer token has nothing to check.
     """
 
     name: str
@@ -156,6 +234,7 @@ class Server:
     env: Mapping[str, str] = field(default_factory=dict)
     auto_approve: tuple[str, ...] = ()
     deny: tuple[str, ...] = ()
+    oauth: OAuthCheck | None = None
 
     def __post_init__(self) -> None:
         """A tool cannot be both pre-approved and forbidden.
@@ -247,6 +326,19 @@ CATALOG: tuple[Server, ...] = (
         # from the secret at the next boot. A grant that works until the next
         # deploy and appears in no `fly secrets` is worse than one that fails.
         deny=("manage-accounts",),
+        # This server keys its token file by account mode; "normal" is the
+        # default and the only one this deployment uses, since `manage-accounts`
+        # is denied and no second account can be added.
+        oauth=OAuthCheck(
+            keys_var="MCP_GOOGLE_OAUTH_KEYS",
+            # The suppression below is for S106, which reads this as a
+            # hard-coded credential - the opposite of what it is. The value is a
+            # variable NAME, which is the invariant this whole module is built to
+            # keep, and the structural test in tests/test_mcp_catalog.py is what
+            # actually enforces it.
+            token_var="MCP_GCAL_TOKEN",  # noqa: S106
+            token_path=("normal",),
+        ),
     ),
     Server(
         name="gmail",
@@ -286,6 +378,13 @@ CATALOG: tuple[Server, ...] = (
             "reply_all",
             "reply_to_email",
             "forward_email",
+        ),
+        # Same OAuth client as calendar, a different token file, and a different
+        # shape inside it: this server writes `{"tokens": {...}, "scopes": [...]}`.
+        oauth=OAuthCheck(
+            keys_var="MCP_GOOGLE_OAUTH_KEYS",
+            token_var="MCP_GMAIL_TOKEN",  # noqa: S106 - a variable name; see calendar
+            token_path=("tokens",),
         ),
     ),
 )
@@ -404,17 +503,253 @@ def denied_tools() -> list[str]:
     return [f"mcp__{server.name}__{tool}" for server in CATALOG for tool in server.deny]
 
 
-def status() -> dict[str, str]:
-    """Per-server readiness, for /healthz. `ready`, or which variable is unset.
+def _json_var(our_var: str) -> dict[str, Any] | None:
+    """The JSON object in an environment variable, or None if it is unusable.
 
-    Deliberately never includes a secret's value, only its variable name.
+    Never raises and never logs a value. A credential we cannot parse is worth
+    one line naming the variable, because the alternative is a server reported as
+    healthy on the strength of a string nobody could read.
     """
-    return {
-        server.name: "ready"
-        if not server.missing()
-        else "missing " + ", ".join(server.missing())
-        for server in CATALOG
-    }
+    raw = os.environ.get(our_var, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        log.warning("mcp catalog: %s is set but does not contain valid JSON", our_var)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _token_object(check: OAuthCheck) -> dict[str, Any] | None:
+    """The stored token, read from the ENVIRONMENT and never from the file.
+
+    This is the load-bearing decision in the whole health check. `_materialise`
+    writes the token to disk once per process, and then the server owns that file
+    and writes REFRESHED tokens back to it - so its `expiry_date` marches forward
+    every hour, and a grant date derived from it would read "six days and
+    twenty-three hours left" forever. The environment variable is fixed for the
+    life of the process and still holds the value as of the last
+    `fly secrets set`, which is the moment the grant was actually issued.
+
+    It also sidesteps reading a file another process is in the middle of
+    replacing - the gmail server writes to a temporary name and renames over it.
+    """
+    parsed = _json_var(check.token_var)
+    if parsed is None:
+        return None
+
+    node: Any = parsed
+    for key in check.token_path:
+        if not isinstance(node, dict):
+            break
+        node = node.get(key)
+    if not (isinstance(node, dict) and isinstance(node.get("refresh_token"), str)):
+        # The calendar server migrates an older flat token file by wrapping it in
+        # an account key. Accept the pre-migration shape too: a credential that
+        # works is not one to report as unreadable.
+        node = parsed
+    if isinstance(node, dict) and isinstance(node.get("refresh_token"), str):
+        return node
+    log.warning(
+        "mcp catalog: %s holds JSON with no refresh_token at %s or at its root",
+        check.token_var,
+        "/".join(check.token_path),
+    )
+    return None
+
+
+def _grant_expiry(check: OAuthCheck) -> date | None:
+    """The day this grant is predicted to die, or None if that cannot be said.
+
+    Needs no network. An access token lives an hour, so backing that off the
+    stored `expiry_date` gives the moment the grant was issued, and a consent
+    screen in Testing kills the refresh token `grant_ttl_days` after that.
+
+    None covers three different cases on purpose - no clock on this account, no
+    parseable token, no usable `expiry_date` - because the caller does the same
+    thing with all three: report readiness without a countdown. A prediction that
+    cannot be made must not be reported as a prediction of zero.
+    """
+    if check.grant_ttl_days is None:
+        return None
+    token = _token_object(check)
+    if token is None:
+        return None
+    expiry_ms = token.get("expiry_date")
+    if not isinstance(expiry_ms, int | float) or expiry_ms <= 0:
+        return None
+    issued = datetime.fromtimestamp(expiry_ms / 1000, tz=UTC) - _ACCESS_TOKEN_LIFETIME
+    return (issued + timedelta(days=check.grant_ttl_days)).date()
+
+
+# The last probe verdict per server, and when the set was refreshed. `0.0` means
+# never, which is what makes the first /healthz call schedule a probe.
+_refresh_state: dict[str, str] = {}
+_refresh_checked_at: float = 0.0
+_refresh_task: asyncio.Task[None] | None = None
+
+# Google's answers that mean a human has to go and re-authorise, as opposed to
+# "ask again later". `invalid_client` and `unauthorized_client` are in here
+# because that is what a DISABLED OAuth client returns - the exact failure that
+# publishing a consent screen with restricted scopes produced, and the one the
+# seven-day countdown cannot see coming.
+_DEAD_GRANT_ERRORS = frozenset(
+    {"invalid_grant", "invalid_client", "unauthorized_client"}
+)
+
+
+async def _probe(check: OAuthCheck) -> str:
+    """Ask Google to refresh this grant: `valid`, `invalid`, or `unknown`.
+
+    Idempotent and cheap. A refresh does not rotate the refresh token and does
+    not disturb the access token the running server holds, so this can be
+    repeated without touching anything the servers depend on.
+
+    `unknown` rather than `invalid` for every fault that is not Google saying the
+    grant is dead. A timeout, a 500 or an unparseable body means we do not know,
+    and reporting that as expiry would send someone to re-run a consent flow
+    because a network blipped.
+    """
+    token = _token_object(check)
+    keys = _json_var(check.keys_var)
+    if token is None or keys is None:
+        return "unknown"
+    # A downloaded Desktop-app client nests under `installed`; the calendar
+    # server also accepts client_id/client_secret at the root, so we do too.
+    client = keys.get("installed") if isinstance(keys.get("installed"), dict) else keys
+    if not isinstance(client, dict) or "client_id" not in client:
+        log.warning("mcp catalog: %s has no OAuth client_id", check.keys_var)
+        return "unknown"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(
+                _GOOGLE_TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": token["refresh_token"],
+                    "client_id": client["client_id"],
+                    "client_secret": client.get("client_secret", ""),
+                },
+            )
+    except httpx.HTTPError as exc:
+        # The exception type, not its message: a client secret can appear in a
+        # request-echoing error and this line goes to a log we do not control.
+        log.warning(
+            "mcp catalog: could not reach Google to check %s (%s)",
+            check.token_var,
+            type(exc).__name__,
+        )
+        return "unknown"
+
+    if resp.status_code == httpx.codes.OK:
+        return "valid"
+
+    error = ""
+    with contextlib.suppress(ValueError):
+        body = resp.json()
+        if isinstance(body, dict):
+            error = str(body.get("error", ""))
+    if error in _DEAD_GRANT_ERRORS:
+        log.warning(
+            "mcp catalog: Google rejected the grant in %s (%s). Re-run "
+            "scripts/google-auth.sh and set the secrets it prints; /healthz "
+            "reports this under mcp_catalog.",
+            check.token_var,
+            error,
+        )
+        return "invalid"
+    log.warning(
+        "mcp catalog: checking %s returned HTTP %s (%s)",
+        check.token_var,
+        resp.status_code,
+        error or "no error code",
+    )
+    return "unknown"
+
+
+async def refresh_health() -> None:
+    """Re-probe every catalog entry that has a credential to check.
+
+    Sequential rather than gathered: there are two entries sharing one OAuth
+    client, and nothing here is worth hitting Google in parallel for.
+    """
+    global _refresh_checked_at  # noqa: PLW0603 - process-wide probe cache
+    # Stamped before the work, not after, so a slow round of probes cannot let
+    # concurrent /healthz calls decide the cache is still stale and pile on.
+    _refresh_checked_at = time.time()
+    for server in CATALOG:
+        if server.oauth is None or server.missing():
+            _refresh_state.pop(server.name, None)
+            continue
+        _refresh_state[server.name] = await _probe(server.oauth)
+
+
+def schedule_health_refresh() -> None:
+    """Start a probe if the cached verdicts are stale, without awaiting one.
+
+    /healthz calls this and then reads the cache. It must never await Google:
+    the endpoint is unauthenticated, it is what an external pinger uses to decide
+    whether the host may suspend, and its latency is not a third party's to set.
+    The TTL is also what keeps a fast pinger from becoming load on Google - one
+    call per interval regardless of the request rate.
+    """
+    global _refresh_task  # noqa: PLW0603 - process-wide probe cache
+    if _refresh_task is not None and not _refresh_task.done():
+        return
+    if (time.time() - _refresh_checked_at) < _HEALTH_TTL_SECONDS:
+        return
+    # The reference is kept because a bare create_task can be garbage-collected
+    # mid-flight (ruff RUF006), which would make this silently do nothing.
+    _refresh_task = asyncio.create_task(refresh_health())
+
+
+def status() -> dict[str, dict[str, Any]]:
+    """Per-server readiness for /healthz: present, alive, and how long left.
+
+    Synchronous and cache-only, so it is safe to call from anywhere. Deliberately
+    never includes a secret's value - only variable NAMES, Google's own error
+    vocabulary, and a date.
+
+    `state` is the single field a monitor should read, set to the worst thing
+    currently known. `refresh` is carried separately rather than folded into it,
+    because "ready, and Google confirmed it" and "ready, and nobody has asked
+    yet" are exactly the two things this bead exists to stop conflating.
+
+    Where the two signals disagree, each is trusted about what it can see: a
+    probe is authoritative about death, so `valid` prevents `expired`, while a
+    countdown already at zero still reports `expiring` - Google may still be
+    honouring a grant we believe should be gone, and that is worth acting on
+    before it stops.
+    """
+    report: dict[str, dict[str, Any]] = {}
+    for server in CATALOG:
+        missing = server.missing()
+        if missing:
+            report[server.name] = {"state": "missing", "missing": missing}
+            continue
+
+        entry: dict[str, Any] = {"state": "ready"}
+        report[server.name] = entry
+        if server.oauth is None:
+            continue
+
+        refresh = _refresh_state.get(server.name, "unchecked")
+        entry["refresh"] = refresh
+        expires = _grant_expiry(server.oauth)
+        days_left: int | None = None
+        if expires is not None:
+            days_left = (expires - datetime.now(tz=UTC).date()).days
+            entry["expires"] = expires.isoformat()
+            entry["days_left"] = days_left
+
+        overdue = refresh != "valid" and days_left is not None and days_left < 0
+        if refresh == "invalid" or overdue:
+            entry["state"] = "expired"
+        elif days_left is not None and days_left <= _EXPIRING_WITHIN_DAYS:
+            entry["state"] = "expiring"
+    return report
 
 
 def summaries() -> str:

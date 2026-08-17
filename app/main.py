@@ -151,6 +151,9 @@ async def healthz() -> JSONResponse:
     for reasons that looked unrelated to each other and to the cause.
     """
     mounted = kb.is_mounted()
+    # Kicks off an OAuth probe when the cached verdicts are stale, and returns
+    # immediately - this endpoint never waits on Google. See mcp_catalog.
+    mcp_catalog.schedule_health_refresh()
     if store is not None:
         transcripts = "ready"
     elif not config.session_database_url:
@@ -170,11 +173,17 @@ async def healthz() -> JSONResponse:
             # "MCP is on and refusing every call".
             "mcp": mcp_server.enabled(),
             # The other direction: outbound servers this app connects to as a
-            # client. `ready`, or the name of the variable that is unset - never
-            # a secret's value. A server whose credential is missing is dropped
-            # silently from the agent's toolset, and this is the one place that
-            # says so; without it "the calendar tools are gone" and "the
-            # calendar tools never existed" look identical from outside.
+            # client. Each reports a `state` - `missing`, `expired`, `expiring`
+            # or `ready` - never a secret's value. A server whose credential is
+            # missing is dropped silently from the agent's toolset, and this is
+            # the one place that says so; without it "the calendar tools are
+            # gone" and "the calendar tools never existed" look identical from
+            # outside.
+            #
+            # Not folded into `ok`, for the same reason as `transcripts`: an
+            # expired Google token is not a reason to fail a liveness probe and
+            # have the host restarted, since no restart would fix it. It needs a
+            # person with a browser, so it needs to be VISIBLE, not fatal.
             "mcp_catalog": mcp_catalog.status(),
         },
         status_code=200 if mounted else 503,

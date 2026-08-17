@@ -104,17 +104,24 @@ def test_healthz_reports_the_outbound_mcp_catalog(stack):
 
     An outbound server whose credential is unset is dropped from the agent's
     toolset silently, so this field is the only difference between "the tools
-    are gone" and "the tools were never configured". Two things are being
+    are gone" and "the tools were never configured". Three things are being
     pinned against the real image: that the key survives in the response at
-    all, and that a server with no credential reports WHICH variable it wants -
-    an operator staring at a calendar that does nothing has nothing else to go
-    on. See docs/decisions/0015.
+    all, that a server with no credential reports WHICH variable it wants - an
+    operator staring at a calendar that does nothing has nothing else to go on -
+    and that the nested shape survives serialisation. See docs/decisions/0015.
+
+    `missing` outranks every other state, so a stack with no secrets is also the
+    case that proves nothing tried to probe Google on the way to answering.
     """
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
 
     assert set(health["mcp_catalog"]) == {"calendar", "gmail"}
-    for name, state in health["mcp_catalog"].items():
-        assert state.startswith("missing MCP_"), f"{name}: {state}"
+    for name, entry in health["mcp_catalog"].items():
+        assert entry["state"] == "missing", f"{name}: {entry}"
+        assert entry["missing"], f"{name}: state is missing but names no variable"
+        assert all(v.startswith("MCP_") for v in entry["missing"]), f"{name}: {entry}"
+        # Nothing was asked of Google, so nothing may be claimed about it.
+        assert "refresh" not in entry, f"{name}: {entry}"
 
 
 def test_the_outbound_mcp_servers_are_installed_and_pinned(stack):

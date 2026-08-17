@@ -133,7 +133,8 @@ the hub is a shared account or one person's.
 
 An entry whose variables are unset is dropped from `mcp_servers=` and from
 `allowed_tools`, with one warning naming the variable, and `/healthz` reports
-`mcp_catalog: {"calendar": "missing MCP_..."}`. Launching it instead would fail
+`mcp_catalog: {"calendar": {"state": "missing", "missing": ["MCP_..."]}}`.
+Launching it instead would fail
 at first use, which is later and much quieter. This is the same call `kb.py`
 makes about beads and the same reason `transcripts` is reported separately from
 `ok`: the failure mode of this system is silence, and "the calendar tools are
@@ -243,9 +244,9 @@ Nothing in the code changes either way — the entries, the secrets and
 `_materialise` are identical. What changes is whether the credential survives the
 week. Until a Workspace account exists, treat both integrations as demos.
 
-`/healthz` will not help here: an expired refresh token is `ready`, because the
-variable is set. Distinguishing "configured" from "still working" needs a live
-call, which nothing does today.
+`/healthz` did not help here at first: an expired refresh token reported `ready`,
+because the variable was set. That was fixed under `img-xak` — see the amendment
+below.
 
 ### Gmail cannot use the household-hub model, and delegation does not rescue it
 
@@ -303,3 +304,67 @@ checksummed tarball replacing Debian's `nodejs`+`npm`. That pin was not
 housekeeping: the Gmail server declares `node >=22.23.1`, Debian ships v20, and
 npm reports the mismatch as a *warning* and installs anyway — a server that would
 have failed at some unknown later moment instead of at build time.
+
+## Amendment: present is not alive (`img-xak`)
+
+`status()` reported `ready` on the strength of `missing()` alone, which answers a
+question about *our* config — is the variable set — and quietly implied one it had
+never asked: does Google still honour the token inside. Those come apart, and not
+only via the seven-day clock. The consent-screen mistake recorded above produced
+exactly this state: a disabled OAuth client, every tool about to fail with
+`401`, every variable as set as the day before.
+
+Two signals now answer the second question, kept separate because neither covers
+the other.
+
+**Predicted, no network.** An access token lives an hour, so backing that hour off
+the stored `expiry_date` gives the moment the grant was issued — which is when the
+Testing clock started. `OAuthCheck.grant_ttl_days` is nullable, so moving to a
+Workspace domain with user type Internal switches the countdown off by editing one
+field.
+
+**Detected, one call.** A `grant_type=refresh_token` POST to Google's token
+endpoint. It is the only thing that catches revocation or a disabled client —
+failures with no date attached. `invalid_grant`, `invalid_client` and
+`unauthorized_client` mean a human must re-authorise; everything else, including a
+timeout or a 500, is `unknown` rather than `invalid`, because reporting a network
+blip as an expiry sends someone through a browser consent flow for nothing.
+
+### Read the credential from the environment, never from the file
+
+This is the load-bearing decision, and getting it wrong fails silently. Both
+servers write *refreshed* tokens back to the files `_materialise` created, so
+those files' `expiry_date` marches forward every hour. A grant date derived from
+one would read "6 days, 23 hours left" forever — a countdown that never counts,
+which is worse than none because it looks like it is working. The environment
+variable is fixed for the life of the process and still holds the value as of the
+last `fly secrets set`, which is when the grant was issued. It also avoids reading
+a file another process is renaming over.
+
+A test pins this specifically, and it earns its place: a mutation pointing the
+lookup at the file passes every other test in the file.
+
+### Two rules the check must not break
+
+**A dead credential does not drop the server.** `_live()` stays presence-only,
+deterministic and network-free. Letting a probe remove tools would mean an outage
+at Google silently stripping the agent's toolset — the "the tools are gone versus
+the tools never existed" confusion this ADR exists to prevent, arriving through a
+new door. A tool that errors loudly beats a tool that is quietly absent, so the
+probe informs humans and never changes what the agent holds.
+
+**`/healthz` never awaits Google.** It is unauthenticated, it is what an external
+pinger uses to decide whether the host may suspend, and its latency is not a third
+party's to set. So it reads a cached verdict and schedules a refresh when that is
+older than fifteen minutes — stale-while-revalidate. The TTL is also what stops a
+fast pinger becoming load on Google: one call per interval, whatever the request
+rate. None of this is folded into `ok`, for the reason `transcripts` is not: an
+expired token cannot be fixed by restarting the host.
+
+### What it still cannot do
+
+Notice. `expiring` reaches `/healthz` and the chat page's load-time banner, and
+that is the whole delivery mechanism — there is no scheduler in `app/`, which is
+the Conception gap ADR 0011 names. Somebody has to open the page or query the
+endpoint. Re-authorising is a laptop-and-browser job either way, so the ceiling on
+this is a reminder, not automation.

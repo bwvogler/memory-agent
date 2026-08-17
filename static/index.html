@@ -361,7 +361,21 @@ async function boot() {
     const dot = document.getElementById('health');
     dot.classList.add(h.kb_mounted ? 'ok' : 'bad');
     dot.title = h.kb_mounted ? 'knowledge base mounted' : 'KNOWLEDGE BASE NOT MOUNTED';
-    if (!h.kb_mounted) hint.textContent = 'Warning: the knowledge base is not mounted — answers will not use it.';
+    const warnings = [];
+    if (!h.kb_mounted) warnings.push('Warning: the knowledge base is not mounted — answers will not use it.');
+    // A connected service whose credential is dead or nearly dead. Said here
+    // rather than only in /healthz because re-authorising is a chore somebody has
+    // to remember, and nothing in this app schedules a reminder — so the next
+    // best thing is telling whoever opens the page.
+    const stale = [];
+    for (const [name, s] of Object.entries(h.mcp_catalog || {})) {
+      // days_left goes negative when Google still honours a grant we reckon
+      // should already be gone — worth saying, but not as "-3d left".
+      if (s.state === 'expired') stale.push(`${name} (expired)`);
+      else if (s.state === 'expiring') stale.push(`${name} (${s.days_left < 0 ? 'overdue' : s.days_left + 'd left'})`);
+    }
+    if (stale.length) warnings.push(`Connected service access needs renewing: ${stale.join(', ')} — re-run scripts/google-auth.sh and set the secrets it prints.`);
+    if (warnings.length) hint.textContent = warnings.join(' ');
   } catch {}
 }
 

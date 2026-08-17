@@ -205,10 +205,26 @@ make it a post-deploy smoke test, not a one-time check.
 produces no errors anywhere. The agent just quietly knows nothing.
 
 **`/healthz` reports every configured MCP server as `ready`.** `mcp_catalog`
-lists outbound servers (`app/mcp_catalog.py`) and says `missing <VAR>` for any
-whose credential is unset. Such a server is dropped from the agent's toolset
-entirely, which from the outside is indistinguishable from never having
-configured it — this field is the difference. See `docs/decisions/0015`.
+lists outbound servers (`app/mcp_catalog.py`) and gives each a `state`:
+
+| `state` | meaning |
+|---|---|
+| `missing` | a credential variable is unset; `missing` names which. The server is dropped from the agent's toolset entirely, which from the outside is indistinguishable from never having configured it — this field is the difference. |
+| `ready` | present, and nothing known is wrong |
+| `expiring` | the stored grant is predicted to die within two days; `days_left` says when |
+| `expired` | Google rejected the grant. Someone has to re-authorise. |
+
+A server with an OAuth credential also carries `refresh`: `valid` once Google has
+confirmed the grant, `invalid` once it has rejected it, `unknown` if the check
+could not be completed, and `unchecked` before the first check of a fresh
+process. That last one matters — `ready` and `refresh: unchecked` means "present,
+and nobody has asked yet", which is not the same claim as `refresh: valid`.
+
+The check never blocks the endpoint: `/healthz` reads a cached verdict and
+schedules a refresh at most once every fifteen minutes, so a fast pinger does not
+become load on Google. None of it is folded into `ok` — an expired token is not a
+reason to restart the host, because no restart would fix it. See
+`docs/decisions/0015`.
 
 Today that is `calendar` and `gmail`, both pointing at one household Google
 account. They report `missing MCP_…` until you run `scripts/google-auth.sh` and
@@ -223,8 +239,12 @@ is a Google Workspace account on a domain you own with the consent screen set to
 user type **Internal**: no verification, no warning screen, no timer. Roughly one
 seat. No code changes either way. See `docs/decisions/0015`.
 
-Note that `/healthz` cannot see this. An expired refresh token still reports
-`ready`, because the variable is set.
+`/healthz` does see this, which it did not always: `mcp_catalog` counts the seven
+days down as `expiring` with a `days_left`, and reports `expired` once Google
+actually refuses the grant. The chat page says so too, on load, since
+re-authorising is a chore somebody has to remember and nothing here schedules a
+reminder. What neither can do is fix it — that needs a browser and a person, so
+re-run `scripts/google-auth.sh` and set the secrets it prints.
 
 Gmail reads the household account's **own inbox** and cannot read anyone else's —
 a Gmail token reaches only its own mailbox, and delegation is a web-UI feature the

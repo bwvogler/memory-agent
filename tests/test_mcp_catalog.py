@@ -23,11 +23,15 @@ and a version bump can add tools that no tuple in this repo mentions.
 from __future__ import annotations
 
 import ast
+import asyncio
 import dataclasses
+import json
 import pathlib
 import re
 import types
+from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
 
 from app import agent, mcp_catalog
@@ -55,6 +59,11 @@ def _forget_warnings():
     """Reset the log-once memos, which are module state shared between tests."""
     mcp_catalog._warned.clear()
     mcp_catalog._materialised.clear()
+    # The probe cache is the same kind of state, and leaking it across tests
+    # would make a verdict from one test the starting point of the next.
+    mcp_catalog._refresh_state.clear()
+    mcp_catalog._refresh_checked_at = 0.0
+    mcp_catalog._refresh_task = None
 
 
 @pytest.fixture(autouse=True)
@@ -198,10 +207,12 @@ def test_status_names_the_missing_variable_and_never_a_value(monkeypatch):
     monkeypatch.delenv("MCP_GOOGLE_REFRESH_TOKEN", raising=False)
     _catalog(monkeypatch, CALENDAR)
 
-    assert mcp_catalog.status() == {"calendar": "missing MCP_GOOGLE_REFRESH_TOKEN"}
+    assert mcp_catalog.status() == {
+        "calendar": {"state": "missing", "missing": ["MCP_GOOGLE_REFRESH_TOKEN"]}
+    }
 
     monkeypatch.setenv("MCP_GOOGLE_REFRESH_TOKEN", "s3cret-value")
-    assert mcp_catalog.status() == {"calendar": "ready"}
+    assert mcp_catalog.status() == {"calendar": {"state": "ready"}}
     assert "s3cret-value" not in str(mcp_catalog.status())
 
 
@@ -264,7 +275,9 @@ def test_a_missing_file_variable_drops_the_server_like_a_missing_secret(monkeypa
     _catalog(monkeypatch, FILEY)
 
     assert mcp_catalog.resolved() == {}
-    assert mcp_catalog.status() == {"filey": "missing MCP_FILEY_TOKEN"}
+    assert mcp_catalog.status() == {
+        "filey": {"state": "missing", "missing": ["MCP_FILEY_TOKEN"]}
+    }
 
 
 def test_files_are_written_once_per_process_not_once_per_turn(monkeypatch, tmp_path):
@@ -571,6 +584,399 @@ def test_the_pinned_versions_match_the_dockerfile():
         assert f"command -v {server.command}" in text, (
             f"the Dockerfile must prove {server.command} is on PATH after install"
         )
+
+
+# --- present is not alive -----------------------------------------------------
+#
+# `missing()` answers a question about our own config. These cover the two
+# signals that answer the other one - whether Google still honours the token -
+# and the two rules that keep the answer from doing damage: a dead credential
+# must not remove the server, and /healthz must not wait on Google.
+
+
+# Bound separately from the Server rather than reached for as `OAUTHY.oauth`,
+# which is `OAuthCheck | None` and so cannot be passed to anything that wants a
+# check. Same reason `_stdio_env` exists: assert the shape once, here.
+OAUTHY_CHECK = mcp_catalog.OAuthCheck(
+    keys_var="MCP_OAUTHY_KEYS",
+    token_var="MCP_OAUTHY_TOKEN",  # noqa: S106 - a variable name, not a value
+    token_path=("tokens",),
+)
+
+OAUTHY = Server(
+    name="oauthy",
+    summary="A server whose credential can go stale while remaining present.",
+    command="oauthy-mcp",
+    files={"keys.json": "MCP_OAUTHY_KEYS", "token.json": "MCP_OAUTHY_TOKEN"},
+    env={"OAUTHY_TOKEN_PATH": "{dir}/token.json"},
+    auto_approve=("look",),
+    oauth=OAUTHY_CHECK,
+)
+
+CLIENT_SECRET = "cs-do-not-log-me"  # noqa: S105 - a fixture, not a credential
+REFRESH_TOKEN = "rt-do-not-log-me"  # noqa: S105 - a fixture, not a credential
+
+KEYS_JSON = json.dumps(
+    {
+        "installed": {
+            "client_id": "cid.apps.googleusercontent.com",
+            "client_secret": CLIENT_SECRET,
+        }
+    }
+)
+
+
+def _token_json(granted_days_ago: int, *, nest: str | None = "tokens") -> str:
+    """A stored Google token whose grant is `granted_days_ago` days old.
+
+    The file records the ACCESS token's expiry, an hour after it was issued, so
+    that is what gets written here - the code under test is what has to work back
+    from it to the grant.
+
+    Whole days only, on purpose: the predicted expiry is a DATE, so a half-day
+    offset lands on either side of midnight depending on the hour the suite runs
+    and `days_left` comes out one higher or lower. That is a flaky test rather
+    than a finding.
+    """
+    granted = datetime.now(tz=UTC) - timedelta(days=granted_days_ago)
+    inner = {
+        "refresh_token": REFRESH_TOKEN,
+        "access_token": "at-whatever",
+        "expiry_date": int((granted + timedelta(hours=1)).timestamp() * 1000),
+    }
+    return json.dumps({nest: inner} if nest else inner)
+
+
+@pytest.fixture
+def oauthy(monkeypatch):
+    """A catalog of one server whose grant was issued today."""
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(0))
+    _catalog(monkeypatch, OAUTHY)
+
+
+def _google(monkeypatch, handler):
+    """Answer the token endpoint with `handler`, via httpx's own MockTransport.
+
+    No new test dependency: httpx ships this, and `requirements-dev.txt` has
+    neither respx nor an async plugin - hence `asyncio.run` below, as in
+    tests/test_concurrency.py.
+    """
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        mcp_catalog.httpx,
+        "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(handler), **kw),
+    )
+
+
+def _answer(status, body=None):
+    return lambda _request: httpx.Response(status, json=body or {})
+
+
+def _probe_all():
+    asyncio.run(mcp_catalog.refresh_health())
+    return mcp_catalog.status()
+
+
+def test_the_countdown_is_read_from_the_environment_not_from_the_file(
+    monkeypatch, tmp_path
+):
+    """The central decision, and the one that fails silently if it is undone.
+
+    The server owns its credential file once it is written and puts REFRESHED
+    tokens back into it, so that file's `expiry_date` moves forward every hour.
+    Deriving the grant date from it would report "6 days, 23 hours left" forever
+    - a countdown that never counts, which is worse than none because it looks
+    like it is working.
+    """
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(6))
+    _catalog(monkeypatch, OAUTHY)
+
+    mcp_catalog.resolved()  # materialises the file from the variable
+    written = tmp_path / "state" / "oauthy" / "token.json"
+    written.write_text(_token_json(0), encoding="utf-8")  # the server refreshes
+
+    entry = mcp_catalog.status()["oauthy"]
+
+    assert entry["days_left"] == 1, "the countdown followed the file, not the secret"
+    assert entry["state"] == "expiring"
+
+
+@pytest.mark.parametrize(
+    ("path", "nest"),
+    [(("normal",), "normal"), (("tokens",), "tokens")],
+)
+def test_both_real_token_nestings_resolve(monkeypatch, path, nest):
+    """The two packages disagree about where the token sits, and both are shipped:
+    the calendar server keys by account name, the gmail server nests under
+    `tokens`. Read out of their sources rather than guessed."""
+    check = dataclasses.replace(OAUTHY_CHECK, token_path=path)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(1, nest=nest))
+
+    token = mcp_catalog._token_object(check)
+
+    assert token is not None
+    assert token["refresh_token"] == REFRESH_TOKEN
+
+
+def test_a_flat_token_file_still_resolves(monkeypatch):
+    """The calendar server migrates an older flat file by wrapping it in an
+    account key, so both shapes are in the wild. A credential that works must not
+    be reported as unreadable."""
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(1, nest=None))
+
+    token = mcp_catalog._token_object(OAUTHY_CHECK)
+
+    assert token is not None
+    assert token["refresh_token"] == REFRESH_TOKEN
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not json at all", "[]", '{"tokens": {}}', '{"tokens": {"refresh_token": 7}}'],
+)
+def test_an_unreadable_token_is_ready_without_a_countdown_and_never_raises(
+    monkeypatch, value
+):
+    """A prediction that cannot be made must not be reported as a prediction of
+    zero, and must not take /healthz down with it."""
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", value)
+    _catalog(monkeypatch, OAUTHY)
+
+    entry = mcp_catalog.status()["oauthy"]
+
+    assert entry["state"] == "ready"
+    assert "days_left" not in entry
+
+
+def test_a_token_with_no_expiry_date_is_ready_without_a_countdown(monkeypatch):
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv(
+        "MCP_OAUTHY_TOKEN", json.dumps({"tokens": {"refresh_token": REFRESH_TOKEN}})
+    )
+    _catalog(monkeypatch, OAUTHY)
+
+    entry = mcp_catalog.status()["oauthy"]
+
+    assert entry["state"] == "ready"
+    assert "days_left" not in entry
+
+
+def test_grant_ttl_days_of_none_switches_the_countdown_off(monkeypatch):
+    """What moving to a Workspace domain with user type Internal looks like: no
+    clock, so no prediction - while the probe carries on unchanged."""
+    server = dataclasses.replace(
+        OAUTHY, oauth=dataclasses.replace(OAUTHY_CHECK, grant_ttl_days=None)
+    )
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(90))
+    _catalog(monkeypatch, server)
+    _google(monkeypatch, _answer(200, {"access_token": "fresh"}))
+
+    entry = _probe_all()["oauthy"]
+
+    assert "days_left" not in entry
+    assert entry["state"] == "ready"
+    assert entry["refresh"] == "valid"
+
+
+def test_the_grant_date_backs_the_access_token_hour_off_the_stored_expiry(monkeypatch):
+    """The stored `expiry_date` is when the ACCESS token dies, an hour after the
+    grant was issued, and the seven-day clock runs from the grant.
+
+    Asserted as an absolute date rather than as `days_left`, and chosen to sit
+    just after midnight, because that is the only way the hour is observable at
+    all: the prediction is date-granular, so shifting it by an hour changes the
+    answer only across a midnight. A mutation dropping the correction survived
+    every other test here, which is what this one is for.
+    """
+    just_after_midnight = datetime(2026, 8, 20, 0, 30, tzinfo=UTC)
+    monkeypatch.setenv(
+        "MCP_OAUTHY_TOKEN",
+        json.dumps(
+            {
+                "tokens": {
+                    "refresh_token": REFRESH_TOKEN,
+                    "expiry_date": int(just_after_midnight.timestamp() * 1000),
+                }
+            }
+        ),
+    )
+
+    # Granted 23:30 on the 19th, so seven days later is still the 26th - not the
+    # 27th, which is where the un-backed-off access expiry would land it.
+    assert mcp_catalog._grant_expiry(OAUTHY_CHECK) == date(2026, 8, 26)
+
+
+def test_a_grant_inside_two_days_reports_expiring(monkeypatch):
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(6))
+    _catalog(monkeypatch, OAUTHY)
+
+    entry = mcp_catalog.status()["oauthy"]
+
+    assert entry["state"] == "expiring"
+    assert entry["days_left"] == 1
+
+
+def test_google_confirming_the_grant_reports_valid(oauthy, monkeypatch):
+    _google(monkeypatch, _answer(200, {"access_token": "fresh"}))
+
+    entry = _probe_all()["oauthy"]
+
+    assert entry["state"] == "ready"
+    assert entry["refresh"] == "valid"
+
+
+def test_invalid_grant_reports_expired(oauthy, monkeypatch):
+    """The seven-day clock running out, as Google reports it."""
+    _google(monkeypatch, _answer(400, {"error": "invalid_grant"}))
+
+    entry = _probe_all()["oauthy"]
+
+    assert entry["state"] == "expired"
+    assert entry["refresh"] == "invalid"
+
+
+@pytest.mark.parametrize("error", ["invalid_client", "unauthorized_client"])
+def test_a_disabled_oauth_client_reports_expired(oauthy, monkeypatch, error):
+    """This is not the seven-day clock and no countdown can see it coming.
+    Publishing a consent screen with restricted scopes disables the client, and
+    every tool then fails while the variables stay exactly as set."""
+    _google(monkeypatch, _answer(401, {"error": error}))
+
+    assert _probe_all()["oauthy"]["state"] == "expired"
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        _answer(500, {"error": "backendError"}),
+        lambda _r: httpx.Response(503, text="<html>not json</html>"),
+        lambda _r: (_ for _ in ()).throw(httpx.ConnectTimeout("no route")),
+    ],
+    ids=["a 500", "an unparseable body", "a timeout"],
+)
+def test_a_fault_at_google_is_unknown_and_never_expired(oauthy, monkeypatch, handler):
+    """A timeout is not an expiry. Reporting one as the other sends someone
+    through a browser consent flow because a network blipped."""
+    _google(monkeypatch, handler)
+
+    entry = _probe_all()["oauthy"]
+
+    assert entry["refresh"] == "unknown"
+    assert entry["state"] == "ready"
+
+
+def test_a_probe_saying_valid_still_reports_expiring_once_the_clock_is_past(
+    oauthy, monkeypatch
+):
+    """Where the two signals disagree, each is trusted about what it can see. The
+    probe is authoritative about death, so `valid` prevents `expired` - but a
+    grant we believe should already be gone is still worth acting on before it
+    goes."""
+    monkeypatch.setenv("MCP_OAUTHY_TOKEN", _token_json(30))
+    _google(monkeypatch, _answer(200, {"access_token": "fresh"}))
+
+    entry = _probe_all()["oauthy"]
+
+    assert entry["refresh"] == "valid"
+    assert entry["state"] == "expiring"
+    assert entry["days_left"] < 0
+
+
+def test_an_unprobed_server_says_so_rather_than_claiming_confirmation(oauthy):
+    """The whole point of the bead: "ready, and Google confirmed it" must be
+    distinguishable from "ready, and nobody has asked yet"."""
+    assert mcp_catalog.status()["oauthy"]["refresh"] == "unchecked"
+
+
+def test_a_dead_credential_never_drops_the_server(oauthy, monkeypatch):
+    """`_live()` stays presence-only and network-free. If an outage at Google
+    could strip the agent's tools we would have rebuilt the "the tools are gone
+    versus the tools never existed" confusion this module exists to prevent - and
+    a tool that errors loudly beats a tool that silently is not there."""
+    _google(monkeypatch, _answer(400, {"error": "invalid_grant"}))
+
+    assert _probe_all()["oauthy"]["state"] == "expired"
+    assert "oauthy" in mcp_catalog.resolved()
+    assert "mcp__oauthy__look" in mcp_catalog.auto_approved_tools()
+
+
+def test_a_missing_variable_is_never_probed(monkeypatch):
+    """No point asking Google about a credential we do not have.
+
+    Asserted on the absence of a recorded VERDICT rather than on the absence of a
+    request: `_probe` gives up before reaching the network when there is no token
+    to send, so a handler that fails on contact proves nothing here. It is kept
+    below anyway, for the day that early return moves.
+    """
+    monkeypatch.setenv("MCP_OAUTHY_KEYS", KEYS_JSON)
+    monkeypatch.delenv("MCP_OAUTHY_TOKEN", raising=False)
+    _catalog(monkeypatch, OAUTHY)
+    _google(monkeypatch, lambda _r: pytest.fail("probed a missing credential"))
+
+    entry = _probe_all()["oauthy"]
+
+    assert "oauthy" not in mcp_catalog._refresh_state, "recorded a verdict anyway"
+    assert entry == {"state": "missing", "missing": ["MCP_OAUTHY_TOKEN"]}
+
+
+def test_a_credential_going_missing_clears_the_verdict_it_used_to_have(
+    oauthy, monkeypatch
+):
+    """Otherwise `refresh` would go on reporting what Google said about a token
+    that is no longer there - a stale claim, which is this bead's whole subject."""
+    _google(monkeypatch, _answer(200, {"access_token": "fresh"}))
+    assert _probe_all()["oauthy"]["refresh"] == "valid"
+
+    monkeypatch.delenv("MCP_OAUTHY_TOKEN", raising=False)
+
+    assert _probe_all()["oauthy"] == {
+        "state": "missing",
+        "missing": ["MCP_OAUTHY_TOKEN"],
+    }
+    assert "oauthy" not in mcp_catalog._refresh_state
+
+
+def test_status_never_leaks_a_token_or_a_client_secret(oauthy, monkeypatch):
+    """The invariant the whole module rests on, now that this code handles the
+    values themselves rather than only their names."""
+    _google(monkeypatch, _answer(400, {"error": "invalid_grant"}))
+
+    rendered = json.dumps(_probe_all())
+
+    assert REFRESH_TOKEN not in rendered
+    assert CLIENT_SECRET not in rendered
+    assert "at-whatever" not in rendered
+
+
+def test_healthz_schedules_a_probe_rather_than_awaiting_google(oauthy, monkeypatch):
+    """Stale-while-revalidate. /healthz is unauthenticated and is what decides
+    whether the host may suspend, so its latency is not Google's to set - and the
+    TTL is what stops a fast pinger becoming load on Google."""
+    calls = []
+    _google(monkeypatch, lambda r: calls.append(r) or httpx.Response(200, json={}))
+
+    async def go():
+        mcp_catalog.schedule_health_refresh()
+        assert calls == [], "schedule_health_refresh awaited the network"
+        assert mcp_catalog.status()["oauthy"]["refresh"] == "unchecked"
+        scheduled = mcp_catalog._refresh_task
+        assert scheduled is not None, "no probe was scheduled at all"
+        await scheduled
+        assert len(calls) == 1
+        # Still fresh, so a second call must not schedule another round. Asserted
+        # on the task IDENTITY rather than on the call count, which would also be
+        # 1 if a new task had been created and simply not run yet.
+        mcp_catalog.schedule_health_refresh()
+        assert mcp_catalog._refresh_task is scheduled, "re-probed inside the TTL"
+        assert len(calls) == 1
+
+    asyncio.run(go())
 
 
 # --- who does and does not get a connected service ---------------------------

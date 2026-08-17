@@ -340,6 +340,33 @@ warned about once per distinct fault, and reported by `/healthz` under
 `mcp_catalog` — because "the tools are gone" must not look like "the tools never
 existed". See `docs/decisions/0015`.
 
+**Present is not alive, and `/healthz` says which.** `missing()` answers a
+question about our own config; it says nothing about whether Google still honours
+the token, and those come apart — a seven-day Testing clock, a revocation, a
+client disabled by publishing a consent screen with restricted scopes. Each entry
+now reports a `state` (`missing`, `ready`, `expiring`, `expired`) plus a separate
+`refresh` verdict, so "ready, and Google confirmed it" and "ready, and nobody has
+asked yet" stop being the same string.
+
+Two signals, because neither covers the other: the countdown is arithmetic on the
+stored `expiry_date` and catches the clock, while a `grant_type=refresh_token`
+POST catches the failures that have no date attached. A timeout is `unknown`, not
+`expired`.
+
+The bit to preserve is where the token is read from. **The environment variable,
+never the materialised file** — both servers write refreshed tokens back to those
+files, so a grant date derived from one reads "6 days, 23 hours left" forever, a
+countdown that never counts. A test pins this because a mutation pointing the
+lookup at the file passes every other test in the suite.
+
+Two rules go with it. A dead credential does **not** drop the server: `_live()`
+stays presence-only and network-free, or an outage at Google would silently strip
+the agent's tools — this section's own confusion through a new door. And
+`/healthz` never awaits Google; it reads a cache and schedules a refresh at most
+every 15 minutes, because it is unauthenticated and drives the host's suspend
+decision. Neither is folded into `ok`: no restart fixes an expired token. See the
+`img-xak` amendment in `docs/decisions/0015`.
+
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
 a tool. A Revert click is the valuable one — an explicit, human-labelled "that
@@ -529,10 +556,10 @@ Outbound MCP servers (`app/mcp_catalog.py`) add their own variables, one set per
 entry in `CATALOG`, named by the entry rather than listed in `config.py`. Today
 that is three, because one OAuth client serves both Google servers:
 `MCP_GOOGLE_OAUTH_KEYS`, `MCP_GCAL_TOKEN` and `MCP_GMAIL_TOKEN`, all produced by
-`scripts/google-auth.sh`. `/healthz` reports each entry as `ready` or
-`missing <VAR>` under `mcp_catalog`; unset is the shipped state and leaves every
-turn exactly as it was. `MCP_STATE_DIR` (default `/tmp/mcp-catalog`) is where the
-credential files are written and should stay container-local.
+`scripts/google-auth.sh`. `/healthz` reports each entry's `state` under
+`mcp_catalog`; unset is the shipped state and leaves every turn exactly as it was.
+`MCP_STATE_DIR` (default `/tmp/mcp-catalog`) is where the credential files are
+written and should stay container-local.
 
 `MCP_CLIENT_IDS` and `MCP_IDENTITY_EMAIL` together enable the `/mcp` surface, and
 must be set together: the `common_name` values of the Cloudflare Access service

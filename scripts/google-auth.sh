@@ -199,8 +199,18 @@ printf "  '%s' \\\\\n" "${SECRETS[@]}"
 printf '  --app "${FLY_APP:-memory-agent-proud-island-3747}"\n'
 cat >&2 <<'EOF'
 
-Then check /healthz: `mcp_catalog` should report both servers as "ready".
-A server still reading "missing MCP_..." means that variable did not arrive.
+Then check /healthz. Under `mcp_catalog`, both servers should report
+`"state": "ready"`, and within fifteen minutes `"refresh": "valid"` - which is
+Google itself confirming the grant, rather than us confirming the variable is set.
+
+  "state": "missing"   that variable did not arrive
+  "state": "expired"   Google refused the grant; consent again, or check that the
+                       publishing status is still Testing and not "In production"
+  "refresh": "unknown" the check could not be completed - not an expiry
+
+`days_left` counts the seven-day Testing clock down from the grant, and the chat
+page warns when it is under two. Put a reminder in your own calendar as well: this
+app has no scheduler, so nothing chases you.
 
 These values are credentials to a live mailbox and calendar. Do not paste them
 into a file in this repo, a bead, or the knowledge base - `fly secrets` is the
