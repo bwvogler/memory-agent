@@ -218,10 +218,34 @@ the volume, not the KB, outside `add_dirs`. Written once per process rather than
 per turn, because these servers write refreshed tokens *back* to the file and
 rewriting each turn would discard the refresh.
 
-The OAuth flow itself is a laptop step, `scripts/google-auth.sh`. Its loudest
-warning is not about secrets: an OAuth consent screen left in **Testing** expires
-refresh tokens after seven days, so everything works and then silently dies a
-week later.
+The OAuth flow itself is a laptop step, `scripts/google-auth.sh`.
+
+### Consumer Gmail cannot hold a durable token, and this is the open problem
+
+The Gmail scopes are **restricted**, not merely sensitive. Google does not permit
+an unverified app to use them in production, and verification means a CASA
+third-party security audit — for `gmail.readonly`, a full penetration test.
+Publishing anyway does not warn: Google disables the OAuth client, the
+"Advanced → Go to … (unsafe)" link fails with "Something went wrong", and the
+next attempt returns `401: disabled_client`. Reverting to Testing recovers it.
+
+So a consumer account leaves only **Testing**, where Google expires refresh
+tokens after **seven days**. That is not a caveat, it is a product defect: every
+calendar and mail tool starts failing with `invalid_grant` a week after it was
+set up, with no deploy to blame and nothing in this repo at fault.
+
+The only durable option short of an audit is a Google **Workspace** account on a
+domain the household owns, with the consent screen's user type set to
+**Internal**. Internal apps skip verification, show no warning screen, and their
+refresh tokens do not expire on a timer. It costs about one Workspace seat.
+
+Nothing in the code changes either way — the entries, the secrets and
+`_materialise` are identical. What changes is whether the credential survives the
+week. Until a Workspace account exists, treat both integrations as demos.
+
+`/healthz` will not help here: an expired refresh token is `ready`, because the
+variable is set. Distinguishing "configured" from "still working" needs a live
+call, which nothing does today.
 
 ### Gmail cannot use the household-hub model, and delegation does not rescue it
 

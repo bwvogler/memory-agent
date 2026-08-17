@@ -57,18 +57,35 @@ FIRST, in the Google Cloud console — about ten minutes, once.
        https://console.cloud.google.com/apis/library/calendar-json.googleapis.com
        https://console.cloud.google.com/apis/library/gmail.googleapis.com
 
-  3. Configure the OAuth consent screen as External, and add the household
-     account as a test user if it asks.
+  3. Configure the OAuth consent screen. User type "Internal" if the household
+     account is on a Google Workspace domain — see step 4 for why that is worth
+     it. "External" otherwise.
        https://console.cloud.google.com/apis/credentials/consent
 
-  4. Set publishing status to "In production".
+  4. LEAVE publishing status on "Testing", and add the household account
+     under "Test users".
 
-     THIS IS THE STEP THAT FAILS SILENTLY. While the consent screen is in
-     "Testing", Google expires refresh tokens after SEVEN DAYS: everything
-     works, and a week later every calendar and mail tool starts failing with
-     `invalid_grant` for no visible reason and no deploy to blame. Unverified
-     "In production" is fine below 100 users — you get a warning screen with a
-     small "Advanced" link, and you click through it.
+     Do NOT press "Publish app". The Gmail scopes below are RESTRICTED, not
+     merely sensitive, and Google does not allow an unverified app to use them
+     in production - verification means a CASA third-party security audit,
+     which for gmail.readonly is a full penetration test. Publish without it
+     and Google disables the OAuth client: the consent screen loads, the
+     "Advanced -> Go to ... (unsafe)" link fails with "Something went wrong",
+     and the next attempt is `401: disabled_client`. Setting it back to
+     "Testing" recovers it.
+
+     The cost of Testing is real and is the thing to plan around: Google
+     expires refresh tokens after SEVEN DAYS. Everything works, then a week
+     later every calendar and mail tool fails with `invalid_grant`, with no
+     deploy to blame. Re-running this script and re-setting the secrets fixes
+     it, for another week.
+
+     The way out of that is a Google WORKSPACE account on a domain you own,
+     with the consent screen's user type set to "Internal". Internal apps need
+     no verification, show no warning screen, and their refresh tokens do not
+     expire on a timer. That is roughly one Workspace seat for the household
+     account, and it is the only durable option that does not involve a
+     security audit.
 
   5. Credentials -> Create credentials -> OAuth client ID -> "Desktop app".
      ONE client serves both servers. Download the JSON.

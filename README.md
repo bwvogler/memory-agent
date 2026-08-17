@@ -213,9 +213,18 @@ configured it — this field is the difference. See `docs/decisions/0015`.
 Today that is `calendar` and `gmail`, both pointing at one household Google
 account. They report `missing MCP_…` until you run `scripts/google-auth.sh` and
 set the three secrets it prints, and an unconfigured server changes nothing about
-a turn. The script's own warning is the one to heed: an OAuth consent screen left
-in **Testing** expires refresh tokens after seven days, so the integration works
-and then fails a week later for no visible reason.
+a turn.
+
+**On a consumer `@gmail.com` account these are demos, not features.** Gmail's
+scopes are *restricted*, so an unverified app cannot use them in production —
+publishing gets the OAuth client disabled (`401: disabled_client`), and the only
+remaining status, Testing, expires refresh tokens after **seven days**. The fix
+is a Google Workspace account on a domain you own with the consent screen set to
+user type **Internal**: no verification, no warning screen, no timer. Roughly one
+seat. No code changes either way. See `docs/decisions/0015`.
+
+Note that `/healthz` cannot see this. An expired refresh token still reports
+`ready`, because the variable is set.
 
 Gmail reads the household account's **own inbox** and cannot read anyone else's —
 a Gmail token reaches only its own mailbox, and delegation is a web-UI feature the
