@@ -80,12 +80,24 @@ FIRST, in the Google Cloud console — about ten minutes, once.
      deploy to blame. Re-running this script and re-setting the secrets fixes
      it, for another week.
 
-     The way out of that is a Google WORKSPACE account on a domain you own,
-     with the consent screen's user type set to "Internal". Internal apps need
-     no verification, show no warning screen, and their refresh tokens do not
+     Verification is NOT the way out, and the console's "Push to production?"
+     dialog makes it look like one. For restricted scopes it means: a public
+     homepage on a domain you own, verified through Search Console; a privacy
+     policy on that domain; an unlisted YouTube video demonstrating each scope;
+     and an ANNUAL CASA Tier 2 assessment - a third-party security scan of your
+     production app, roughly $800-6000 a year, several weeks each time.
+
+     Google does exempt this shape of app from verification: "if you are the
+     only user of your app or if your app is used by only a few users, all of
+     whom are known personally to you". Read what that exempts, though. It
+     permits staying in Testing and clicking through the warning. It does not
+     stop the seven-day clock.
+
+     The way out is a Google WORKSPACE account on a domain you own, with the
+     consent screen's user type set to "Internal". Internal apps need no
+     verification, show no warning screen, and their refresh tokens do not
      expire on a timer. That is roughly one Workspace seat for the household
-     account, and it is the only durable option that does not involve a
-     security audit.
+     account, and it is the only durable option that does not involve an audit.
 
   5. Credentials -> Create credentials -> OAuth client ID -> "Desktop app".
      ONE client serves both servers. Download the JSON.
