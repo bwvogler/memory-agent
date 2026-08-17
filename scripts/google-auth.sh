@@ -7,23 +7,9 @@
 # suspends when nobody is looking at it. So the flow happens here once, and its
 # output travels as a secret. See docs/decisions/0015.
 #
-# Usage:
-#   scripts/google-auth.sh ~/Downloads/client_secret_....json
-#   scripts/google-auth.sh --calendar-only ~/Downloads/client_secret_....json
-#   scripts/google-auth.sh --gmail-only    ~/Downloads/client_secret_....json
-#
-# Before running, in the Google Cloud console:
-#
-#   1. Enable the Google Calendar API and the Gmail API.
-#   2. Credentials -> Create credentials -> OAuth client ID -> Desktop app.
-#      ONE client serves both servers. Download the JSON and pass it below.
-#   3. Set the OAuth consent screen's publishing status to "In production".
-#
-# Step 3 is not optional and is the one that fails silently. While the consent
-# screen is in "Testing", Google expires refresh tokens after SEVEN DAYS - so
-# everything works, and a week later every calendar and mail tool starts failing
-# with `invalid_grant` for no visible reason. "In production" without
-# verification is fine below 100 users; you get a warning screen you click past.
+# Usage and the Google Cloud console steps live in usage() below rather than
+# here, so that running this with no arguments prints them. Two copies would
+# drift, and the copy a comment holds is the one nobody sees.
 set -euo pipefail
 
 CAL_VERSION=2.6.2   # keep in step with GCAL_MCP_VERSION in the Dockerfile
@@ -43,18 +29,77 @@ KEYS=""
 log() { printf 'google-auth: %s\n' "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
+# Printed by --help AND when run with no argument. The second is the important
+# one: "pass the path to the JSON" is useless to someone who does not yet have a
+# JSON, and that is precisely who runs this script with no arguments.
+usage() {
+  cat <<'HELP_END'
+Get the Google credentials the calendar and gmail MCP servers need, and print
+the `fly secrets set` line that ships them. Runs on a laptop: both servers
+authenticate through a browser, and the container has neither one nor a way to
+be reached by one.
+
+USAGE
+  scripts/google-auth.sh <path-to-oauth-client.json>
+  scripts/google-auth.sh --calendar-only <path>
+  scripts/google-auth.sh --gmail-only    <path>
+
+FIRST, in the Google Cloud console — about ten minutes, once.
+
+  Do all of this signed in as the HOUSEHOLD account, not your own. The token
+  this produces reaches every calendar shared with that account, and that
+  account's own mailbox.
+
+  1. Create or pick a project.
+       https://console.cloud.google.com/projectcreate
+
+  2. Enable both APIs. They are separate; missing one fails only at first use.
+       https://console.cloud.google.com/apis/library/calendar-json.googleapis.com
+       https://console.cloud.google.com/apis/library/gmail.googleapis.com
+
+  3. Configure the OAuth consent screen as External, and add the household
+     account as a test user if it asks.
+       https://console.cloud.google.com/apis/credentials/consent
+
+  4. Set publishing status to "In production".
+
+     THIS IS THE STEP THAT FAILS SILENTLY. While the consent screen is in
+     "Testing", Google expires refresh tokens after SEVEN DAYS: everything
+     works, and a week later every calendar and mail tool starts failing with
+     `invalid_grant` for no visible reason and no deploy to blame. Unverified
+     "In production" is fine below 100 users — you get a warning screen with a
+     small "Advanced" link, and you click through it.
+
+  5. Credentials -> Create credentials -> OAuth client ID -> "Desktop app".
+     ONE client serves both servers. Download the JSON.
+       https://console.cloud.google.com/apis/credentials
+
+THEN run this script with the path to that download, e.g.
+
+  scripts/google-auth.sh ~/Downloads/client_secret_1234-abcd.apps.googleusercontent.com.json
+
+A browser opens twice — once for Calendar, once for Gmail. Consent as the
+household account both times. The script prints one `fly secrets set` command;
+nothing is sent anywhere until you run it.
+HELP_END
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --calendar-only) DO_GMAIL=0 ;;
     --gmail-only)    DO_CAL=0 ;;
-    -h|--help)       sed -n '2,25p' "$0"; exit 0 ;;
-    -*)              die "unknown flag: $1" ;;
+    -h|--help)       usage; exit 0 ;;
+    -*)              usage >&2; die "unknown flag: $1" ;;
     *)               KEYS="$1" ;;
   esac
   shift
 done
 
-[ -n "$KEYS" ] || die "pass the path to the OAuth client JSON you downloaded"
+if [ -z "$KEYS" ]; then
+  usage >&2
+  echo >&2
+  die "no OAuth client JSON given - see the steps above to produce one"
+fi
 [ -f "$KEYS" ] || die "no such file: $KEYS"
 command -v npx >/dev/null || die "npx not found; install Node"
 
