@@ -100,7 +100,25 @@ if [ -z "$KEYS" ]; then
   echo >&2
   die "no OAuth client JSON given - see the steps above to produce one"
 fi
-[ -f "$KEYS" ] || die "no such file: $KEYS"
+# A literal ~ means the path was quoted: "~/x.json" does not expand, and the
+# resulting "no such file" names a path that looks exactly right, so the reader
+# rechecks the filename instead of the quotes. Say what actually happened.
+case "$KEYS" in
+  '~'*) die "the ~ was not expanded, so this path is literal: $KEYS
+             Quotes suppress it. Re-run without them and let tab-completion
+             fill the name in, or write \$HOME instead of ~." ;;
+esac
+
+if [ ! -f "$KEYS" ]; then
+  case "$KEYS" in
+    # Google's download ends .apps.googleusercontent.com.json, and the name is
+    # long enough that a truncated paste looks complete.
+    *.apps.googleusercontent.com)
+      die "no such file: $KEYS
+           That name is missing its .json - try $KEYS.json" ;;
+    *) die "no such file: $KEYS" ;;
+  esac
+fi
 command -v npx >/dev/null || die "npx not found; install Node"
 
 # Fail here rather than after two consent flows. A downloaded Desktop-app client
