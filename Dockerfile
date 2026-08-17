@@ -55,6 +55,14 @@ RUN curl -fsSL https://install.tigerfs.io | sh \
 # a newer schema, so an unpinned agent would break the graph on redeploy.
 # Ships an embedded Dolt engine, which is most of the ~100MB - watch it against
 # the 2GB suspend ceiling in fly.toml.
+#
+# DO NOT bump this as a routine dependency update; see img-4r2. Upstream has
+# retracted 1.2.1 as an accidental untested release, and running it migrated
+# every database here from schema v53 to v65 - so the current newest release
+# (1.2.2, which is the tested 1.1.2 code) REFUSES to open them. Moving off this
+# pin needs a per-database Dolt cursor rollback on the volume, not a version
+# change, and the container tier cannot catch getting it wrong because it builds
+# fresh ledgers that any binary opens happily.
 ENV BEADS_VERSION=1.2.1
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \

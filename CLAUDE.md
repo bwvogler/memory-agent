@@ -611,6 +611,24 @@ scripts/fly.sh bd list --all # look at prod without pulling
 `bd ready` is the source of truth for what is open. This file deliberately keeps
 no snapshot of the backlog — a list here would be wrong within a week.
 
+**With one exception, and it is upstream's: a blocking edge between the two
+prefixes does not block.** `bd dep add kb-x img-y` is accepted, stored, and
+rendered by `bd show` and `bd dep tree` — which will say `[BLOCKED]` — while
+`bd ready` offers the blocked bead anyway and `--explain` calls the open blocker
+"resolved" in the same breath as listing it as ready. Reproduced from scratch on
+the pinned bd, and the variable is the *prefix*, not the pull: an imported bead
+carrying a native prefix blocks correctly, so `beads-pull.sh` is not implicated
+(`img-523`). Upstream has it root-caused and open as
+[#4647](https://github.com/gastownhall/beads/issues/4647) —
+`isCrossPrefixDep` files the edge as `DepTargetExternal`, the same bucket as a
+GitHub URL, which `bd ready`'s materialised `is_blocked` column never consults.
+It is not a pin problem: it reproduces on the tested 1.1 line too, so no upgrade
+available today fixes it (see `img-4r2` before touching that pin at all).
+
+So a cross-prefix edge is **documentation only**. State the ordering in the
+description as well, the way `img-n7g` does, because the edge you can see in
+`dep tree` is not enforcing anything.
+
 **Getting what prod has filed.** `scripts/beads-pull.sh [user_slug]` needs
 `flyctl` (logged in), `jq` and `bd` on PATH, and wakes the suspended machine
 itself, so a slow first run is not a hang. Only `image`-labelled beads travel:
