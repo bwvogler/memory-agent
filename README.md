@@ -208,8 +208,19 @@ produces no errors anywhere. The agent just quietly knows nothing.
 lists outbound servers (`app/mcp_catalog.py`) and says `missing <VAR>` for any
 whose credential is unset. Such a server is dropped from the agent's toolset
 entirely, which from the outside is indistinguishable from never having
-configured it — this field is the difference. It ships empty, so an empty object
-here is correct until you add one. See `docs/decisions/0015`.
+configured it — this field is the difference. See `docs/decisions/0015`.
+
+Today that is `calendar` and `gmail`, both pointing at one household Google
+account. They report `missing MCP_…` until you run `scripts/google-auth.sh` and
+set the three secrets it prints, and an unconfigured server changes nothing about
+a turn. The script's own warning is the one to heed: an OAuth consent screen left
+in **Testing** expires refresh tokens after seven days, so the integration works
+and then fails a week later for no visible reason.
+
+Gmail reads the household account's **own inbox** and cannot read anyone else's —
+a Gmail token reaches only its own mailbox, and delegation is a web-UI feature the
+API refuses. Forwarding filters are how you decide what it sees. The agent can
+draft mail; the five tools that would *send* it are refused outright.
 
 ## Working against the deployed machine
 

@@ -9,11 +9,31 @@ ENV PYTHONUNBUFFERED=1 \
     WORK_DIR=/work
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bc ca-certificates curl fuse3 git ripgrep tini \
-    # The SDK bundles a native Claude Code binary for most installs, but a few
-    # install paths still need Node present. Cheap insurance.
-        nodejs npm \
+        bc ca-certificates curl fuse3 git ripgrep tini xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Node, for two reasons: a few SDK install paths still want it present, and the
+# outbound MCP servers below ARE Node programs. Not Debian's `nodejs` package,
+# which is v20 on trixie - @klodr/gmail-mcp declares `node >=22.23.1`, and npm
+# reports that as a WARNING and installs anyway, so the mismatch would surface
+# as a server that fails at some unknown later moment rather than at build time.
+#
+# Pinned to an exact version and checksummed, for the reason bd is pinned and
+# cloudflared was removed: nothing in this image should be able to change
+# underneath a rebuild nobody reviewed.
+ENV NODE_VERSION=22.23.2
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x64; sha=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307 ;; \
+      arm64) arch=arm64; sha=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8 ;; \
+      *) echo "unsupported arch"; exit 1 ;; \
+    esac; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
+    echo "${sha}  node-v${NODE_VERSION}-linux-${arch}.tar.xz" | sha256sum -c -; \
+    tar -xJf "node-v${NODE_VERSION}-linux-${arch}.tar.xz" -C /usr/local --strip-components=1 \
+        --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+    rm "node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
+    node --version; npm --version
 
 # TigerFS. The installer may drop the binary in a non-standard location
 # (e.g. ~/.local/bin), so we find it and copy to /usr/local/bin explicitly.
@@ -44,6 +64,30 @@ RUN set -eux; \
     rm /tmp/beads.tar.gz; \
     chmod +x /usr/local/bin/bd; \
     bd version
+
+# The outbound MCP servers in app/mcp_catalog.py. Baked at PINNED versions
+# rather than npx-ed per turn: npx would resolve over the network on a machine
+# that suspends, and an unpinned server can gain TOOLS on a rebuild - tools that
+# neither `auto_approve` nor `deny` names, which is a security review rather
+# than a version bump. Same reasoning as bd above and cloudflared's removal.
+#
+# The prune is not cosmetic. googleapis ships typed clients for all 323 Google
+# APIs and each server depends on its own copy, so a plain install is 443MB
+# against a ~1.5GB image and the 2GB suspend ceiling in fly.toml. Dropping the
+# TypeScript declarations and sourcemaps leaves 148MB installed and both
+# servers still start. Deleting the unused API directories does NOT work -
+# apis/index.js requires all 323 eagerly - so do not try to take this further.
+#
+# Net effect on the image is slightly NEGATIVE (1.57GB -> 1.53GB): the pinned
+# Node tarball above replaced Debian's nodejs+npm, which cost more than this.
+ENV GCAL_MCP_VERSION=2.6.2 \
+    GMAIL_MCP_VERSION=1.3.3
+RUN npm install -g --omit=dev --no-audit --no-fund \
+        "@cocal/google-calendar-mcp@${GCAL_MCP_VERSION}" \
+        "@klodr/gmail-mcp@${GMAIL_MCP_VERSION}" \
+    && find "$(npm root -g)" \( -name '*.d.ts' -o -name '*.map' \) -delete \
+    && npm cache clean --force \
+    && command -v google-calendar-mcp && command -v gmail-mcp
 
 WORKDIR /srv
 COPY requirements.txt .

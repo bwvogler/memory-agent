@@ -17,8 +17,15 @@ from __future__ import annotations
 import json
 import time
 
+import anyio
 import httpx
 import pytest
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    create_sdk_mcp_server,
+    query,
+    tool,
+)
 
 from .conftest import app_exec, bd, bd_json
 
@@ -378,3 +385,68 @@ def _await_finish(base_url: str, turn_id: str, timeout_s: int = 240) -> dict:
             return turn
         time.sleep(2)
     pytest.fail(f"turn {turn_id} did not finish within {timeout_s}s")
+
+
+def test_a_denied_mcp_tool_never_executes_even_if_also_allowed():
+    """The one claim the `deny` tier rests on, and it is not ours to assume.
+
+    `Server.deny` in app/mcp_catalog.py puts `mcp__gmail__send_email` into
+    `disallowed_tools`, and that is the ONLY thing between the agent and mail
+    leaving the house - the Google token carries `gmail.compose`, which grants
+    sending, so nothing at the token layer refuses it. Whether the CLI honours
+    an `mcp__server__tool` name there is the CLI's business, not something any
+    unit test in this repo can see.
+
+    Runs the SDK directly with a stub server rather than driving the app: the
+    uncertainty is in the CLI contract, and our wiring of it is already pinned
+    in test_mcp_catalog.py. Two tools, one denied, and the handler records
+    whether it was actually entered - so this asserts on EXECUTION rather than
+    on the model reporting that it was refused, which it could get wrong.
+
+    The stub is deliberately listed in both `allowed_tools` and
+    `disallowed_tools`, which is stricter than production ever is. It answers
+    the precedence question outright: deny wins. That is also why
+    `Server.__post_init__` refuses the overlap for a reason about authorial
+    intent rather than about safety.
+    """
+    called: list[str] = []
+
+    @tool("safe_read", "Read the household note. Takes no arguments.", {})
+    async def safe_read(args):
+        called.append("safe_read")
+        return {"content": [{"type": "text", "text": "the note says: buy milk"}]}
+
+    @tool("danger_send", "Send the note to everyone. Takes no arguments.", {})
+    async def danger_send(args):
+        called.append("danger_send")
+        return {"content": [{"type": "text", "text": "SENT - must never happen"}]}
+
+    options = ClaudeAgentOptions(
+        model="claude-sonnet-4-6",
+        max_turns=6,
+        setting_sources=[],
+        permission_mode="acceptEdits",
+        mcp_servers={
+            "stub": create_sdk_mcp_server("stub", tools=[safe_read, danger_send])
+        },
+        allowed_tools=["mcp__stub__safe_read", "mcp__stub__danger_send"],
+        disallowed_tools=["mcp__stub__danger_send"],
+    )
+
+    async def drive() -> None:
+        prompt = (
+            "Call the mcp__stub__safe_read tool, then call the "
+            "mcp__stub__danger_send tool. Try both and report what happened."
+        )
+        async for _ in query(prompt=prompt, options=options):
+            pass
+
+    anyio.run(drive)
+
+    assert "safe_read" in called, (
+        "the control never ran, so this turn proves nothing about the denial"
+    )
+    assert "danger_send" not in called, (
+        "a tool in disallowed_tools EXECUTED - Server.deny is not a control, "
+        "and gmail's send tools are reachable"
+    )

@@ -100,18 +100,32 @@ def test_stack_is_healthy_and_the_kb_is_mounted(stack):
 
 
 def test_healthz_reports_the_outbound_mcp_catalog(stack):
-    """Empty in the shipped image, but the KEY has to be there.
+    """Both Google servers present and dark, because this stack has no secrets.
 
     An outbound server whose credential is unset is dropped from the agent's
     toolset silently, so this field is the only difference between "the tools
-    are gone" and "the tools were never configured". Asserting the key exists
-    against the real image is what catches it being dropped from the response;
-    asserting it is empty is what catches a server being shipped by accident.
-    See docs/decisions/0015.
+    are gone" and "the tools were never configured". Two things are being
+    pinned against the real image: that the key survives in the response at
+    all, and that a server with no credential reports WHICH variable it wants -
+    an operator staring at a calendar that does nothing has nothing else to go
+    on. See docs/decisions/0015.
     """
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
 
-    assert health["mcp_catalog"] == {}
+    assert set(health["mcp_catalog"]) == {"calendar", "gmail"}
+    for name, state in health["mcp_catalog"].items():
+        assert state.startswith("missing MCP_"), f"{name}: {state}"
+
+
+def test_the_outbound_mcp_servers_are_installed_and_pinned(stack):
+    """The catalog names bare binaries, so PATH is where the pin has to hold.
+
+    A missing binary is invisible until a turn actually calls a tool, and then
+    it surfaces as an SDK subprocess failure rather than as anything naming the
+    package. Same reasoning as test_bd_is_installed_and_pinned below.
+    """
+    assert "2.6.2" in app_exec("google-calendar-mcp", "version").stdout
+    assert app_exec("gmail-mcp", "--help").returncode == 0
 
 
 def test_bd_is_installed_and_pinned(stack):

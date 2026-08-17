@@ -190,3 +190,92 @@ nothing wants it yet and it is additive later.
 config-location question could be answered without also building a secret store
 and an OAuth callback — but note that "household-shared" is a *decision* here,
 not an oversight, and reversing it later means reversing this paragraph.
+
+---
+
+## Amendment: what the first two integrations changed (`kb-b82`)
+
+Google Calendar and Gmail were the first entries in `CATALOG`, and filling it in
+contradicted three things this ADR assumed. Recorded here rather than silently
+fixed, because each was a claim made confidently above.
+
+### `secrets` was the wrong shape, and `files` is the fix
+
+This ADR assumed a credential is a *value* an entry can name. Every credible
+Google MCP server wants a `gcp-oauth.keys.json` and a saved token JSON **on
+disk**, produced by a browser consent flow that cannot happen in this container —
+there is no browser, and the machine suspends.
+
+`Server.files` maps a filename to the variable holding that file's contents, and
+`_materialise` writes them into `MCP_STATE_DIR` (default `/tmp/mcp-catalog`) at
+0600 inside a 0700 directory. The invariant survives intact: an entry still names
+a variable and never holds a value, and the AST test now covers `files` too — it
+matters *more* there than in `secrets`, because the values are whole JSON
+documents and an inlined one is the easiest kind of thing to skim past in a diff.
+
+Location is the containment that counts, not the mode bits: container-local, not
+the volume, not the KB, outside `add_dirs`. Written once per process rather than
+per turn, because these servers write refreshed tokens *back* to the file and
+rewriting each turn would discard the refresh.
+
+The OAuth flow itself is a laptop step, `scripts/google-auth.sh`. Its loudest
+warning is not about secrets: an OAuth consent screen left in **Testing** expires
+refresh tokens after seven days, so everything works and then silently dies a
+week later.
+
+### Gmail cannot use the household-hub model, and delegation does not rescue it
+
+The "dedicated household account each person shares their calendar with" above is
+right for Calendar and impossible for Gmail. A Gmail token reaches only its own
+mailbox. Consumer Gmail *does* support delegation — up to 10 delegates — but only
+in the web UI: a delegate's OAuth token still sees its own mailbox, and naming the
+delegator as `userId` returns `403 Delegation denied`. The only cross-mailbox path
+Google supports is Workspace domain-wide delegation with a service account, which
+consumer Gmail has no equivalent of. IMAP does not help either, since XOAUTH2
+authenticates as the token's own user.
+
+So the Gmail entry reads the household account's **own inbox** — mail addressed to
+the household, not anyone's personal mail. What makes that inbox useful is
+per-person forwarding filters, which are revocable and keep every personal mailbox
+out of reach of any token. This is a better fit for the household-shared decision
+above than delegation would have been, rather than a consolation for it.
+
+### A third tier: `deny`, because `gmail.compose` grants sending
+
+The two-tier split above assumed every unwanted capability can be withheld at the
+token. Gmail breaks that: Google's `gmail.compose` scope grants **sending** as
+well as drafting — one scope, not two. Measured rather than read, by booting the
+server against fake credentials and listing its tools: 10 at `gmail.readonly`, 17
+at `readonly+compose`, the extra seven including `send_email`, `send_draft`,
+`reply_all`, `reply_to_email` and `forward_email`.
+
+`Server.deny` puts those five into `disallowed_tools`. Two honest notes:
+
+- **It is weaker than not holding the scope.** `deny` is our config, enforced by
+  the CLI; the Google token still permits the send. That is the deliberate price
+  of `draft_email`, and the way back is a re-auth with narrower scopes, not a
+  redeploy.
+- **It is nonetheless a real control, and this was verified rather than assumed.**
+  `test_a_denied_mcp_tool_never_executes_even_if_also_allowed` drives the real CLI
+  with a stub server whose handler records whether it was entered. Deny wins even
+  over an explicit `allowed_tools` entry, and the handler never runs. That result
+  also demotes `Server.__post_init__`'s overlap check: it refuses a contradiction
+  because two fields disagreeing about intent is unreadable later, not because the
+  contradiction would leak.
+
+Curation has to live at our layer because the Gmail server offers no tool
+whitelist — only `--scopes`.
+
+### The image got smaller
+
+Feared: two Node servers against the 2 GB suspend ceiling. Measured: a naive
+install is 443 MB, because `googleapis` ships typed clients for all 323 Google
+APIs and each server carries its own copy. Deleting `*.d.ts` and `*.map` leaves
+148 MB and both servers still start; deleting the unused API directories does
+*not* work, since `apis/index.js` requires all 323 eagerly.
+
+Net effect is **1.57 GB → 1.53 GB**, because Node itself is now a pinned,
+checksummed tarball replacing Debian's `nodejs`+`npm`. That pin was not
+housekeeping: the Gmail server declares `node >=22.23.1`, Debian ships v20, and
+npm reports the mismatch as a *warning* and installs anyway — a server that would
+have failed at some unknown later moment instead of at build time.

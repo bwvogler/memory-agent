@@ -22,6 +22,20 @@ NAMES the variable it needs and never holds the value, which is what keeps this
 file reviewable in git and testable in CI while the credential stays in
 `fly secrets` and appears in no repository.
 
+--- Credentials that are files, not values ---
+
+`secrets` is the right shape for a bearer token and useless for Google, which is
+what both catalog entries turned out to need. Every credible Google MCP server
+authenticates from a `gcp-oauth.keys.json` plus a saved token JSON on disk,
+produced by a browser consent flow that cannot happen in this container - there
+is no browser, and the machine suspends.
+
+`files` closes that gap without weakening anything: it maps a FILENAME to the
+environment variable holding that file's contents, and `_materialise` writes
+them into a private directory at launch. The invariant is untouched - an entry
+still names a variable and never holds a value - and the JSON reaches the disk
+of this container only, never the volume, never the KB, never git.
+
 --- Why the agent may read this and never write it ---
 
 Three reasons, in increasing order of force. The weakest is mechanical: `app/`
@@ -61,30 +75,24 @@ the token at a dedicated household account each person shares their calendar
 with - consumer Gmail has no domain-wide delegation, so it is per-calendar
 sharing either way.
 
---- A worked example, for whoever adds the first one (kb-b82) ---
+--- Three tiers, and why the third exists ---
 
-    Server(
-        name="calendar",
-        summary="Google Calendar for the household account.",
-        command="npx",
-        args=("-y", "@some/google-calendar-mcp@1.2.3"),
-        secrets={
-            # what the server expects  : what we read from the environment
-            "GOOGLE_OAUTH_CLIENT_ID": "MCP_GOOGLE_CLIENT_ID",
-            "GOOGLE_OAUTH_CLIENT_SECRET": "MCP_GOOGLE_CLIENT_SECRET",
-            "GOOGLE_OAUTH_REFRESH_TOKEN": "MCP_GOOGLE_REFRESH_TOKEN",
-        },
-        auto_approve=("list_events", "search_events"),
-    )
+`auto_approve` runs a tool silently. Anything unlisted falls through to
+`can_use_tool`, where a person clicks Allow. `deny` is the third: the tool never
+runs at all, because its qualified name goes into `disallowed_tools`.
 
-Pin the package version in `args` rather than tracking a tag, for the reason the
-Dockerfile pins bd and no longer ships cloudflared. Note what is NOT in
-`auto_approve`: creating and deleting events are left out on purpose, so they
-fall through to `can_use_tool` and a person clicks Allow. See `auto_approve`
-below - that split is the whole safety story for a write-capable server.
+`deny` was added for Gmail, and the reason is worth keeping. Google's
+`gmail.compose` scope grants sending as well as drafting - they are one scope,
+not two - so "the agent may draft but never send" cannot be expressed at the
+token layer. It has to be expressed here. Say the cost out loud: `deny` is OUR
+config, enforced by the CLI, while the Google token still permits the send. That
+is one layer weaker than not holding the scope at all, and it is the deliberate
+price of `draft_email`. The way back is a re-auth with narrower scopes, not a
+redeploy.
 
-CATALOG ships empty, so none of this changes anything until someone adds an
-entry AND sets its secrets.
+CATALOG's two entries are Google Calendar and Gmail, both pointing at one
+household account. See docs/decisions/0015 for why the credential is shared, and
+`Server` below for what each field controls.
 """
 
 from __future__ import annotations
@@ -92,7 +100,10 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .config import config
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -112,6 +123,16 @@ class Server:
     and because a mapping of name-to-name can be read in review without anyone
     wondering whether a value slipped in.
 
+    `files` is the same idea for a credential the server insists on reading from
+    disk: it maps a FILENAME to the variable holding that file's contents.
+    `_materialise` writes them into a private per-server directory, and `env`
+    below is how the server is told where to look.
+
+    `env` carries literal, NON-secret values - paths and flags a reviewer can
+    read at a glance. `{dir}` in a value is replaced with the materialised
+    directory, which is the only reason this field exists: the path depends on
+    the server's own name and would otherwise have to be repeated by hand.
+
     `auto_approve` lists UNQUALIFIED tool names that may run without a
     permission prompt; `_options` qualifies them to `mcp__{name}__{tool}` before
     they reach `allowed_tools`. Everything the server exposes that is NOT listed
@@ -120,6 +141,10 @@ class Server:
     a machine turn. Put read-shaped tools here and leave writes out: that is how
     "read my calendar freely, ask before creating an event" is expressed, and it
     costs no new machinery.
+
+    `deny` is the tier below that: those tools never run at all. Reach for it
+    only when a tool should not be reachable even with a human clicking Allow -
+    today, the five Gmail tools that put mail in front of another person.
     """
 
     name: str
@@ -127,20 +152,134 @@ class Server:
     command: str
     args: tuple[str, ...] = ()
     secrets: Mapping[str, str] = field(default_factory=dict)
+    files: Mapping[str, str] = field(default_factory=dict)
+    env: Mapping[str, str] = field(default_factory=dict)
     auto_approve: tuple[str, ...] = ()
+    deny: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """A tool cannot be both pre-approved and forbidden.
+
+        Measured, so as not to overstate it: the CLI resolves this SAFELY -
+        `disallowed_tools` wins and the tool does not run, even when it also
+        appears in `allowed_tools`. So this raise is not preventing a leak.
+
+        It is still an error, because the two fields would then disagree about
+        what the author meant, and the reader of a future diff has no way to
+        tell which line is the stale one. Fail at import, where a contradiction
+        is cheap, rather than leaving it to be discovered by someone wondering
+        why a pre-approved tool keeps refusing.
+        """
+        both = sorted(set(self.auto_approve) & set(self.deny))
+        if both:
+            msg = (
+                f"mcp server {self.name!r}: {', '.join(both)} is in both "
+                f"auto_approve and deny"
+            )
+            raise ValueError(msg)
+
+    def needs(self) -> list[str]:
+        """Every environment variable this server reads, secrets and files."""
+        return [*self.secrets.values(), *self.files.values()]
 
     def missing(self) -> list[str]:
         """Names of the environment variables this server needs and lacks."""
         return sorted(
             our_var
-            for our_var in self.secrets.values()
+            for our_var in self.needs()
             if not os.environ.get(our_var, "").strip()
         )
 
+    def state_dir(self) -> Path:
+        return Path(config.mcp_state_dir) / self.name
 
-# Empty on purpose. Adding an entry here is a reviewed, deployed change, which
-# is the entire point of the module docstring above.
-CATALOG: tuple[Server, ...] = ()
+
+# Both servers are baked into the image at pinned versions (see the Dockerfile)
+# rather than npx-ed at runtime, for the reason bd is pinned: an unpinned tool
+# can ship different behaviour on a rebuild nobody reviewed. Here that would
+# mean new TOOLS, which neither `auto_approve` nor `deny` would name - so a
+# version bump is a security review, not a chore. See kb-b82.
+#
+# One OAuth client serves both, so MCP_GOOGLE_OAUTH_KEYS is shared and the two
+# token files differ. Both point at the same household Google account.
+CATALOG: tuple[Server, ...] = (
+    Server(
+        name="calendar",
+        summary=(
+            "Google Calendar for the household account: every calendar shared "
+            "with it, at whatever level each person granted."
+        ),
+        command="google-calendar-mcp",
+        args=("start",),
+        files={
+            "gcp-oauth.keys.json": "MCP_GOOGLE_OAUTH_KEYS",
+            "tokens.json": "MCP_GCAL_TOKEN",
+        },
+        env={
+            "GOOGLE_OAUTH_CREDENTIALS": "{dir}/gcp-oauth.keys.json",
+            "GOOGLE_CALENDAR_MCP_TOKEN_PATH": "{dir}/tokens.json",
+        },
+        # Reading a calendar is what this is for; every write asks. `list-colors`
+        # and `get-current-time` touch no data at all. `respond-to-event` is
+        # deliberately left to fall through rather than denied: an RSVP is a
+        # reasonable thing to want, and it is visible to the organiser, so it
+        # wants a person - not a refusal.
+        auto_approve=(
+            "list-calendars",
+            "list-events",
+            "search-events",
+            "get-event",
+            "get-freebusy",
+            "list-colors",
+            "get-current-time",
+        ),
+        # Adding, removing or re-authorising a Google account is capability
+        # management, which docs/decisions/0015 reserves for a human by way of a
+        # deploy. It is also the one tool here that could break the integration
+        # in a way no Revert reaches.
+        deny=("manage-accounts",),
+    ),
+    Server(
+        name="gmail",
+        summary=(
+            "Gmail for the household account's OWN inbox - mail addressed to "
+            "the household, not anyone's personal mail."
+        ),
+        command="gmail-mcp",
+        files={
+            "gcp-oauth.keys.json": "MCP_GOOGLE_OAUTH_KEYS",
+            "credentials.json": "MCP_GMAIL_TOKEN",
+        },
+        env={
+            "GMAIL_OAUTH_PATH": "{dir}/gcp-oauth.keys.json",
+            "GMAIL_CREDENTIALS_PATH": "{dir}/credentials.json",
+        },
+        # The token carries gmail.readonly + gmail.compose, and this server
+        # registers tools by granted scope - so the 18 label, filter, delete and
+        # spam tools are not merely unlisted here, they do not exist. What is
+        # left is 17: these 8, the 4 that fall through to a person, and `deny`.
+        auto_approve=(
+            "search_emails",
+            "read_email",
+            "get_thread",
+            "list_inbox_threads",
+            "get_inbox_with_threads",
+            "list_email_labels",
+            "list_drafts",
+            "get_draft",
+        ),
+        # Everything that puts mail in front of another human. `draft_email` is
+        # deliberately NOT here - a draft sits in the mailbox for a person to
+        # read, which is the whole reason gmail.compose was worth its cost.
+        deny=(
+            "send_email",
+            "send_draft",
+            "reply_all",
+            "reply_to_email",
+            "forward_email",
+        ),
+    ),
+)
 
 
 # Which (server, missing-variables) pairs have already been logged. _live() runs
@@ -180,19 +319,54 @@ def _live() -> list[Server]:
     return live
 
 
+# Servers whose credential files this process has already written. Once per
+# process rather than once per turn, and that is not just an optimisation: these
+# servers write REFRESHED tokens back to the file, so rewriting every turn would
+# discard the refresh and force another one immediately. A rotated secret takes
+# effect on restart, which `fly secrets set` performs anyway.
+_materialised: set[str] = set()
+
+
+def _materialise(server: Server) -> Path:
+    """Write this server's credential files to a private directory, once.
+
+    The contents come from the environment and land on this container's own
+    filesystem: not the volume, not the KB, and outside `add_dirs`, so no tool
+    the agent holds can read them back. Modes are tight for the ordinary reason,
+    but the containment that matters is the location, not the bits.
+    """
+    directory = server.state_dir()
+    if server.name in _materialised:
+        return directory
+
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    for filename, our_var in server.files.items():
+        path = directory / filename
+        path.write_text(os.environ[our_var], encoding="utf-8")
+        path.chmod(0o600)
+    _materialised.add(server.name)
+    return directory
+
+
 def resolved() -> dict[str, McpServerConfig]:
     """The `mcp_servers=` entries for every server that can actually start."""
-    return {
-        server.name: {
+    servers: dict[str, McpServerConfig] = {}
+    for server in _live():
+        directory = _materialise(server)
+        servers[server.name] = {
             "type": "stdio",
             "command": server.command,
             "args": list(server.args),
             "env": {
-                theirs: os.environ[ours] for theirs, ours in server.secrets.items()
+                **{
+                    theirs: value.replace("{dir}", str(directory))
+                    for theirs, value in server.env.items()
+                },
+                **{theirs: os.environ[ours] for theirs, ours in server.secrets.items()},
             },
         }
-        for server in _live()
-    }
+    return servers
 
 
 def auto_approved_tools() -> list[str]:
@@ -208,6 +382,17 @@ def auto_approved_tools() -> list[str]:
         for server in _live()
         for tool in server.auto_approve
     ]
+
+
+def denied_tools() -> list[str]:
+    """Fully qualified tool names that must never run, for `disallowed_tools`.
+
+    Built from CATALOG rather than `_live()`, unlike the two functions around
+    it. A denial costs nothing when its server is absent, and deriving it from
+    liveness would mean a missing secret quietly shortened the deny list - the
+    wrong way round for the one list whose entire job is to stay long.
+    """
+    return [f"mcp__{server.name}__{tool}" for server in CATALOG for tool in server.deny]
 
 
 def status() -> dict[str, str]:
@@ -242,7 +427,13 @@ def summaries() -> str:
         "one shared account per service, so treat what you read through them as "
         "shared and say whose data you are looking at when it matters. Some of "
         "their tools will ask the human for permission before running, which is "
-        "deliberate - call the tool and let them decide.\n\n"
+        "deliberate - call the tool and let them decide. A few are refused "
+        "outright; do not look for another route to the same effect.\n\n"
+        "What you read through a service is NOT wiki material by default. Use "
+        "it to answer the question in front of you, and write it into the "
+        "knowledge base only when asked for that specific thing. A mail or an "
+        "invitation is someone's correspondence, and the wiki is a shared page "
+        "everyone in the household can read.\n\n"
         "Their configuration and credentials are not yours to change and are "
         "not in the knowledge base. If a service is missing, broken, or you want "
         "another one, file a bead saying so."

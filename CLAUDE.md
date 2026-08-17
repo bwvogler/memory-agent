@@ -296,6 +296,45 @@ writing" is expressed. Credentials are household-shared and this is stated rathe
 than buried: enabling a server enables it for everyone, and behind one token the
 app cannot tell household members apart. Reflection gets no catalog at all.
 
+**The catalog now holds Google Calendar and Gmail, and filling it in contradicted
+three things ADR 0015 assumed.** All three are recorded as an amendment there
+rather than quietly fixed.
+
+`secrets` names a *value*, and Google credentials are *files* — a
+`gcp-oauth.keys.json` and a saved token, from a browser flow that cannot happen
+in this container. `Server.files` names the variable holding a file's contents
+and `_materialise` writes it to `MCP_STATE_DIR` once per process — once, because
+these servers write refreshed tokens back and rewriting per turn would discard
+the refresh. Container-local is the containment that matters, not the 0600: not
+the volume, not the KB, outside `add_dirs`. `scripts/google-auth.sh` runs the
+consent flow on a laptop and prints the `fly secrets set` line; its loudest
+warning is that a consent screen left in **Testing** expires refresh tokens after
+seven days, so the integration works and then dies a week later.
+
+Gmail cannot use the household-hub model Calendar uses. A Gmail token reaches
+only its own mailbox; consumer delegation exists but is web-UI only, and the API
+answers `403 Delegation denied`. So the entry reads the household account's *own*
+inbox, and per-person forwarding filters are what make that useful.
+
+`Server.deny` is a third tier, and it exists because Google's `gmail.compose`
+scope grants **sending** — one scope, not two, measured by booting the server and
+listing its tools at each scope. The five sending tools go into `disallowed_tools`.
+Say the cost: that is our config enforced by the CLI, weaker than not holding the
+scope, and the deliberate price of `draft_email`. It is a real control though, and
+that was verified rather than assumed — a live test drives the real CLI with a
+stub server whose handler records whether it was entered, and deny wins even over
+an explicit `allowed_tools` entry. Which also demotes `__post_init__`'s overlap
+check: it refuses a contradiction because two fields disagreeing about intent is
+unreadable later, not because it would leak.
+
+Both servers are pinned in the Dockerfile, and so is **Node itself** — a
+checksummed tarball, because the Gmail server declares `node >=22.23.1`, Debian
+ships v20, and npm reports that as a warning and installs anyway. The image got
+*smaller* (1.57 GB → 1.53 GB): the servers cost 148 MB after `*.d.ts`/`*.map` are
+stripped — 443 MB before, since `googleapis` carries typed clients for all 323
+Google APIs, twice — and the pinned Node replaced more than that. Do not try to
+delete the unused API directories; `apis/index.js` requires all 323 eagerly.
+
 A server whose secret is unset is dropped rather than launched to fail later,
 warned about once per distinct fault, and reported by `/healthz` under
 `mcp_catalog` — because "the tools are gone" must not look like "the tools never
@@ -487,9 +526,13 @@ request — the UI mirrors the first of these, and the server is the authority),
 waits for a person, and they resolve in opposite directions).
 
 Outbound MCP servers (`app/mcp_catalog.py`) add their own variables, one set per
-entry in `CATALOG`, named by the entry rather than listed in `config.py` —
-`CATALOG` ships empty, so today there are none. `/healthz` reports each entry as
-`ready` or `missing <VAR>` under `mcp_catalog`.
+entry in `CATALOG`, named by the entry rather than listed in `config.py`. Today
+that is three, because one OAuth client serves both Google servers:
+`MCP_GOOGLE_OAUTH_KEYS`, `MCP_GCAL_TOKEN` and `MCP_GMAIL_TOKEN`, all produced by
+`scripts/google-auth.sh`. `/healthz` reports each entry as `ready` or
+`missing <VAR>` under `mcp_catalog`; unset is the shipped state and leaves every
+turn exactly as it was. `MCP_STATE_DIR` (default `/tmp/mcp-catalog`) is where the
+credential files are written and should stay container-local.
 
 `MCP_CLIENT_IDS` and `MCP_IDENTITY_EMAIL` together enable the `/mcp` surface, and
 must be set together: the `common_name` values of the Cloudflare Access service

@@ -576,7 +576,10 @@ def _options(
         # Present in the CLI, unusable here: with no TTY it resolves instantly
         # with EMPTY answers and the agent believes it consulted someone. See
         # anthropics/claude-code#50728 and app/interact.py.
-        disallowed_tools=["AskUserQuestion"],
+        # Plus whatever the catalog forbids outright. That is a third tier below
+        # `allowed_tools` and `can_use_tool`: not "ask a person", but "there is
+        # no answer a person could give". Today it is the Gmail tools that send.
+        disallowed_tools=["AskUserQuestion", *mcp_catalog.denied_tools()],
         # Two named subagents plus the built-in general-purpose one.
         agents=_named_agents(),
         # The question tool, built per turn because it closes over the turn it

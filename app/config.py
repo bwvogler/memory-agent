@@ -24,6 +24,13 @@ class Config:
     session_database_url: str = os.environ.get("SESSION_DATABASE_URL", "")
     work_dir: str = os.environ.get("WORK_DIR", "/work")
 
+    # Where app/mcp_catalog.py writes the credential files its servers insist on
+    # reading from disk. Container-local ON PURPOSE, and the default should stay
+    # that way: not WORK_DIR, because the volume outlives the process and has no
+    # savepoint covering it, and not KB_MOUNT, which the agent can read. Nothing
+    # here is state - it is rewritten from the environment at every boot.
+    mcp_state_dir: str = os.environ.get("MCP_STATE_DIR", "/tmp/mcp-catalog")  # noqa: S108
+
     cf_team_domain: str = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "")
     cf_aud: str = os.environ.get("CF_ACCESS_AUD", "")
     # Two independent allowlists, checked as OR: a caller passes if their email
