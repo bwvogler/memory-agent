@@ -233,10 +233,19 @@ CATALOG: tuple[Server, ...] = (
             "list-colors",
             "get-current-time",
         ),
-        # Adding, removing or re-authorising a Google account is capability
-        # management, which docs/decisions/0015 reserves for a human by way of a
-        # deploy. It is also the one tool here that could break the integration
-        # in a way no Revert reaches.
+        # `manage-accounts add` returns an OAuth consent URL as TEXT, which the
+        # agent would put in the chat for a person to click. That is a capability
+        # grant solicited through conversation - a whole additional Google
+        # account, at full calendar scope - and docs/decisions/0015 reserves
+        # capability grants for a reviewed deploy precisely because chat leaves
+        # no diff. `remove` is the same argument pointed the other way.
+        #
+        # Two things already stop it, and neither is a reason to allow it. The
+        # callback is localhost:3000 on THIS container, so a laptop browser
+        # would redirect to its own machine and the token would never arrive;
+        # and if it did arrive it would land in the file `_materialise` rewrites
+        # from the secret at the next boot. A grant that works until the next
+        # deploy and appears in no `fly secrets` is worse than one that fails.
         deny=("manage-accounts",),
     ),
     Server(
