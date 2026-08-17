@@ -686,3 +686,18 @@ one `log.info`.
 **Before committing ledger changes**, run `bd export -o .beads/issues.jsonl`. The
 Dolt database beside it is gitignored and the JSONL is what git tracks.
 `beads-pull.sh` does this for you; a bead you create or close by hand does not.
+
+That step survives beads owning a `pre-commit` hook, which is the obvious reason
+to think it is stale, so here is why it is not. bd does have an auto-export, and
+`bd hooks run` refuses to perform it: `auto-export: skipping — running as git
+hook`. The refusal is unconditional — it holds with `export.auto: true` in
+`.beads/config.yaml`, which otherwise works and writes the same file — so a
+commit made after `bd close` carries a `issues.jsonl` that predates it, silently
+and with the hook reporting success. That was measured in a throwaway repo, since
+"the hook probably handles it" is the kind of guess this paragraph exists to
+settle (`img-uc6`).
+
+We leave `export.auto` off rather than turning it on and deleting the paragraph,
+for two reasons that both survive it: the export still needs `git add`, so a
+manual step remains either way, and every write would then print bd's
+`no Dolt remote configured` warning, which teaches a reader to skip bd's output.
