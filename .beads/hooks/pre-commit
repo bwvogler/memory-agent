@@ -57,3 +57,13 @@ if command -v bd >/dev/null 2>&1; then
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
 # --- END BEADS INTEGRATION v1.2.1 ---
+# --- BEGIN MEMORY-AGENT STATIC CHECKS ---
+# Managed by scripts/install-hooks.sh. The gate itself is a versioned script, so
+# improving it is a commit rather than a re-install everywhere. Guarded on -x
+# because checking out a commit that predates the script must not break every
+# commit after it.
+_ma_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$_ma_root" ] && [ -x "$_ma_root/scripts/pre-commit-checks.sh" ]; then
+  "$_ma_root/scripts/pre-commit-checks.sh" || exit 1
+fi
+# --- END MEMORY-AGENT STATIC CHECKS ---

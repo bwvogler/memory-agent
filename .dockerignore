@@ -32,7 +32,6 @@ __pycache__/
 
 .git/
 .github/
-.pre-commit-config.yaml
 tests/
 docs/decisions/
 *.log
