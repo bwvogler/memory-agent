@@ -701,6 +701,23 @@ than a fault — every user's ledger sees the same manifest — so `reconcile_sh
 records the id as applied and never retries it (`app/kb.py`). The only trace is
 one `log.info`.
 
+**Absence is the only failure treated as permanent, and that distinction was
+learned the hard way.** `bd close` refuses a bead whose blocker is still open
+(`cannot close blocked issue: … (use --force to override)`), and manifest lines
+are in append order, not dependency order. `kb-068` depends on `kb-b82` and was
+listed first, so its close was refused, filed as applied, and never retried — the
+image shipped, prod went on showing the work open, and the only trace was one
+`log.info` nobody reads. `reconcile_shipped` now makes passes until one closes
+nothing new, so closing the blocker in the same run unblocks the line above it,
+and it tells `no issue found` (permanent, recorded) apart from every other
+refusal (retried next boot, and warned about each time). Do not reorder the
+manifest to work around this and do not reach for `--force`: the point of a
+warning every boot is that shipped work still open is somebody's problem.
+
+One bead is already past rescue by code, because its id sits in the applied list:
+`scripts/fly.sh --write bd close kb-068 --reason "shipped in <image>"`. It is no
+longer blocked, `kb-b82` having closed, so this needs no `--force`.
+
 **Before committing ledger changes**, run `bd export -o .beads/issues.jsonl`. The
 Dolt database beside it is gitignored and the JSONL is what git tracks.
 `beads-pull.sh` does this for you; a bead you create or close by hand does not.

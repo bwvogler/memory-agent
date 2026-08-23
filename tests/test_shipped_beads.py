@@ -31,9 +31,19 @@ def ledger(tmp_path, monkeypatch):
 
 
 class FakeBd(list):
-    """Every bd invocation, in order. Add to .fail to make a subcommand fail."""
+    """Every bd invocation, in order.
+
+    Add to .fail to make a subcommand fail the way bd fails on an id this
+    ledger does not have. Add to .blocked_by to make one bead's close be
+    refused until its blocker has been closed.
+
+    Both error strings are bd's own, measured against the pinned version rather
+    than invented: reconcile_shipped now tells the two apart, so a fake that
+    paraphrased them would let a regression through.
+    """
 
     fail: set[str]
+    blocked_by: dict[str, str]
 
 
 @pytest.fixture
@@ -41,11 +51,29 @@ def calls(monkeypatch):
     """Record every bd invocation; succeed unless a subcommand is failed first."""
     recorded = FakeBd()
     recorded.fail = set()
+    recorded.blocked_by = {}
+    done: set[str] = set()
 
     async def fake_run(*argv, cwd=None, env=None):
         recorded.append(list(argv))
         if argv[1] in recorded.fail:
-            return 1, "", f"bd {argv[1]}: no such issue"
+            return (
+                1,
+                "",
+                f'Error: resolving ID {argv[2]}: no issue found matching "{argv[2]}"',
+            )
+        if argv[1] == "close":
+            blocker = recorded.blocked_by.get(argv[2])
+            if blocker is not None and blocker not in done:
+                return (
+                    1,
+                    "",
+                    (
+                        f"cannot close blocked issue: {argv[2]} is blocked by "
+                        f"[{blocker}] (use --force to override)"
+                    ),
+                )
+            done.add(argv[2])
         return 0, "", ""
 
     monkeypatch.setattr(kb, "_run", fake_run)
@@ -190,6 +218,46 @@ def test_a_missing_work_dir_does_not_take_down_the_boot(tmp_path, monkeypatch, c
     _work_dir(monkeypatch, tmp_path / "gone")
 
     assert asyncio.run(kb.reconcile_shipped_all()) == {}
+
+
+def test_a_bead_blocked_by_a_later_manifest_line_is_still_closed(
+    tmp_path, monkeypatch, ledger, calls
+):
+    """The bug this fix-point loop exists for.
+
+    Manifest order is append order. bd refuses to close a bead whose blocker is
+    still open, so listing the blocked bead first meant its close was refused,
+    recorded as applied, and never retried - which is how kb-068 stayed open on
+    prod after the image that resolved it shipped.
+    """
+    calls.blocked_by["kb-068"] = "kb-b82"
+    _manifest(tmp_path, monkeypatch, _entry("kb-068"), _entry("kb-b82"))
+
+    closed = asyncio.run(kb.reconcile_shipped("someone_example"))
+
+    assert sorted(closed) == ["kb-068", "kb-b82"]
+    state = json.loads((ledger / kb.SHIPPED_STATE_FILE).read_text())
+    assert state == {"applied": ["kb-068", "kb-b82"]}
+
+
+def test_a_refusal_that_is_not_absence_is_retried_next_boot(
+    tmp_path, monkeypatch, ledger, calls
+):
+    """Absence is permanent; every other refusal is a state that can change.
+
+    A bead whose blocker never ships stays pending and warns on every boot.
+    That is the point: shipped work still open is somebody's problem to resolve,
+    unlike an id this ledger simply never had.
+    """
+    calls.blocked_by["kb-068"] = "kb-never"
+    _manifest(tmp_path, monkeypatch, _entry("kb-068"))
+
+    assert asyncio.run(kb.reconcile_shipped("someone_example")) == []
+    assert json.loads((ledger / kb.SHIPPED_STATE_FILE).read_text()) == {"applied": []}
+
+    # Now its blocker closes out of band, and the next boot finishes the job.
+    calls.blocked_by.clear()
+    assert asyncio.run(kb.reconcile_shipped("someone_example")) == ["kb-068"]
 
 
 def test_the_shipped_manifest_ships():

@@ -574,6 +574,18 @@ def _read_shipped_state(path: Path) -> set[str]:
     return {str(i) for i in applied} if isinstance(applied, list) else set()
 
 
+def _bead_absent(message: str) -> bool:
+    """True when bd's refusal means this ledger simply has no such bead.
+
+    The distinction is load-bearing, not cosmetic: absence is permanent and
+    every other refusal is not. `bd close` reports a missing id as
+    `no issue found matching "kb-x"`, and reports a bead whose blocker is still
+    open as `cannot close blocked issue` - which stops being true the moment the
+    blocker closes, possibly on this same run.
+    """
+    return "no issue found" in message.lower()
+
+
 async def reconcile_shipped(user_slug: str) -> list[str]:
     """Close the beads this image resolves, in one user's ledger.
 
@@ -609,43 +621,73 @@ async def reconcile_shipped(user_slug: str) -> list[str]:
     image = os.environ.get("FLY_IMAGE_REF", "local")
     closed: list[str] = []
 
-    for entry in pending:
-        bead_id = str(entry["id"])
-        summary = str(entry.get("summary") or "shipped")
-        commit = str(entry.get("commit") or "unknown")
+    # Manifest order is append order, which is not dependency order - and bd
+    # refuses to close a bead whose blocker is still open, even when the blocker
+    # is a line further down the same manifest. So make passes until one closes
+    # nothing new. This is what a single pass got wrong: kb-068 depends on
+    # kb-b82 and was listed first, so its close was refused, recorded as applied
+    # and never retried, leaving shipped work open on prod with one log line as
+    # the only trace.
+    while pending:
+        refused: list[tuple[dict, str]] = []
+        progressed = False
 
-        rc, _, err = await _run(
-            "bd",
-            "close",
-            bead_id,
-            "--reason",
-            f"shipped in {image}",
-            cwd=scratch,
-            env=_bd_env(),
-        )
-        if rc != 0:
-            # A bead this ledger never had is the common case, not a fault:
-            # every user's ledger sees the same manifest. Record it as applied
-            # anyway - retrying forever would log the same failure on every
-            # boot, and there is nothing here that a later boot could fix.
-            log.info(
-                "shipped bead %s not closed in %s (%s)",
+        for entry in pending:
+            bead_id = str(entry["id"])
+            summary = str(entry.get("summary") or "shipped")
+            commit = str(entry.get("commit") or "unknown")
+
+            rc, _, err = await _run(
+                "bd",
+                "close",
                 bead_id,
-                user_slug,
-                err.strip() or f"rc={rc}",
+                "--reason",
+                f"shipped in {image}",
+                cwd=scratch,
+                env=_bd_env(),
+            )
+            if rc != 0:
+                message = err.strip() or f"rc={rc}"
+                if _bead_absent(message):
+                    # A bead this ledger never had is the common case, not a
+                    # fault: every user's ledger sees the same manifest. Record
+                    # it as applied - there is nothing a later boot could fix.
+                    log.info(
+                        "shipped bead %s is not in %s's ledger (%s)",
+                        bead_id,
+                        user_slug,
+                        message,
+                    )
+                    applied.add(bead_id)
+                else:
+                    refused.append((entry, message))
+                continue
+
+            # The note, not the reason, carries the audit trail: a manifest
+            # entry is hand-written and can claim something that never shipped,
+            # so the commit is the thing that lets a reader check.
+            await note_bead(
+                user_slug, bead_id, f"{summary} (commit {commit}, image {image})"
             )
             applied.add(bead_id)
-            continue
+            closed.append(bead_id)
+            progressed = True
+            log.info("closed shipped bead %s for %s", bead_id, user_slug)
 
-        # The note, not the reason, carries the audit trail: a manifest entry is
-        # hand-written and can claim something that never shipped, so the commit
-        # is the thing that lets a reader check.
-        await note_bead(
-            user_slug, bead_id, f"{summary} (commit {commit}, image {image})"
-        )
-        applied.add(bead_id)
-        closed.append(bead_id)
-        log.info("closed shipped bead %s for %s", bead_id, user_slug)
+        pending = [entry for entry, _ in refused]
+        if not progressed:
+            # Nothing left to unblock on this run. Deliberately *not* recorded
+            # as applied: the next boot retries, and a warning every boot is the
+            # right cost for shipped work that is still open. Warning, not info,
+            # because unlike absence this is a state someone has to resolve.
+            for entry, message in refused:
+                log.warning(
+                    "shipped bead %s still open in %s: %s",
+                    entry["id"],
+                    user_slug,
+                    message,
+                )
+            break
 
     try:
         state_path.write_text(

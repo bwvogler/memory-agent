@@ -110,6 +110,41 @@ were kept. ADR 0006 already says to re-run `bd init` in a clean directory and
 read what appears before bumping the pin; this is the second half of that
 warning, for a repo rather than a scratch dir.
 
+## Amendment — a refused close is not a missing bead (`kb-068`)
+
+The reconciler treated every `bd close` failure identically: log it, record the
+id as applied, never try again. The reasoning was sound for the case it was
+written for — most ids are absent from most ledgers, and no later boot can fix
+an id that does not exist — and wrong for the case nobody had hit yet.
+
+`bd close` also refuses a bead whose blocker is still open, and manifest lines
+are appended in the order work merged, which is not dependency order. `kb-068`
+depends on `kb-b82` and its line came first, so on the boot that carried both:
+the close of `kb-068` was refused, filed as applied, and never attempted again,
+while `kb-b82` closed a moment later and made it closable. The image shipped,
+prod kept listing resolved work as outstanding, and the evidence was one
+`log.info` on a machine that suspends when idle. It is exactly the rot this ADR
+exists to prevent, arriving through the mechanism built to prevent it.
+
+Two changes, both narrow. `reconcile_shipped` makes passes until a pass closes
+nothing new, so a blocker further down the manifest unblocks the line above it
+within the same run. And absence is now distinguished from refusal by bd's own
+wording — `no issue found` is recorded as applied, everything else is left
+pending and warned about on every boot until it resolves.
+
+The second half is the part worth defending, because it accepts a repeating
+warning that the original design was written to avoid. A bead whose blocker
+never ships now complains forever. That is correct: unlike an id this ledger
+never had, shipped work that is still open is a state a person has to resolve,
+and the alternative is the silence that produced this amendment. `--force` was
+rejected for the same reason — it would close the bead and destroy the signal.
+
+`kb-068` itself is not recoverable by deploying this, since its id is already in
+the applied list; it needs one `scripts/fly.sh --write bd close` by hand. Both
+tests pinning this fail against the single-pass implementation, which is the
+only reason to believe they test anything: every other test in the file passes
+against it.
+
 ## Note on verification
 
 The five reconstructed beads (`kb-3sv`, `kb-56n`, `kb-5uu`, `kb-wk2`, `kb-3cl`)
