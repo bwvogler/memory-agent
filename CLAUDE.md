@@ -720,6 +720,21 @@ close <id>` closes a live bead immediately, which is easy to do while meaning to
 test that the guard refuses. Recovering is two commands rather than one, because
 `bd reopen` restores a bead to `open` and not to the status it had:
 
+The guard is a list of verbs, which makes it exactly as good as that list is
+complete — a verb nobody added is not a weaker guard, it is *no* guard, and
+silently. `bd sql` proved it: it reads like a query, takes arbitrary SQL, and
+`fly.sh bd sql 'DELETE FROM issues'` went through with no flag at all. `sql`,
+`dolt`, `admin` and `migrate` are on the list now, deliberately at verb
+granularity, so a few read-only diagnostics (`bd dolt status`,
+`bd migrate --dry-run`) need `--write` they do not really need. That is the
+cheap direction to be wrong in. `tests/test_fly_guard.py` holds the list to it,
+and asserts the refusal happens *before* the machine is woken — stubbing
+`flyctl` and `curl` to prove it rather than trusting the ordering.
+
+`run` is deliberately not guarded: it is the documented escape hatch, and
+`run rm -rf /work` announces itself in a way `bd sql` does not. This is a guard
+against accidents, not against someone who means it.
+
 ```sh
 scripts/fly.sh --write bd reopen <id>
 scripts/fly.sh --write bd update <id> --status deferred   # image beads only

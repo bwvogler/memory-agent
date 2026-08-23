@@ -118,9 +118,26 @@ Pick one with --user <slug> or FLY_USER_SLUG."
 # Everything that changes the graph. The deployed ledger is an unreplicated
 # Dolt database and no savepoint covers it, so a mutation from a laptop is not
 # undoable the way a knowledge-base write is.
+#
+# The list is the guard, so a verb nobody added is not a weaker guard - it is no
+# guard, and silently. `sql` is the one that proves it: it reads like a query,
+# takes arbitrary SQL, and `fly.sh bd sql 'DELETE FROM issues'` went straight
+# through with no flag and no confirmation.
+#
+# `dolt`, `admin` and `migrate` are here for the same reason, and being coarse
+# about them is deliberate: `bd dolt status` and `bd migrate --dry-run` only
+# read, and now need --write anyway. Matching on the verb rather than parsing
+# each subcommand's flags is what keeps this list auditable, and a guard that
+# over-refuses costs a retyped flag while one that under-refuses costs the
+# ledger.
+#
+# `run` is deliberately NOT guarded. It is the documented escape hatch for
+# arbitrary commands, and `run rm -rf /work` announces itself in a way that
+# `bd sql` does not. This guard is against accidents, not against someone who
+# means it.
 MUTATING="create close update note priority delete dep init import reopen assign
 label tag comment edit link merge-slot promote supersede set-state remember
-forget migrate-personal sync backup restore"
+forget migrate-personal sync backup restore sql admin migrate dolt"
 
 check_read_only() {
     local verb="$1" m
