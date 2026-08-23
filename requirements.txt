@@ -2,7 +2,15 @@ claude-agent-sdk>=0.1.0
 # The MCP server surface in app/mcp_server.py. Declared explicitly rather than
 # leaned on as a transitive dependency of the agent SDK: nothing in the lock
 # requires it, so the image would not have it.
-mcp>=1.9.0
+#
+# Capped below 2.0 because that release deletes `mcp.server.fastmcp`, which
+# app/mcp_server.py imports - the 2.x surface is `mcp.server.mcpserver`. The cap
+# is not a preference for the old API, it is the difference between an image
+# that boots and one that does not: with a bare `>=`, the first rebuild after
+# 2.0.0 shipped produced a container dying on ModuleNotFoundError before uvicorn
+# could load the app, and /healthz never opened a port to say so. Porting to 2.x
+# is real work with its own review; see the bead.
+mcp>=1.9.0,<2.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 httpx>=0.27.0
