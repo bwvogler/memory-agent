@@ -714,9 +714,16 @@ refusal (retried next boot, and warned about each time). Do not reorder the
 manifest to work around this and do not reach for `--force`: the point of a
 warning every boot is that shipped work still open is somebody's problem.
 
-One bead is already past rescue by code, because its id sits in the applied list:
-`scripts/fly.sh --write bd close kb-068 --reason "shipped in <image>"`. It is no
-longer blocked, `kb-b82` having closed, so this needs no `--force`.
+One bead was already past rescue by code, because its id sits in the applied
+list, and closing it by hand cost it the thing that makes a close auditable. The
+reason field is not the audit trail — `reconcile_shipped` puts the manifest's
+summary and commit in a `bd note`, and a hand-close writes no note. So a rescue
+is two commands, and the second is the one that matters:
+
+```sh
+scripts/fly.sh --write bd close <id> --reason "shipped by hand"
+scripts/fly.sh --write bd note <id> "<manifest summary> (commit <sha>)"
+```
 
 **Before committing ledger changes**, run `bd export -o .beads/issues.jsonl`. The
 Dolt database beside it is gitignored and the JSONL is what git tracks.

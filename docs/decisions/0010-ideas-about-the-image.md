@@ -139,11 +139,18 @@ never had, shipped work that is still open is a state a person has to resolve,
 and the alternative is the silence that produced this amendment. `--force` was
 rejected for the same reason — it would close the bead and destroy the signal.
 
-`kb-068` itself is not recoverable by deploying this, since its id is already in
-the applied list; it needs one `scripts/fly.sh --write bd close` by hand. Both
-tests pinning this fail against the single-pass implementation, which is the
-only reason to believe they test anything: every other test in the file passes
-against it.
+`kb-068` itself was not recoverable by deploying this, since its id was already
+in the applied list, so it was closed by hand — and that exposed a smaller
+version of the same problem. A hand-close writes no `bd note`, and this ADR is
+explicit that the note, not the reason, is what a reader can audit against a
+commit. The reason field on prod's `kb-068` now reads `shipped in <image>`, a
+placeholder pasted literally out of the instruction that told someone to run it.
+Nothing is lost that the manifest does not still hold, but the rescue procedure
+is two commands rather than one, and `CLAUDE.md` gives both.
+
+Both tests pinning the reconciler fix fail against the single-pass
+implementation, which is the only reason to believe they test anything: every
+other test in the file passes against it.
 
 ## Note on verification
 
