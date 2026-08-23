@@ -56,14 +56,19 @@ RUN curl -fsSL https://install.tigerfs.io | sh \
 # Ships an embedded Dolt engine, which is most of the ~100MB - watch it against
 # the 2GB suspend ceiling in fly.toml.
 #
-# DO NOT bump this as a routine dependency update; see img-4r2. Upstream has
-# retracted 1.2.1 as an accidental untested release, and running it migrated
-# every database here from schema v53 to v65 - so the current newest release
-# (1.2.2, which is the tested 1.1.2 code) REFUSES to open them. Moving off this
-# pin needs a per-database Dolt cursor rollback on the volume, not a version
-# change, and the container tier cannot catch getting it wrong because it builds
-# fresh ledgers that any binary opens happily.
-ENV BEADS_VERSION=1.2.1
+# DO NOT bump this as a routine dependency update; see img-4r2. This pin moved
+# once, off the retracted 1.2.1, and that move is why BD_IGNORE_SCHEMA_SKEW is
+# set in fly.toml - read that entry before changing either.
+#
+# 1.2.2 is the tested 1.1.2 code re-released, so it speaks schema v53 while
+# every database 1.2.1 touched sits at v65. The env var is what lets this binary
+# open them; removing it before each ledger has had its Dolt cursor rolled back
+# turns every bd call into a refusal, and kb.py logs-and-continues, so the only
+# symptom is a ledger that quietly stops recording.
+#
+# The container tier cannot catch getting this wrong: it builds fresh ledgers,
+# which any binary opens happily. Only a real volume has a v65 database on it.
+ENV BEADS_VERSION=1.2.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     curl -fsSL -o /tmp/beads.tar.gz \

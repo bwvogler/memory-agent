@@ -360,8 +360,6 @@ async def create_bead(
         argv += ["--description", description]
     if labels:
         argv += ["--labels", ",".join(labels)]
-    if status:
-        argv += ["--status", status]
     argv += ["--json"]
 
     rc, out, err = await _run(*argv, cwd=scratch_dir_for(user_slug), env=_bd_env())
@@ -369,10 +367,39 @@ async def create_bead(
         log.warning("bd create failed for %s: %s", user_slug, err.strip())
         return None
     try:
-        return json.loads(out).get("id")
+        bead_id = json.loads(out).get("id")
     except (json.JSONDecodeError, AttributeError):
         log.warning("bd create returned unparseable JSON for %s", user_slug)
         return None
+
+    # Status is set in a second call because `bd create --status` is a 1.2.x-only
+    # flag, and the pinned 1.2.2 is the tested 1.1 line: it answers `unknown
+    # flag: --status` and creates nothing. `bd update --status` works on both.
+    #
+    # The cost is a window - between the two calls the bead is `open` - and for a
+    # signal bead, whose whole point is to stay out of `bd ready`, that window is
+    # exactly the wrong state. It is sub-second and unavoidable without the flag,
+    # so the failure is made loud instead: a bead that could not be moved is
+    # still returned, because it exists and losing its id is the worse outcome.
+    if status and bead_id:
+        rc, _, err = await _run(
+            "bd",
+            "update",
+            bead_id,
+            "--status",
+            status,
+            cwd=scratch_dir_for(user_slug),
+            env=_bd_env(),
+        )
+        if rc != 0:
+            log.warning(
+                "bd could not set %s to %s for %s, so it stays open: %s",
+                bead_id,
+                status,
+                user_slug,
+                err.strip(),
+            )
+    return bead_id
 
 
 async def export_backlog(user_slug: str) -> bool:

@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 
 import httpx
 import pytest
 
-from .conftest import USER_SLUG, app_exec, bd, bd_json
+from .conftest import REPO_ROOT, USER_SLUG, app_exec, bd, bd_json
 
 pytestmark = pytest.mark.container
 
@@ -139,8 +140,19 @@ def test_bd_is_installed_and_pinned(stack):
     out = app_exec("bd", "version").stdout
 
     assert "bd version" in out
-    # Unpinned, a newer bd would write a schema the old binary cannot reopen.
-    assert "1.2.1" in out, f"bd version drifted from the Dockerfile pin: {out}"
+    # Read the pin rather than restate it. Unpinned, a newer bd would write a
+    # schema the old binary cannot reopen - and a hardcoded literal here is its
+    # own drift, since it disagrees with the Dockerfile silently until someone
+    # reads both. What matters is that the image ships what the Dockerfile says.
+    pin = re.search(
+        r"^ENV BEADS_VERSION=(\S+)",
+        (REPO_ROOT / "Dockerfile").read_text(),
+        re.MULTILINE,
+    )
+    assert pin, "Dockerfile no longer declares ENV BEADS_VERSION"
+    assert pin.group(1) in out, (
+        f"bd version drifted from the Dockerfile pin {pin.group(1)}: {out}"
+    )
 
 
 def test_bootstrap_skills_are_seeded_into_the_kb(stack):
