@@ -487,6 +487,14 @@ uv pip install -r requirements-dev.txt --python .venv/bin/python
 Both slow tiers are opt-in, so a bare `pytest` needs no Docker, database or API
 key. `--live` implies `--container`.
 
+**Only `--live` gets a real key, and `--container` is now forced onto a
+placeholder even when you have one.** That overwrite is deliberate. The smoke
+tier asserts on a turn that fails fast, so a real key makes it call the model,
+blow `wait_until_idle`'s deadline and bill you for a tier documented as free.
+`conftest.py` used to load `.env` unconditionally, which meant the tier passed on
+CI and failed on any developer machine with a key - two tests, for reasons
+nothing to do with the change under test.
+
 The container tier builds the real image and runs the real stack under its own
 compose project name, so its teardown (`down -v`) can never touch a dev stack's
 volumes. It exists because this system's failure mode is silence: `kb.py`

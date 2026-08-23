@@ -119,15 +119,26 @@ def bd_json(*argv: str):
 @pytest.fixture(scope="session")
 def stack(request):
     """Build and run the real stack for the session, then destroy it."""
-    # A shell variable beats .env in compose, so a placeholder set here would
-    # shadow the developer's real key. Load .env first, and only fall back to
-    # a placeholder when no live turn is going to be made.
-    if os.environ.get("ANTHROPIC_API_KEY") is None:
+    # A shell variable beats .env in compose, so what is set here is what the
+    # container gets. Only --live is allowed a real key.
+    #
+    # This tier advertises "no API key needed" and its tests assert on a turn
+    # that fails fast, so a real key breaks them twice over: the turn calls the
+    # actual model, takes longer than wait_until_idle's deadline, and spends
+    # tokens on a tier nobody expects to cost anything. That is not
+    # hypothetical - .env was loaded here unconditionally, so every developer
+    # with a key ran the smoke tier against the live API and watched two tests
+    # fail for reasons unrelated to their change, while CI (which has no .env)
+    # passed and disagreed with them.
+    want_live = request.config.getoption("--live")
+    if want_live and os.environ.get("ANTHROPIC_API_KEY") is None:
         load_dotenv(REPO_ROOT / ".env")
 
-    if os.environ.get("ANTHROPIC_API_KEY") is None:
-        if request.config.getoption("--live"):
+    if want_live:
+        if os.environ.get("ANTHROPIC_API_KEY") is None:
             pytest.fail("--live needs ANTHROPIC_API_KEY in the environment or .env")
+    else:
+        # Deliberately overwrites a real key rather than deferring to it.
         os.environ["ANTHROPIC_API_KEY"] = "unused-by-the-smoke-tier"
 
     compose("up", "-d", "--build")
