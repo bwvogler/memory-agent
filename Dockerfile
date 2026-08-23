@@ -56,18 +56,20 @@ RUN curl -fsSL https://install.tigerfs.io | sh \
 # Ships an embedded Dolt engine, which is most of the ~100MB - watch it against
 # the 2GB suspend ceiling in fly.toml.
 #
-# DO NOT bump this as a routine dependency update; see img-4r2. This pin moved
-# once, off the retracted 1.2.1, and that move is why BD_IGNORE_SCHEMA_SKEW is
-# set in fly.toml - read that entry before changing either.
+# DO NOT bump this as a routine dependency update; see img-4r2. 1.2.2 is the
+# tested 1.1.2 code re-released and speaks schema v53. Every ledger here is at
+# v53 to match, which took a one-time Dolt cursor rollback after the retracted
+# 1.2.1 migrated them all to v65 - so the cost of getting a bump wrong is not a
+# failed build, it is a data migration.
 #
-# 1.2.2 is the tested 1.1.2 code re-released, so it speaks schema v53 while
-# every database 1.2.1 touched sits at v65. The env var is what lets this binary
-# open them; removing it before each ledger has had its Dolt cursor rolled back
-# turns every bd call into a refusal, and kb.py logs-and-continues, so the only
-# symptom is a ledger that quietly stops recording.
+# What makes that expensive is the direction. A binary refuses a database ahead
+# of it, and kb.py logs-and-continues when bd is unreachable, so the symptom of
+# a bad bump is not an error: it is a ledger that quietly stops recording. Read
+# img-4r2 for the recovery, and note that a newer bd may migrate on first run
+# without asking, which is not reversible by reinstalling the old one.
 #
-# The container tier cannot catch getting this wrong: it builds fresh ledgers,
-# which any binary opens happily. Only a real volume has a v65 database on it.
+# The container tier cannot catch any of this. It builds fresh ledgers, which
+# any binary opens happily; only a real volume carries the history.
 ENV BEADS_VERSION=1.2.2
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \

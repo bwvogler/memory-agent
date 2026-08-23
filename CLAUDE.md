@@ -637,21 +637,35 @@ So a cross-prefix edge is **documentation only**. State the ordering in the
 description as well, the way `img-n7g` does, because the edge you can see in
 `dep tree` is not enforcing anything.
 
-**The binary is 1.2.2 and the databases are still v65, which is a state with an
-exit condition.** bd 1.2.1 was retracted upstream as an accidental untested
-release, but not before it migrated every database here from schema v53 to v65.
-1.2.2 is the tested 1.1.2 code re-released, so it speaks v53 and **refuses a v65
-database outright**. `BD_IGNORE_SCHEMA_SKEW=1` in `fly.toml` is what bridges the
-gap, and it is a bridge rather than a destination: it leaves the audit `events`
-table unversioned. The exit condition is a per-database Dolt cursor rollback
-(upstream's `docs/RECOVERY-1.2.1.md`, not ours — we have no such file), after
-which the env var comes out.
+**Every ledger is on bd 1.2.2 at schema v53, and getting there cost a data
+migration.** This is settled history, kept because the next pin bump will want
+it. bd 1.2.1 was retracted upstream as an accidental untested release, but not
+before it migrated every database here from v53 to v65. 1.2.2 is the tested
+1.1.2 code re-released, so it speaks v53 and **refuses a v65 database
+outright** — which made the fix a per-database Dolt cursor rollback
+(upstream's `docs/RECOVERY-1.2.1.md`, not ours; we have no such file), not a
+version change. Both ledgers have had it, and upstream's optional follow-up to
+re-track the audit `events` table was applied to both as well.
 
-Two things were measured rather than assumed. The rollback is lossless: on a copy
-of this ledger the full `--json` dump of all 22 issues came back **byte-identical**
-to what 1.2.1 produced, with dependency edges and the `bd ready` set unchanged.
-And the escape hatch is not read-only — under it 1.2.2 creates, notes, closes,
-exports and computes `ready` against a v65 database, leaving the cursor alone.
+The lasting lesson is about direction, and it will apply verbatim next time.
+A binary refuses a database *ahead* of it, and a newer bd may migrate on first
+run without asking — so an unpinned bump is not reversible by reinstalling the
+old binary. `kb.py` logs-and-continues when bd is unreachable, so the symptom is
+never an error; it is a ledger that quietly stops recording. Assume any bump
+needs a migration plan.
+
+Two things worth keeping from the measurements. The rollback is **lossless** —
+on this repo's ledger and again on prod's, the full export compared
+record-for-record identical across the change, dependency edges and `bd ready`
+included. And `BD_IGNORE_SCHEMA_SKEW=1`, the escape hatch that bridged the
+deploy, is not read-only: under it 1.2.2 creates, notes, closes, exports and
+computes `ready` against a v65 database. It is out of `fly.toml` now, and
+`fly.toml` says why it must not come back.
+
+`bd sql` is not the tool for any of this: it answers `not yet supported in
+embedded mode`, and embedded is what this deployment runs. The recovery used a
+checksum-matched `dolt` binary in the container's `/tmp`, which a redeploy
+discards. Do not put `dolt` in the image for it.
 
 Moving the pin also cost one flag, and the loss was silent. `bd create --status`
 is 1.2.x-only; on 1.2.2 it is `unknown flag: --status` and **nothing is created**.
@@ -662,14 +676,14 @@ an unreachable ledger. `kb.create_bead` now sets status in a second
 `bd update` call, which works on both lines. Anything else reaching for a bd flag
 should assume the 1.1 surface until the container tier says otherwise.
 
-The hazard is asymmetric, and it decides the order. Upstream warns that a
-leftover 1.2.1 silently re-migrates a recovered database. *This* repo is
-protected by accident: `.beads/config.yaml` sets `sync.remote`, so 1.2.1 hits the
-remote-migrate gate and refuses the write loudly. The per-user ledgers on the
-volume have no remote, so nothing there would stop it. **Never roll back a volume
-ledger while an image pinning 1.2.1 can still take a turn** — the next turn undoes
-it and says nothing. Working locally before the rollback happens means prefixing
-`bd` with `BD_IGNORE_SCHEMA_SKEW=1`.
+The ordering hazard is asymmetric, and it is the part to remember if a rollback
+is ever needed again. Upstream warns that a leftover 1.2.1 silently re-migrates
+a recovered database. *This* repo was protected by accident: `.beads/config.yaml`
+sets `sync.remote`, so 1.2.1 hit the remote-migrate gate and refused the write
+loudly. The ledger on the volume has no remote, so nothing there would have
+stopped it. **Never roll back a volume ledger while an image pinning the older
+binary can still take a turn** — the next turn undoes it and says nothing. Deploy
+first, always.
 
 **Getting what prod has filed.** `scripts/beads-pull.sh [user_slug]` needs
 `flyctl` (logged in), `jq` and `bd` on PATH, and wakes the suspended machine

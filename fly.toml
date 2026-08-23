@@ -17,20 +17,11 @@ primary_region = "iad"
   WORK_DIR = "/work"
   PORT = "8080"
 
-  # Temporary, and it has an exit condition: delete this once every ledger on
-  # the volume has had its Dolt schema cursor rolled back to v53.
-  #
-  # The retracted bd 1.2.1 migrated each database v53 -> v65. The pinned 1.2.2
-  # speaks v53 and refuses a v65 database outright, so without this the agent
-  # loses its ledger on the first turn after deploy - silently, because kb.py
-  # logs-and-continues when bd is unreachable. Upstream's escape hatch was
-  # measured rather than assumed: against a v65 copy, 1.2.2 under this flag
-  # reads, creates, notes, closes, exports and computes `ready` correctly and
-  # leaves the cursor alone.
-  #
-  # What it does NOT do is restore versioning of the audit `events` table, which
-  # is why this is a bridge and not the destination. See img-4r2.
-  BD_IGNORE_SCHEMA_SKEW = "1"
+  # There was a BD_IGNORE_SCHEMA_SKEW = "1" here, and it is gone on purpose: the
+  # volume's ledger has had its Dolt schema cursor rolled back to v53, so the
+  # pinned bd opens it with no flag. Do not add it back to make an error go away.
+  # It would mean a database is ahead of the binary again, which is a question
+  # about which bd wrote it, not a setting. See img-4r2 and the Dockerfile pin.
 
 [http_service]
   internal_port = 8080
