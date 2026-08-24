@@ -20,3 +20,10 @@ work-dev/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# bd writes a per-machine field-change log beside the ledger. Nothing here reads
+# it, the Dolt database holds the authoritative history, and it is append-only
+# with a machine-local actor - so committing it would mean a conflict on every
+# clone that closed a bead. Ignored here rather than in .beads/.gitignore, which
+# bd generates and may rewrite. Revisit if bd ever documents it as shared.
+.beads/interactions.jsonl
