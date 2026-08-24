@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A second push to the same branch makes the first one's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Kept in step with requirements-dev.txt. ty is pre-1.0 and its diagnostics
+  # move between releases, so an unpinned type checker would turn an unrelated
+  # PR red for reasons nobody in that PR changed.
+  RUFF_VERSION: "0.15.18"
+  TY_VERSION: "0.0.71"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # No dependency install: ruff never resolves an import.
+      - run: uvx ruff@${{ env.RUFF_VERSION }} check --output-format=github app tests
+      - run: uvx ruff@${{ env.RUFF_VERSION }} format --check app tests
+
+  types:
+    name: ty
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # ty does need the environment: fastapi, claude_agent_sdk, asyncpg and
+      # jwt all have to resolve or every annotation referring to them is
+      # Unknown and the check passes by knowing nothing.
+      - run: uv venv .venv
+      - run: uv pip install -r requirements-dev.txt --python .venv
+      - run: uvx ty@${{ env.TY_VERSION }} check app tests --python .venv
+
+  test:
+    name: pytest (fast)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv .venv
+      - run: uv pip install -r requirements-dev.txt --python .venv
+      - run: .venv/bin/python -m pytest
+
+  container:
+    name: pytest --container
+    runs-on: ubuntu-latest
+    # Builds the real image and stands up Postgres + FUSE. Slower than the rest
+    # of this file put together, and the only tier that can tell a completely
+    # broken `bd` from a working one - kb.py logs-and-continues when the ledger
+    # is unreachable, so at runtime the two look identical.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv venv .venv
+      - run: uv pip install -r requirements-dev.txt --python .venv
+      # The stack needs /dev/fuse and CAP_SYS_ADMIN (see docker-compose.yml).
+      # Fail here with that sentence rather than fifty lines into a mount error.
+      - name: Check FUSE is available on the runner
+        run: test -e /dev/fuse || { echo "::error::/dev/fuse missing; the KB mount cannot start"; exit 1; }
+      # No ANTHROPIC_API_KEY: conftest sets a placeholder unless --live, which
+      # this workflow never passes. A live tier would spend tokens per push.
+      - run: .venv/bin/python -m pytest --container
+      - name: Dump app logs on failure
+        if: failure()
+        run: docker compose -p memory-agent-test -f docker-compose.yml -f tests/compose.test.yml logs --tail=200

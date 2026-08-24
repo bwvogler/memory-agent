@@ -1,0 +1,16 @@
+# Overrides for the test stack. Always used with a distinct project name
+# (see tests/conftest.py), so `docker compose down -v` at teardown destroys
+# only test volumes and can never wipe a developer's running dev knowledge base.
+services:
+  db:
+    # Unbind from the host entirely. The app reaches Postgres over the compose
+    # network, and binding 5432 collides with any local Postgres.
+    ports: !reset []
+
+  app:
+    # Remapped so the test stack can run alongside a dev stack on 8080.
+    ports: !override ["18080:8080"]
+    environment:
+      # The smoke tier makes no model calls, so it must not require a real key.
+      # A live run overrides this from the environment.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-unused-by-the-smoke-tier}

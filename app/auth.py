@@ -10,10 +10,12 @@ of this header is not authentication:
 So we verify the RS256 signature against the team's public keys, and check
 `aud`, `iss` and `exp`. Anything that fails is a 403.
 
-Defence in depth: also configure `cloudflared` to enforce Access at the tunnel
-ingress (see fly.toml / cloudflared config in the README), so unsigned requests
-never reach this process at all. Belt AND braces - if the origin is ever
-reachable directly, header-trust alone is a full auth bypass.
+There is deliberately no second layer behind this one. Enforcing Access at a
+tunnel ingress would be belt AND braces, but the tunnel would run inside a
+machine that suspends at idle, taking itself down with no way to be woken (see
+"Why there is no tunnel here" in the README). So the origin IS reachable
+directly, on its .fly.dev hostname, and this function is the whole gate - which
+is why it verifies the signature rather than trusting the header's presence.
 
 Docs:
   https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/
@@ -26,6 +28,7 @@ from dataclasses import dataclass
 
 import httpx
 import jwt
+import jwt.algorithms
 from fastapi import HTTPException, Request
 
 from .config import config
@@ -44,12 +47,16 @@ class Identity:
     @property
     def slug(self) -> str:
         """Filesystem-safe identifier, for per-user scratch directories."""
-        return "".join(c if c.isalnum() or c in "-_" else "_" for c in self.email.lower())
+        return "".join(
+            c if c.isalnum() or c in "-_" else "_" for c in self.email.lower()
+        )
 
 
-async def _get_jwks(force: bool = False) -> dict:
-    global _jwks_cache, _jwks_fetched_at
-    fresh = _jwks_cache is not None and (time.time() - _jwks_fetched_at) < _JWKS_TTL_SECONDS
+async def _get_jwks(*, force: bool = False) -> dict:
+    global _jwks_cache, _jwks_fetched_at  # noqa: PLW0603 - process-wide JWKS cache
+    fresh = (
+        _jwks_cache is not None and (time.time() - _jwks_fetched_at) < _JWKS_TTL_SECONDS
+    )
     if fresh and not force:
         return _jwks_cache  # type: ignore[return-value]
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -99,7 +106,18 @@ async def verify(token: str) -> Identity:
 
     email = (claims.get("email") or "").lower()
     if not email:
-        raise HTTPException(403, "Access token has no email claim")
+        # A Cloudflare Access SERVICE token carries `common_name`, never
+        # `email`, so this branch is the only thing that ever let a machine
+        # caller in - and until MCP_CLIENT_IDS is set it still refuses one,
+        # byte-for-byte as before. Access itself remains the gate; all this does
+        # is stop rejecting a token Access already vouched for, and give it a
+        # real identity so scratch, ledger and config dir resolve like anyone
+        # else's. See docs/decisions/0014-the-machine-is-a-caller.md.
+        common_name = (claims.get("common_name") or "").lower()
+        if common_name and common_name in config.mcp_client_ids:
+            email = config.mcp_identity_email.lower()
+        if not email:
+            raise HTTPException(403, "Access token has no email claim")
 
     # This is a SECOND allowlist check, defence in depth behind the Cloudflare
     # Access policy itself (see docs/decisions/0005-explicit-email-allowlist.md
@@ -114,7 +132,12 @@ async def verify(token: str) -> Identity:
         if not (domain_ok or email_ok):
             raise HTTPException(403, f"{email!r} is not on the allowlist")
 
-    return Identity(email=email, subject=claims.get("sub", ""))
+    # `sub` is empty for a service token, so fall back to the token name. The
+    # email is the household identity every caller shares; the subject is the
+    # only record of WHICH caller it was.
+    return Identity(
+        email=email, subject=claims.get("sub") or claims.get("common_name") or ""
+    )
 
 
 async def current_identity(request: Request) -> Identity:

@@ -1,0 +1,20 @@
+# Development and test dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# The runtime requirements are needed too: the unit tests import app.agent and
+# app.kb directly rather than stubbing them, so an import error in the real
+# module is a test failure rather than something the suite papers over.
+-r requirements.txt
+
+pytest>=8.0.0
+
+# Linter and type checker, pinned exactly rather than floored.
+#
+# A new ruff release can add rules to `ALL`, and ty is pre-1.0 (0.0.x) with
+# diagnostics that still move between releases. Either one drifting turns a
+# pull request red for something nobody in that pull request changed, which
+# teaches everyone to ignore CI. Bump these deliberately, and update
+# .pre-commit-config.yaml and .github/workflows/ci.yml in the same commit.
+ruff==0.15.18
+ty==0.0.71

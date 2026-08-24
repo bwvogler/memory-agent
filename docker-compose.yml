@@ -6,7 +6,10 @@
 # managed hosts in production.
 services:
   db:
-    image: postgres:16
+    # 18+, not 16: TigerFS builds its workspace table with uuidv7(), which
+    # older Postgres does not have. On 16 the mount comes up and then every
+    # workspace creation fails.
+    image: postgres:18
     environment:
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: kb
@@ -27,7 +30,17 @@ services:
       # Local only. Skips Cloudflare Access entirely and fakes a user.
       DEV_BYPASS_AUTH: "1"
       DEV_FAKE_EMAIL: dev@localhost
+      # The dev Postgres above serves no TLS, which TigerFS otherwise requires.
+      KB_INSECURE_NO_SSL: "1"
     ports: ["8080:8080"]
     cap_add: ["SYS_ADMIN"]
     devices: ["/dev/fuse"]
     security_opt: ["apparmor:unconfined"]
+    volumes:
+      # Mirrors the Fly volume in fly.toml. Without this, /work lives in the
+      # container's writable layer and the bead graph and savepoint history are
+      # destroyed by any rebuild - not just `down -v`.
+      - work:/work
+
+volumes:
+  work:

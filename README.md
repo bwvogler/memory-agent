@@ -11,8 +11,8 @@ your knowledge is one click from being reverted.
 Infrastructure runs around **$1–3/month**. The front end and auth are free.
 
 ```
-Browser ──► Cloudflare (Pages + Access + Tunnel, free)
-                  │  verified Google Workspace identity
+Browser ──► Cloudflare (Access at the edge, free — no tunnel)
+                  │  verified Google identity, as a signed JWT
                   ▼
             Fly.io Machine  ($1-3/mo, suspended when idle)
               ├─ FastAPI: turn queue, SSE stream
@@ -38,9 +38,11 @@ reversible. This is what makes "let an agent write to my knowledge base" a
 reviewable idea rather than a reckless one. It is the single best reason to
 choose TigerFS over a RAG pipeline.
 
-**Auth is Cloudflare Access, so there is no auth code.** Google Workspace SSO,
-policy as "allow emails ending in `@yourdomain.com`", free for 50 users, and the
-origin has no public IP so it cannot be bypassed.
+**Auth is Cloudflare Access, so there is almost no auth code.** Google SSO,
+policy as "allow emails ending in `@yourdomain.com`", free for 50 users. The
+origin *does* keep a public `.fly.dev` hostname — see "Why there is no tunnel
+here" — so `app/auth.py` verifies the JWT signature rather than trusting the
+header Cloudflare injects.
 
 ## Status: working scaffold, two unverified spots
 
@@ -122,12 +124,44 @@ Allowlisting a domain you don't own (`gmail.com`, `icloud.com`) admits everyone
 who has ever used that provider, not the people you meant. See
 `docs/decisions/0005-explicit-email-allowlist.md`.
 
-**3. Cloudflare Access.** In Zero Trust → Access → Applications, add a
-self-hosted app for your hostname. Add an identity provider (Google Workspace,
-or "One-time PIN" if your users are on personal addresses with no shared
-Workspace), then a policy allowing your users — either an email-domain rule or
-an Include rule listing exact addresses, matching whatever you set above. Copy
-the **AUD tag** and your team domain:
+**3. A hostname, and a certificate for it.** Access applications only exist on a
+hostname in a zone on your Cloudflare account, so you need a domain there before
+anything below works. The order matters, because Fly validates ownership over
+DNS and cannot do that through Cloudflare's proxy:
+
+```bash
+# a. In Cloudflare DNS: CNAME app -> <your-app>.fly.dev, proxy DISABLED (grey cloud)
+fly certs add app.yourdomain.com
+fly certs check app.yourdomain.com      # wait for Issued
+# b. Now enable the proxy (orange cloud), and set SSL/TLS to Full (strict)
+```
+
+Proxy the record before the certificate exists and you get Cloudflare 526s;
+leave it grey afterwards and every request bypasses Access, because Access runs
+at the edge and an unproxied record never reaches it.
+
+**4. Cloudflare Access.** First an identity provider, then the application —
+in that order, because the application form does not survive navigating away
+from it. Zero Trust → Integrations → Identity providers → Add new. Since June
+2026 new accounts get the **Cloudflare** identity provider by default and
+One-time PIN is no longer added automatically; add OTP explicitly if your users
+are on addresses you don't control, since the Cloudflare provider only admits
+members of your Cloudflare account. Google works for any Google account but
+needs a GCP OAuth client whose authorized origin is
+`https://<team>.cloudflareaccess.com` and whose redirect URI is that plus
+`/cdn-cgi/access/callback` — your application hostname appears nowhere in it.
+
+Then Access → Applications → Add → self-hosted, with the *public hostname*
+destination (not the private-hostname or private-IP options, which are for
+tunnels). Path empty, so `/api/*` and `/mcp` are covered too. Give it a policy
+per kind of caller:
+
+* **Allow**, Include → Emails listing exact addresses, for people.
+* **Service Auth**, Include → Service Token, for `/mcp`. It must be its own
+  policy: Access evaluates Service Auth before the identity policies, and a
+  token in an Allow policy is sent toward a login it cannot complete.
+
+Copy the **AUD tag** from the application and your team domain:
 
 ```bash
 fly secrets set \
@@ -135,12 +169,27 @@ fly secrets set \
   CF_ACCESS_AUD=<aud-tag>
 ```
 
-**4. Tunnel.** Create a tunnel, route your hostname to `http://localhost:8080`,
-and set `fly secrets set TUNNEL_TOKEN=...`. The entrypoint starts `cloudflared`
-automatically when that token is present. Also enable Access enforcement at the
-tunnel ingress (`access: {required: true, teamName, audTag}`) so unsigned
-requests never reach the app — belt *and* braces, because if the origin is ever
-reachable directly, header-trust alone is a full auth bypass.
+**Why there is no tunnel here.** Cloudflare's own advice is to enforce Access at
+a tunnel ingress as well as at the application. That advice does not survive
+this `fly.toml`: the tunnel would run *inside* the machine,
+`auto_stop_machines = "suspend"` with `min_machines_running = 0` stops it along
+with everything else, and the only thing that wakes the machine is the Fly proxy
+receiving a request on the route the tunnel was meant to replace. Suspended, the
+tunnel is down and nothing can bring it back.
+
+So there is no tunnel: `cloudflared` is not in the image and `entrypoint.sh`
+does not start one. A leftover `TUNNEL_TOKEN` secret is warned about at startup
+rather than ignored, because a token sitting in `fly secrets list` looks exactly
+like a tunnel that is running. If you want one anyway, set
+`min_machines_running = 1`, accept the bill, and put `cloudflared` back — but
+the app-layer JWT check in `app/auth.py` is what actually protects this, which
+is why it verifies signatures rather than trusting a header.
+
+The consequence to know: `<your-app>.fly.dev` stays publicly routable and Access
+cannot cover it. That is safe — it returns 403 without a valid token — but it
+means `DEV_BYPASS_AUTH` is the only thing standing between a fresh deploy and an
+open knowledge base. Never set it in production. `fly secrets list` is worth
+reading after every deploy for exactly that reason.
 
 **5. Seed the knowledge base.** Create `memory/CLAUDE.md` in the mount. The
 agent reads it at the start of every session.
@@ -155,6 +204,95 @@ make it a post-deploy smoke test, not a one-time check.
 **`/healthz` reports `kb_mounted: true`.** A knowledge base that is not mounted
 produces no errors anywhere. The agent just quietly knows nothing.
 
+**`/healthz` reports every configured MCP server as `ready`.** `mcp_catalog`
+lists outbound servers (`app/mcp_catalog.py`) and gives each a `state`:
+
+| `state` | meaning |
+|---|---|
+| `missing` | a credential variable is unset; `missing` names which. The server is dropped from the agent's toolset entirely, which from the outside is indistinguishable from never having configured it — this field is the difference. |
+| `ready` | present, and nothing known is wrong |
+| `expiring` | the stored grant is predicted to die within two days; `days_left` says when |
+| `expired` | Google rejected the grant. Someone has to re-authorise. |
+
+A server with an OAuth credential also carries `refresh`: `valid` once Google has
+confirmed the grant, `invalid` once it has rejected it, `unknown` if the check
+could not be completed, and `unchecked` before the first check of a fresh
+process. That last one matters — `ready` and `refresh: unchecked` means "present,
+and nobody has asked yet", which is not the same claim as `refresh: valid`.
+
+The check never blocks the endpoint: `/healthz` reads a cached verdict and
+schedules a refresh at most once every fifteen minutes, so a fast pinger does not
+become load on Google. None of it is folded into `ok` — an expired token is not a
+reason to restart the host, because no restart would fix it. See
+`docs/decisions/0015`.
+
+Today that is `calendar` and `gmail`, both pointing at one household Google
+account. They report `missing MCP_…` until you run `scripts/google-auth.sh` and
+set the three secrets it prints, and an unconfigured server changes nothing about
+a turn.
+
+**On a consumer `@gmail.com` account these are demos, not features.** Gmail's
+scopes are *restricted*, so an unverified app cannot use them in production —
+publishing gets the OAuth client disabled (`401: disabled_client`), and the only
+remaining status, Testing, expires refresh tokens after **seven days**. The fix
+is a Google Workspace account on a domain you own with the consent screen set to
+user type **Internal**: no verification, no warning screen, no timer. Roughly one
+seat. No code changes either way. See `docs/decisions/0015`.
+
+`/healthz` does see this, which it did not always: `mcp_catalog` counts the seven
+days down as `expiring` with a `days_left`, and reports `expired` once Google
+actually refuses the grant. The chat page says so too, on load, since
+re-authorising is a chore somebody has to remember and nothing here schedules a
+reminder. What neither can do is fix it — that needs a browser and a person, so
+re-run `scripts/google-auth.sh` and set the secrets it prints.
+
+Gmail reads the household account's **own inbox** and cannot read anyone else's —
+a Gmail token reaches only its own mailbox, and delegation is a web-UI feature the
+API refuses. Forwarding filters are how you decide what it sees. The agent can
+draft mail; the five tools that would *send* it are refused outright.
+
+## Working against the deployed machine
+
+State is split across two tiers, and only one of them is reachable from a
+laptop by default.
+
+**The knowledge base is in Postgres**, so it needs no special access — mount it
+locally and browse it with ordinary tools:
+
+```bash
+bash scripts/mount-kb.sh --dev    # the throwaway Postgres from docker compose
+bash scripts/mount-kb.sh --prod   # whatever .env points at
+```
+
+`.env` usually points at the *same* database the deployed machine writes to. If
+so, everything under the mountpoint is production: an editor save lands there
+with no review and no deploy in between. That is why `--prod` has to be said out
+loud, and why the script prints which host it mounted every time.
+
+**Everything else is on the Fly volume** — the bead ledger, `kb.git`, per-user
+scratch, the SDK transcripts — attached to exactly one machine
+(`docs/decisions/0009`). Reach it with:
+
+```bash
+scripts/fly.sh doctor            # slug, volume usage, bd versions
+scripts/fly.sh bd ready --json   # the deployed ledger
+scripts/fly.sh run ls -la /work
+scripts/fly.sh shell
+```
+
+It is read-only by default: `bd close` and friends need `--write`, because that
+graph sits on an unreplicated volume and no savepoint covers it. Two things it
+handles that a hand-written `fly ssh` does not — the machine is suspended
+(`min_machines_running = 0`, and SSH is not proxy traffic, so it must be woken
+over HTTP first), and `flyctl ssh console -C` runs no shell, strips quote
+characters and splits on whitespace, so any argument containing a space arrives
+mangled unless it is encoded.
+
+Keep local `bd` on the version the `Dockerfile` pins. bd refuses to open a
+database written by a newer schema, and this repo now has a `.beads` of its own
+— a newer local bd would upgrade it in place. `scripts/fly.sh doctor` prints
+both versions side by side.
+
 ## Layout
 
 ```
@@ -163,6 +301,7 @@ app/
   agent.py           Agent SDK wrapper; explicit memory loading; savepoint/turn
   kb.py              Mount health, savepoints, undo, operation log
   turns.py           Detached turns with replayable event buffers
+  mcp_catalog.py     Outbound MCP servers: defined in the image, keyed from env
   session_store.py   Postgres transcript persistence
   main.py            HTTP surface
 static/index.html    Minimal chat UI, SSE, per-turn revert button

@@ -1,7 +1,41 @@
-claude-agent-sdk>=0.1.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-httpx>=0.27.0
-PyJWT[crypto]>=2.9.0
-asyncpg>=0.30.0
-python-dotenv>=1.0.0
+# Runtime dependencies, all floored AND capped.
+#
+# The cap is the part that matters, and it is here because the alternative was
+# tried: every line below was once a bare `>=`, and the first rebuild after
+# `mcp` 2.0.0 shipped produced an image that could not start. 2.0 deleted
+# `mcp.server.fastmcp`, so uvicorn died importing app.mcp_server before it bound
+# a port - which means /healthz was not merely unhealthy, it was unreachable,
+# and `fly deploy` would have shipped it. Nothing in the repo had changed.
+#
+# So a rebuild must not be able to change the major version of anything. Caps
+# sit below the next breaking boundary: the next major for a 1.x+ package, and
+# the next minor for claude-agent-sdk, which is young enough that 0.x minors do
+# break (it has already moved 0.1 -> 0.2 under a `>=0.1.0` floor).
+#
+# The 0.x web stack is the honest exception. FastAPI, uvicorn, httpx and asyncpg
+# are all pre-1.0 and capped below 1.0, which stops the anticipated breaking
+# release and does not stop a breaking minor. Pinning those exactly would mean
+# carrying security patches by hand; this is the deliberate middle.
+#
+# Bumping any cap is a real change: build the image and run
+# `pytest --container`, which is the only tier that would have caught the mcp
+# break, because it is the only one that boots the thing.
+
+claude-agent-sdk>=0.2.0,<0.3.0
+
+# The MCP server surface in app/mcp_server.py. Declared explicitly rather than
+# leaned on as a transitive dependency of the agent SDK: nothing in the lock
+# requires it, so the image would not have it.
+#
+# The 2.x surface is `mcp.server.mcpserver.MCPServer`; porting to it is real
+# work with its own review, since it means re-checking the /mcp streamable-HTTP
+# mount and its hand-rolled auth. Tracked as img-hiq. Until then this cap is
+# load-bearing, not tidiness.
+mcp>=1.9.0,<2.0.0
+
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+httpx>=0.27.0,<1.0.0
+PyJWT[crypto]>=2.9.0,<3.0.0
+asyncpg>=0.30.0,<1.0.0
+python-dotenv>=1.0.0,<2.0.0

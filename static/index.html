@@ -43,7 +43,58 @@
   .msg .body p + p { margin-top: 0.6em; }
   .msg.me .body { background: transparent; border-style: dashed; }
   .tool { color: var(--tool); font-size: 13px; font-style: italic; margin: 4px 0; }
+  .tool .detail { color: var(--muted); font-style: normal; }
+  /* A failed tool call has to look different from a successful one. It used to
+     not: results arrive on a message the server dropped, so a Write that blew
+     up and a Write that worked rendered identically. */
+  .tool.failed { color: var(--err); }
+  .tool.failed .detail { color: var(--err); }
   .err { color: var(--err); }
+  details.subagent, details.thought {
+    border: 1px dashed var(--line); border-radius: 6px;
+    padding: 4px 10px; margin: 6px 0;
+  }
+  details.subagent > summary, details.thought > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+  }
+  details.thought .text {
+    white-space: pre-wrap; word-wrap: break-word;
+    color: var(--muted); font-size: 13px; margin-top: 4px;
+  }
+  details.subagent .agent-text {
+    white-space: pre-wrap; word-wrap: break-word; font-size: 13px; margin-top: 4px;
+  }
+  /* Progress only. The bead ledger is the only place work survives the turn,
+     so this list is never persisted and never replaces filing something. */
+  .todos { margin: 6px 0; font-size: 13px; }
+  .todos .item { color: var(--muted); }
+  .todos .item.in_progress { color: var(--ink); }
+  .todos .item.completed { opacity: .55; text-decoration: line-through; }
+  .ask, .perm {
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 10px 12px; margin: 8px 0; background: var(--panel);
+  }
+  .ask .q, .perm .q { font-weight: 600; margin-bottom: 2px; }
+  .ask .sub, .perm .sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .ask label { display: block; padding: 2px 0; font-size: 14px; }
+  .ask input[type=text] {
+    width: 100%; font: inherit; font-size: 14px; margin-top: 4px;
+    padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  .ask .actions, .perm .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .ask button, .perm button {
+    font: inherit; font-size: 13px; padding: 4px 13px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg);
+    color: var(--ink); cursor: pointer;
+  }
+  .perm button.allow, .ask button.primary {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .perm button.deny:hover { color: var(--err); border-color: var(--err); }
+  .resolved { border-color: var(--line); opacity: .6; }
+  .resolved .actions { display: none; }
+  .verdict { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .revert {
     font: inherit; font-size: 12px; margin-top: 6px; padding: 3px 9px;
     border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
@@ -51,6 +102,10 @@
   }
   .revert:hover:not(:disabled) { color: var(--err); border-color: var(--err); }
   .revert:disabled { opacity: .5; cursor: default; }
+  /* Present for the whole turn, so it has to be quiet: dots plus an elapsed
+     clock, which is what separates "slow" from "hung" without guessing. */
+  .working { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+  .working .elapsed { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .thinking { display: flex; gap: 5px; align-items: center; padding: 2px 0; }
   .thinking span {
     width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
@@ -97,6 +152,31 @@
     max-height: 200px; max-width: 100%; border-radius: 6px;
     border: 1px solid var(--line); object-fit: contain;
   }
+  /* Attachments are chips, not thumbnails: a CSV has nothing to preview, and
+     the only facts worth showing are the name and that it is not enormous. */
+  .file-chip {
+    position: relative; display: inline-flex; align-items: center; gap: 6px;
+    max-width: 260px; padding: 5px 9px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); font-size: 12px;
+  }
+  .file-chip .name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-chip .size { color: var(--muted); flex: none; }
+  .file-chip button {
+    flex: none; width: 16px; height: 16px; border-radius: 50%; border: 0;
+    background: var(--muted); color: var(--panel);
+    font-size: 10px; line-height: 16px; text-align: center;
+    cursor: pointer; padding: 0;
+  }
+  .file-chip button:hover { background: var(--err); }
+  .msg-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  button.attach {
+    font: inherit; flex: none; padding: 0 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  }
+  button.attach:hover { color: var(--ink); }
+  form.dragover textarea { border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -114,6 +194,8 @@
     <div class="img-previews" id="previews"></div>
     <div class="input-row">
       <textarea id="input" rows="2" placeholder="Ask, or tell it something worth remembering…"></textarea>
+      <input type="file" id="filepicker" multiple hidden>
+      <button class="attach" id="attach" type="button" title="Attach files">📎</button>
       <button class="send" id="send" type="submit">Send</button>
     </div>
   </form>
@@ -130,8 +212,68 @@ const input = document.getElementById('input');
 const send = document.getElementById('send');
 const hint = document.getElementById('hint');
 const previews = document.getElementById('previews');
+const filepicker = document.getElementById('filepicker');
 let sessionId = null;
 let pendingImages = []; // [{dataUrl, mediaType, base64}]
+let pendingFiles = [];  // [{name, size, base64}]
+
+// Mirrors MAX_UPLOAD_BYTES in app/config.py. The server is the authority and
+// answers 413; this only exists so the user learns before a 10 MB upload.
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+function humanSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Images keep the vision path (inlined as content blocks); everything else is
+// written to the agent's scratch directory and referenced by path. Splitting
+// on the browser's own type is enough - the server does not care which list a
+// thing arrived in beyond that.
+function isImage(file) { return (file.type || '').startsWith('image/'); }
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('could not read ' + file.name));
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      resolve({ dataUrl, base64: dataUrl.slice(dataUrl.indexOf(',') + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function acceptFile(file) {
+  if (file.size > MAX_FILE_BYTES) {
+    hint.textContent = file.name + ' is ' + humanSize(file.size) + ' — the limit is ' + humanSize(MAX_FILE_BYTES) + '.';
+    return;
+  }
+  const { dataUrl, base64 } = await readBase64(file);
+  if (isImage(file)) addImagePreview(dataUrl, file.type, base64);
+  else addFilePreview(file.name, file.size, base64);
+}
+
+function addFilePreview(name, size, base64) {
+  const entry = { name, size, base64 };
+  pendingFiles.push(entry);
+
+  const chip = el('div', 'file-chip');
+  chip.appendChild(el('span', 'name', name));
+  chip.appendChild(el('span', 'size', humanSize(size)));
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '×';
+  btn.title = 'Remove attachment';
+  btn.onclick = () => {
+    const i = pendingFiles.indexOf(entry);
+    if (i !== -1) pendingFiles.splice(i, 1);
+    chip.remove();
+  };
+  chip.appendChild(btn);
+  previews.appendChild(chip);
+}
 
 function addImagePreview(dataUrl, mediaType, base64) {
   const idx = pendingImages.length;
@@ -160,20 +302,35 @@ input.addEventListener('paste', (e) => {
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return;
   for (const item of items) {
-    if (!item.type.startsWith('image/')) continue;
-    e.preventDefault();
+    // 'string' items are the text being pasted; only files are attachments,
+    // otherwise pasting ordinary text would be swallowed by preventDefault.
+    if (item.kind !== 'file') continue;
     const file = item.getAsFile();
     if (!file) continue;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
-      // dataUrl is "data:<mediaType>;base64,<data>"
-      const comma = dataUrl.indexOf(',');
-      const base64 = dataUrl.slice(comma + 1);
-      addImagePreview(dataUrl, item.type, base64);
-    };
-    reader.readAsDataURL(file);
+    e.preventDefault();
+    acceptFile(file);
   }
+});
+
+document.getElementById('attach').addEventListener('click', () => filepicker.click());
+filepicker.addEventListener('change', () => {
+  for (const file of filepicker.files) acceptFile(file);
+  // Reset, or picking the same file twice in a row fires no change event.
+  filepicker.value = '';
+});
+
+// Drag-and-drop onto the composer. dragover must be cancelled or the browser
+// navigates away to the dropped file, losing the conversation.
+for (const type of ['dragenter', 'dragover']) {
+  form.addEventListener(type, (e) => { e.preventDefault(); form.classList.add('dragover'); });
+}
+form.addEventListener('dragleave', (e) => {
+  if (e.target === form) form.classList.remove('dragover');
+});
+form.addEventListener('drop', (e) => {
+  e.preventDefault();
+  form.classList.remove('dragover');
+  for (const file of e.dataTransfer.files) acceptFile(file);
 });
 
 function el(tag, cls, text) {
@@ -204,7 +361,21 @@ async function boot() {
     const dot = document.getElementById('health');
     dot.classList.add(h.kb_mounted ? 'ok' : 'bad');
     dot.title = h.kb_mounted ? 'knowledge base mounted' : 'KNOWLEDGE BASE NOT MOUNTED';
-    if (!h.kb_mounted) hint.textContent = 'Warning: the knowledge base is not mounted — answers will not use it.';
+    const warnings = [];
+    if (!h.kb_mounted) warnings.push('Warning: the knowledge base is not mounted — answers will not use it.');
+    // A connected service whose credential is dead or nearly dead. Said here
+    // rather than only in /healthz because re-authorising is a chore somebody has
+    // to remember, and nothing in this app schedules a reminder — so the next
+    // best thing is telling whoever opens the page.
+    const stale = [];
+    for (const [name, s] of Object.entries(h.mcp_catalog || {})) {
+      // days_left goes negative when Google still honours a grant we reckon
+      // should already be gone — worth saying, but not as "-3d left".
+      if (s.state === 'expired') stale.push(`${name} (expired)`);
+      else if (s.state === 'expiring') stale.push(`${name} (${s.days_left < 0 ? 'overdue' : s.days_left + 'd left'})`);
+    }
+    if (stale.length) warnings.push(`Connected service access needs renewing: ${stale.join(', ')} — re-run scripts/google-auth.sh and set the secrets it prints.`);
+    if (warnings.length) hint.textContent = warnings.join(' ');
   } catch {}
 }
 
@@ -212,9 +383,11 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   const images = pendingImages.slice();
-  if (!text && !images.length) return;
+  const files = pendingFiles.slice();
+  if (!text && !images.length && !files.length) return;
   input.value = '';
   pendingImages = [];
+  pendingFiles = [];
   previews.innerHTML = '';
   send.disabled = true;
   send.textContent = 'Working…';
@@ -229,6 +402,16 @@ form.addEventListener('submit', async (e) => {
       imgRow.appendChild(el);
     }
     youBody.appendChild(imgRow);
+  }
+  if (files.length) {
+    const fileRow = el('div', 'msg-files');
+    for (const f of files) {
+      const chip = el('div', 'file-chip');
+      chip.appendChild(el('span', 'name', f.name));
+      chip.appendChild(el('span', 'size', humanSize(f.size)));
+      fileRow.appendChild(chip);
+    }
+    youBody.appendChild(fileRow);
   }
   if (text) {
     const p = document.createElement('p');
@@ -245,14 +428,37 @@ form.addEventListener('submit', async (e) => {
         message: text,
         session_id: sessionId,
         images: images.map(i => ({ media_type: i.mediaType, data: i.base64 })),
+        files: files.map(f => ({ name: f.name, data: f.base64 })),
       }),
     });
-    if (!res.ok) throw new Error('submit failed: ' + res.status);
+    if (!res.ok) {
+      // Surface the server's own reason. A rejected attachment answers 400 or
+      // 413 with a detail that names the file, and "submit failed: 413" alone
+      // sends the user hunting for a problem the server already described.
+      let detail = '';
+      try { detail = (await res.json()).detail || ''; } catch {}
+      throw new Error(detail || 'submit failed: ' + res.status);
+    }
     turnId = (await res.json()).turn_id;
   } catch (err) {
+    // Put the composer back. A 409 ("a turn is already running") is an ordinary
+    // outcome now that one turn runs at a time, not an exceptional one, and
+    // losing a paragraph and its attachments to it would teach people to copy
+    // their message before every send. The submitted bubble goes too, so the
+    // log does not show a message that was never sent.
+    // Re-added through the same helpers rather than by reassigning the arrays,
+    // so each restored chip gets its remove button wired up again. Nothing
+    // pasted while the request was in flight is cleared, and the text is only
+    // restored if the box is still empty - recovering the old message must not
+    // destroy a newer one.
+    youWrap.remove();
+    if (!input.value) input.value = text;
+    for (const i of images) addImagePreview(i.dataUrl, i.mediaType, i.base64);
+    for (const f of files) addFilePreview(f.name, f.size, f.base64);
     addMessage('error', '').body.classList.add('err');
     log.lastChild.querySelector('.body').textContent = String(err);
     send.disabled = false;
+    send.textContent = 'Send';
     return;
   }
   stream(turnId);
@@ -261,19 +467,36 @@ form.addEventListener('submit', async (e) => {
 function stream(turnId) {
   const msg = addMessage('agent', '');
 
-  // Pulsing indicator while the agent is working.
-  const thinking = el('div', 'thinking');
-  for (let i = 0; i < 3; i++) thinking.appendChild(el('span'));
-  msg.body.appendChild(thinking);
+  // Pulsing indicator, with the elapsed time beside it. It stays for the WHOLE
+  // turn and is removed only by finish().
+  //
+  // It used to be removed on the first token instead, which read as "finished"
+  // for the rest of the turn: after one sentence like "Reading the CSV now."
+  // there could be minutes of real work — a long tool call, a subagent, a long
+  // stretch of thinking — with nothing on screen moving. The only remaining hint
+  // that the turn was alive was the Revert button not being there yet, which is
+  // not a signal anyone reads. The elapsed clock is the other half: it
+  // distinguishes "slow" from "hung" without anyone having to guess.
+  const working = el('div', 'working');
+  const dots = el('div', 'thinking');
+  for (let i = 0; i < 3; i++) dots.appendChild(el('span'));
+  working.appendChild(dots);
+  const elapsed = el('span', 'elapsed', '');
+  working.appendChild(elapsed);
+  msg.wrap.appendChild(working);
+
+  const startedAt = Date.now();
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    elapsed.textContent = s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }, 1000);
 
   const es = new EventSource('/api/turns/' + turnId + '/events');
-  let hasText = false;
   let hasTextDelta = false; // true once the CLI streams at least one token
   let currentPara = null;   // the <p> currently receiving streamed tokens
   let newParaNext = true;   // start a fresh <p> on the next text chunk
 
   function appendText(raw) {
-    if (!hasText) { hasText = true; thinking.remove(); }
     if (newParaNext) {
       currentPara = el('p', '');
       msg.body.appendChild(currentPara);
@@ -281,6 +504,41 @@ function stream(turnId) {
     }
     currentPara.textContent += raw.replace(/\\n/g, '\n');
     scroll();
+  }
+
+  // Structured events carry a JSON payload; text ones stay raw strings.
+  const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
+
+  // Insert into the main message, keeping the working indicator last so it
+  // always sits below the newest thing that happened rather than above it.
+  function insert(node, into) {
+    if (into) { into.appendChild(node); }
+    else { msg.wrap.insertBefore(node, working); }
+    scroll();
+  }
+
+  const toolLines = new Map();  // tool_use id -> its .tool div
+  const forms = new Map();      // request_id -> the ask/permission element
+  const agents = new Map();     // agent key -> its <details> container
+  let lastAgentType = '';
+  let thought = null;
+  let todos = null;
+
+  // Subagent output must never land in the reply, which is why the server tags
+  // it. Containers are keyed by whatever tag the event carries: agent_start
+  // reports the SDK's agent id while message events report the Task call's
+  // tool_use id, and those are different identifiers, so with several subagents
+  // running at once attribution between blocks can be wrong. What cannot go
+  // wrong is subagent text reaching the main paragraph.
+  function agentBox(key) {
+    if (!key) return null;
+    if (!agents.has(key)) {
+      const d = el('details', 'subagent');
+      d.appendChild(el('summary', '', 'subagent' + (lastAgentType ? ': ' + lastAgentType : '') + ' — working'));
+      insert(d);
+      agents.set(key, d);
+    }
+    return agents.get(key);
   }
 
   // Token-by-token streaming (requires --include-partial-messages support).
@@ -291,22 +549,193 @@ function stream(turnId) {
     if (!hasTextDelta) { newParaNext = true; appendText(e.data); }
   });
 
-  es.addEventListener('tool', (e) => {
+  es.addEventListener('agent_text', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = agentBox(d.agent); if (!box) return;
+    let p = box.querySelector('.agent-text');
+    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); }
+    p.textContent += (d.text || '').replace(/\\n/g, '\n');
+  });
+
+  const thinkingInto = () => {
+    if (!thought) {
+      thought = el('details', 'thought');
+      thought.appendChild(el('summary', '', 'thinking'));
+      thought.appendChild(el('div', 'text', ''));
+      insert(thought);
+    }
+    return thought.querySelector('.text');
+  };
+  es.addEventListener('thinking_delta', (e) => {
+    thinkingInto().textContent += e.data.replace(/\\n/g, '\n');
+  });
+  es.addEventListener('thinking', (e) => {
+    if (!thought) thinkingInto().textContent = e.data.replace(/\\n/g, '\n');
+  });
+
+  const LABELS = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
+                   Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
+                   WebFetch: 'web fetch', Task: 'delegate', TodoWrite: 'plan' };
+
+  // Two events arrive per tool call, both carrying the same id: one the instant
+  // the call starts (name only, from content_block_start) and one when the
+  // assistant message completes (with the arguments). The first is what makes a
+  // slow tool visible at all; the second fills it in. Keyed by id so the line is
+  // updated rather than drawn twice.
+  es.addEventListener('tool_use', (e) => {
+    const d = parse(e); if (!d) return;
     newParaNext = true;   // next text starts a new paragraph
-    const name = e.data;
-    const label = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
-                    Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
-                    WebFetch: 'web fetch' }[name] || name.toLowerCase();
-    const t = el('div', 'tool', '→ ' + label);
-    const revert = msg.wrap.querySelector('.revert');
-    msg.wrap.insertBefore(t, revert || null);
+    let t = d.id ? toolLines.get(d.id) : null;
+    if (!t) {
+      const label = LABELS[d.name] || String(d.name || '').toLowerCase();
+      t = el('div', 'tool', '→ ' + label + ' ');
+      if (d.id) toolLines.set(d.id, t);
+      insert(t, agentBox(d.agent));
+    }
+    if (d.detail) {
+      // .args, not .detail: tool_result appends its own .detail span for a
+      // failure, and this must never overwrite that.
+      let args = t.querySelector('.args');
+      if (!args) { args = el('span', 'detail args', ''); t.appendChild(args); }
+      args.textContent = d.detail;
+      scroll();
+    }
+  });
+
+  es.addEventListener('tool_result', (e) => {
+    const d = parse(e); if (!d) return;
+    const line = toolLines.get(d.id);
+    if (!line || d.ok) return;   // successes stay quiet; only failures speak up
+    line.classList.add('failed');
+    line.appendChild(el('span', 'detail', ' — failed' + (d.detail ? ': ' + d.detail : '')));
     scroll();
   });
+
+  es.addEventListener('agent_start', (e) => {
+    const d = parse(e); if (!d) return;
+    lastAgentType = d.agent_type || '';
+    agentBox(d.agent_id);
+  });
+  es.addEventListener('agent_stop', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = agents.get(d.agent_id);
+    if (box) box.querySelector('summary').textContent =
+      'subagent' + (d.agent_type ? ': ' + d.agent_type : '') + ' — done';
+  });
+
+  es.addEventListener('todo', (e) => {
+    const d = parse(e); if (!d || !Array.isArray(d.todos)) return;
+    if (!todos) { todos = el('div', 'todos'); insert(todos); }
+    todos.innerHTML = '';
+    for (const t of d.todos) {
+      const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '·';
+      const text = t.status === 'in_progress' ? (t.activeForm || t.content) : t.content;
+      todos.appendChild(el('div', 'item ' + (t.status || ''), mark + ' ' + text));
+    }
+    scroll();
+  });
+
+  // --- the two round-trips back into the running turn --------------------
+  //
+  // Both post to the turn that is still executing, and both are disabled by the
+  // matching resolution event — which also arrives when another tab answered
+  // first, or when the request timed out on the server.
+
+  async function resolve(path, body, box, verdict) {
+    box.classList.add('resolved');
+    const r = await fetch('/api/turns/' + turnId + '/' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let note = verdict;
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.json()).detail || ''; } catch {}
+      note = detail || 'could not send that';
+    }
+    box.appendChild(el('div', 'verdict', note));
+    scroll();
+  }
+
+  es.addEventListener('ask', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = el('div', 'ask');
+    if (d.header) box.appendChild(el('div', 'sub', d.header));
+    box.appendChild(el('div', 'q', d.question || ''));
+    const type = d.multi_select ? 'checkbox' : 'radio';
+    (d.options || []).forEach((opt, i) => {
+      const label = el('label');
+      const cb = document.createElement('input');
+      cb.type = type; cb.name = 'opt-' + d.request_id; cb.value = opt;
+      if (!d.multi_select && i === 0) cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + opt));
+      box.appendChild(label);
+    });
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.placeholder = (d.options || []).length ? 'or write your own…' : 'your answer…';
+    box.appendChild(other);
+
+    const actions = el('div', 'actions');
+    const submit = el('button', 'primary', 'Answer');
+    submit.onclick = () => {
+      const picked = [...box.querySelectorAll('input[type=' + type + ']:checked')].map(i => i.value);
+      resolve('answer', { request_id: d.request_id, answers: picked, notes: other.value.trim() },
+              box, 'answered');
+    };
+    actions.appendChild(submit);
+    box.appendChild(actions);
+    forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  es.addEventListener('permission', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = el('div', 'perm');
+    box.appendChild(el('div', 'q', d.title || ('Allow ' + d.tool + '?')));
+    const sub = [d.description, d.detail, d.blocked_path, d.reason].filter(Boolean).join(' — ');
+    if (sub) box.appendChild(el('div', 'sub', sub));
+
+    const actions = el('div', 'actions');
+    const allow = el('button', 'allow', 'Allow');
+    const deny = el('button', 'deny', 'Deny');
+    allow.onclick = () => resolve('permission',
+      { request_id: d.request_id, decision: 'allow' }, box, 'allowed');
+    deny.onclick = () => resolve('permission',
+      { request_id: d.request_id, decision: 'deny' }, box, 'denied');
+    actions.appendChild(allow);
+    actions.appendChild(deny);
+    box.appendChild(actions);
+    forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  function closeForm(e, timedOutNote, resolvedNote) {
+    const d = parse(e); if (!d) return;
+    const box = forms.get(d.request_id);
+    if (!box || box.classList.contains('resolved')) return;
+    box.classList.add('resolved');
+    box.appendChild(el('div', 'verdict', d.timeout ? timedOutNote : resolvedNote(d)));
+    scroll();
+  }
+  es.addEventListener('answered', (e) =>
+    closeForm(e, 'nobody answered in time; the agent carried on', () => 'answered'));
+  es.addEventListener('permission_resolved', (e) =>
+    closeForm(e, 'not approved in time; denied', (d) => d.decision === 'allow' ? 'allowed' : 'denied'));
+
   es.addEventListener('session', (e) => { sessionId = e.data; });
   es.addEventListener('status', () => {});
 
+  let finished = false;
   const finish = (failed, detail) => {
-    thinking.remove();   // no-op if already gone
+    // Idempotent: `done` and a subsequent onerror can both arrive, and a second
+    // pass would append a second Revert button to the same turn.
+    if (finished) return;
+    finished = true;
+    clearInterval(tick);
+    working.remove();
     es.close();
     send.disabled = false;
     send.textContent = 'Send';

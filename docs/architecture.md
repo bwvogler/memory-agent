@@ -14,13 +14,13 @@ lives in `decisions/`; this is the operational view.
  │ Cloudflare (free)                   │
  │  • Pages  → static chat UI          │
  │  • Access → Zero Trust policy       │
- │  • Tunnel → no inbound ports        │
+ │  (no tunnel — see auth, below)      │
  └───────────────┬─────────────────────┘
                  │ Cf-Access-Jwt-Assertion
                  ▼
  ┌─────────────────────────────────────┐
  │ Fly.io Machine (same region as DB)  │
- │  cloudflared ── FastAPI             │
+ │  FastAPI                            │
  │                  │                  │
  │                  ├─ verify JWT      │
  │                  ├─ turn registry   │
@@ -149,9 +149,21 @@ sufficient… the JWT and signature must be confirmed to avoid identity spoofing
 
 `app/auth.py` verifies the RS256 signature against the team's JWKS (with cache
 and rotation handling), checks `aud` against the application's AUD tag, checks
-`iss` and `exp`, and then applies an email-domain allowlist. Enforce Access at
-the `cloudflared` ingress too. If the origin is ever directly reachable,
-header-trust alone is a full auth bypass — hence tunnel-only, no public IP.
+`iss` and `exp`, and then applies an email-domain allowlist.
+
+This is the *whole* gate, and that is a correction to what this document used to
+say. The plan was belt and braces: enforce Access at a `cloudflared` ingress as
+well, so the origin was never directly reachable. That is incompatible with
+`auto_stop_machines = "suspend"` and `min_machines_running = 0` — the tunnel
+runs inside the machine, suspends with it, and only the Fly proxy can wake the
+machine, on the route the tunnel existed to replace. The tunnel is gone from the
+image (img-753); the `.fly.dev` hostname stays publicly routable and answers 403
+without a valid token.
+
+The consequence is that signature verification is load-bearing rather than
+defence in depth. Header-trust alone would be a full auth bypass, and so would
+`DEV_BYPASS_AUTH` — which is the only thing standing between a fresh deploy and
+an open knowledge base, and has been set in production once already.
 
 Access sessions expire (24h by default), so a reconnect mid-stream can return a
 redirect to the login page. Handle that rather than rendering login HTML into the

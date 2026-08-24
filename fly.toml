@@ -17,6 +17,12 @@ primary_region = "iad"
   WORK_DIR = "/work"
   PORT = "8080"
 
+  # There was a BD_IGNORE_SCHEMA_SKEW = "1" here, and it is gone on purpose: the
+  # volume's ledger has had its Dolt schema cursor rolled back to v53, so the
+  # pinned bd opens it with no flag. Do not add it back to make an error go away.
+  # It would mean a database is ahead of the binary again, which is a question
+  # about which bd wrote it, not a setting. See img-4r2 and the Dockerfile pin.
+
 [http_service]
   internal_port = 8080
   force_https = true
@@ -46,6 +52,18 @@ primary_region = "iad"
 
 # Scratch space and the SDK's local session files. Not the knowledge base -
 # that lives in Postgres.
+#
+# It also holds the bead ledger and kb.git, which is why this deployment runs
+# exactly ONE active machine. A second machine gets its own ledger and its own
+# savepoint history while sharing the knowledge base, so `bd ready` diverges,
+# memory/backlog.md becomes a fight between two ledgers, and a revert routed to
+# the wrong machine finds no savepoint for a turn whose writes are right there
+# in the shared KB. Do not `fly scale count`. min_machines_running = 0 above is
+# one machine that suspends, not zero machines.
+#
+# Read docs/decisions/0009 before changing this - including the part about
+# fixing savepoint isolation first, since the concurrency ceiling is shared
+# state rather than hardware.
 [mounts]
   source = "memory_agent_work"
   destination = "/work"
