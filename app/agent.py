@@ -51,7 +51,7 @@ import logging
 import os
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, query
+from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
@@ -846,40 +846,6 @@ async def run_turn(
             turn.finish(TurnState.ERROR, error="turn ended unexpectedly")
 
 
-async def _wait_for_mcp_ready(client: ClaudeSDKClient, server_names: set[str]) -> None:
-    """Block until every named MCP server has left `pending`, or 45s pass.
-
-    `get_mcp_status` reports `pending` while a server's subprocess is still
-    starting up or still answering its first `ListTools`. Proceeding while
-    any catalog server is pending is exactly the race that made calendar
-    tools look "unreachable" to the model: they were not indexed for
-    ToolSearch yet, and nothing distinguishes that from actually being gone.
-    A server that reaches a terminal state - connected, failed, needs-auth,
-    disabled - exits the wait immediately; only a genuinely slow start pays
-    the poll delay, and the timeout is a backstop, not a target.
-    """
-    if not server_names:
-        return
-    pending = server_names
-    try:
-        async with asyncio.timeout(45.0):
-            while pending:
-                status = await client.get_mcp_status()
-                pending = {
-                    entry.get("name")
-                    for entry in status.get("mcpServers", [])
-                    if entry.get("name") in server_names
-                    and entry.get("status") == "pending"
-                }
-                if pending:
-                    await asyncio.sleep(0.5)
-    except TimeoutError:
-        log.warning(
-            "MCP server(s) still pending after 45s, proceeding anyway: %s",
-            sorted(pending),
-        )
-
-
 async def _run_turn(
     turn: Turn,
     prompt: str,
@@ -913,27 +879,17 @@ async def _run_turn(
         bd_context = await kb.bd_prime(user_slug)
 
     try:
-        options = _options(user_slug, resume, bd_context, turn)
-        async with ClaudeSDKClient(options=options) as client:
-            # mcp_servers spawns a fresh subprocess per turn, and listing its
-            # tools has been observed to take anywhere from ~3s to ~36s (a
-            # cold npx start, a token-refresh round-trip). Sending the user
-            # message before that finishes races the deferred tool index: a
-            # calendar/gmail tool the model reaches for during that window
-            # is not "unavailable", it just is not indexed yet, and the model
-            # has no way to tell the two apart. Waiting for every catalog
-            # server to leave `pending` closes that race instead of asking
-            # the model to reason its way around it.
-            await _wait_for_mcp_ready(client, set(mcp_catalog.resolved()))
-            await client.query(_stream_prompt(prompt, images))
-            async for message in client.receive_response():
-                for kind, data in _render(message):
-                    turn.append(kind, data)
-                signals.observe_message(turn, message)
-                session_id = _extract_session_id(message)
-                if session_id and not turn.session_id:
-                    turn.session_id = session_id
-                    turn.append("session", session_id)
+        async for message in query(
+            prompt=_stream_prompt(prompt, images),
+            options=_options(user_slug, resume, bd_context, turn),
+        ):
+            for kind, data in _render(message):
+                turn.append(kind, data)
+            signals.observe_message(turn, message)
+            session_id = _extract_session_id(message)
+            if session_id and not turn.session_id:
+                turn.session_id = session_id
+                turn.append("session", session_id)
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
     except Exception as exc:  # surface everything to the client
