@@ -814,3 +814,24 @@ We leave `export.auto` off rather than turning it on and deleting the paragraph,
 for two reasons that both survive it: the export still needs `git add`, so a
 manual step remains either way, and every write would then print bd's
 `no Dolt remote configured` warning, which teaches a reader to skip bd's output.
+
+**In this repo, committing pushes.** Not `git`'s doing and not configured here:
+`bd backup status` reports `enabled=true (auto: git remote detected)`, so bd
+turned its own off-machine backup on because `.beads/config.yaml` carries a
+`sync.remote`, and it publishes by pushing the branch. `git reflog show
+origin/<branch>` says `update by push` against commits nobody pushed by hand.
+
+It is documented rather than disabled, because the backup is worth having — this
+project has already lost a ledger to `docker compose down -v` — and because a
+feature branch reaching GitHub is not the failure. Being wrong about it is. Two
+sessions' worth of summaries here confidently described commits as local, which
+is the kind of claim you cannot check by reading the code. Assume a commit is
+public the moment it exists, and if you need one that is not, `git-push: false`
+under `backup:` in `.beads/config.yaml` keeps the local backup and drops the
+push.
+
+Related and easy to conflate: `.beads/backup/` is 1.6 MB of Dolt backup data and
+is gitignored by bd's own `.beads/.gitignore`, so none of this bloats the repo.
+`.beads/interactions.jsonl` — a per-machine field-change log bd writes beside the
+ledger — is ignored from the root `.gitignore` instead, because bd generates
+`.beads/.gitignore` and may rewrite it.
