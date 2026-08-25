@@ -168,18 +168,22 @@ async def recent_log(limit: int = 50) -> list[str]:
     return out.strip().splitlines()
 
 
-def scratch_dir_for(user_slug: str) -> Path:
+def scratch_dir_for(user_slug: str, *, create: bool = True) -> Path:
     """Per-user scratch space on LOCAL disk, never inside the KB mount.
 
     If the agent's cwd is the mount, every temp file it writes becomes a
     versioned row in the knowledge base. See docs/decisions/0003.
+
+    `create=False` for a read: a GET must never create a directory on the
+    volume just by naming one that does not exist yet.
     """
     path = Path(config.work_dir) / user_slug
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def uploads_dir_for(user_slug: str, turn_id: str) -> Path:
+def uploads_dir_for(user_slug: str, turn_id: str, *, create: bool = True) -> Path:
     """Where a turn's attachments land: inside that user's scratch, per turn.
 
     Scratch and not the KB, for the reason in docs/decisions/0003 - a file
@@ -188,9 +192,14 @@ def uploads_dir_for(user_slug: str, turn_id: str) -> Path:
     directory so two uploads of the same filename cannot silently overwrite
     each other, and so a turn's inputs stay legible next to the bead a revert
     files about it.
+
+    `create=False` for a read: once turn_id reaches here from a URL rather
+    than from a turn this process just started, a GET must not be able to
+    `mkdir` on the volume for a directory that was never written to.
     """
-    path = scratch_dir_for(user_slug) / "uploads" / turn_id
-    path.mkdir(parents=True, exist_ok=True)
+    path = scratch_dir_for(user_slug, create=create) / "uploads" / turn_id
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -233,6 +242,25 @@ def resolve_upload_path(user_slug: str, turn_id: str, name: str) -> Path | None:
     candidate = (directory / base).resolve()
     if not candidate.is_relative_to(directory.resolve()):
         log.warning("rejected upload name escaping scratch: %r", name)
+        return None
+    return candidate
+
+
+def upload_path_for_read(user_slug: str, turn_id: str, name: str) -> Path | None:
+    """Read-only twin of `resolve_upload_path`: same containment, no mkdir.
+
+    `turn_id` here comes from a URL, not from a turn this process just
+    started - so unlike the write path, a caller can name a directory that
+    was never created. Without `create=False` threaded all the way down, a
+    single GET for a bogus id would `mkdir(parents=True)` on the volume.
+    """
+    base = safe_upload_name(name)
+    if base is None:
+        return None
+    directory = uploads_dir_for(user_slug, turn_id, create=False)
+    candidate = (directory / base).resolve()
+    if not candidate.is_relative_to(directory.resolve()):
+        log.warning("rejected upload read escaping scratch: %r", name)
         return None
     return candidate
 
@@ -475,7 +503,12 @@ def _render_backlog(issues: list[dict]) -> str:
 
 _kb_pool: asyncpg.Pool | None = None
 
-_LIST_SQL = """
+# Shared by the listing and the single-file read below. `body` is deliberately
+# not selected by the listing query built on top of this - the tree only ever
+# needed `path`, and dragging every file's content over the wire on every
+# page load was pure waste that got worse once every tree click, every
+# agent Write, and every deep link started hitting this CTE.
+_PATHS_CTE = """
 WITH RECURSIVE paths AS (
     SELECT id, filetype, body, filename AS path
     FROM   tigerfs.memory
@@ -485,11 +518,29 @@ WITH RECURSIVE paths AS (
     FROM   tigerfs.memory m
     JOIN   paths p ON m.parent_id = p.id
 )
-SELECT path, body
+"""
+
+_LIST_SQL = (
+    _PATHS_CTE
+    + """
+SELECT path
 FROM   paths
 WHERE  filetype = 'file' AND path LIKE '%.md'
 ORDER  BY path
 """
+)
+
+# No `LIKE '%.md'` here: a deep link to a non-markdown file the agent wrote
+# (a .txt, a .csv) should still be readable. The listing stays markdown-only
+# so the tree is unchanged - this only widens what a known path can retrieve.
+_READ_SQL = (
+    _PATHS_CTE
+    + """
+SELECT body
+FROM   paths
+WHERE  filetype = 'file' AND path = $1
+"""
+)
 
 
 async def _pool() -> asyncpg.Pool:
@@ -514,13 +565,14 @@ async def sql_list_files() -> list[str]:
 
 
 async def sql_read_file(path: str) -> str | None:
-    """Return file content by workspace-relative path (single SQL query)."""
+    """Return file content by workspace-relative path (single SQL query).
+
+    Parameterised on path rather than fetching every file's body and
+    scanning in Python - see the note on `_PATHS_CTE`.
+    """
     pool = await _pool()
-    rows = await pool.fetch(_LIST_SQL)
-    for r in rows:
-        if r["path"] == path:
-            return r["body"]
-    return None
+    row = await pool.fetchrow(_READ_SQL, path)
+    return row["body"] if row else None
 
 
 # ---------------------------------------------------------------------------

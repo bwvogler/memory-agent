@@ -11,15 +11,17 @@ import base64
 import binascii
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, kb, mcp_catalog, mcp_server, signals
+from . import agent, interact, kb, mcp_catalog, mcp_server, signals
 from .auth import Identity, current_identity
 from .config import config
 from .session_store import PostgresSessionStore
@@ -242,6 +244,38 @@ def _stage_attachments(
     return staged
 
 
+# uuid4().hex, which is what turns.Registry stamps every turn id with. Checked
+# before anything touches the filesystem: an id that fails this can never be a
+# real turn, so there is no reason to let it reach a path lookup at all.
+_TURN_ID = re.compile(r"\A[0-9a-f]{32}\Z")
+
+# A pure allowlist, never mimetypes.guess_type: this route serves attacker-
+# controlled bytes back over an authenticated origin that can also submit a
+# turn, so the one thing that must never happen is an upload coming back as
+# text/html or image/svg+xml (both are scripting contexts on this origin).
+# Everything not listed is an opaque download, not a render.
+_UPLOAD_MEDIA_TYPES = {
+    ".md": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".csv": "text/plain; charset=utf-8",
+    ".json": "text/plain; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _upload_media_type(name: str) -> tuple[str, bool]:
+    """(content-type, inline?) for an uploaded file's name. Pure, so it is
+    testable as a lookup table rather than through a route."""
+    media_type = _UPLOAD_MEDIA_TYPES.get(Path(name).suffix.lower())
+    if media_type is None:
+        return "application/octet-stream", False
+    return media_type, True
+
+
 @app.post("/api/turns")
 async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
     """Submit a message. Returns immediately with a turn id.
@@ -283,6 +317,18 @@ async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
         log.exception("could not stage attachments for turn %s", turn.id)
         turn.finish(TurnState.ERROR, error=f"could not save attachments: {exc}")
         raise HTTPException(500, "could not save attachments") from exc
+
+    # Named on the event stream, not on the Turn object: the Registry is
+    # in-process and evicts, but a reload reconnects with Last-Event-ID and
+    # replays events, so this - not a `turn.files` field - is what makes an
+    # uploaded file's chip survive a refresh mid-turn.
+    for path in staged:
+        turn.append(
+            "attachment",
+            interact.json_event(
+                name=path.name, url=f"/api/uploads/{turn.id}/{quote(path.name)}"
+            ),
+        )
 
     spawn(
         agent.run_turn(
@@ -522,20 +568,66 @@ async def kb_file(path: str) -> dict[str, str]:
     return {"path": path, "content": content}
 
 
+@app.get("/api/uploads/{turn_id}/{name}")
+async def uploaded_file(turn_id: str, name: str, identity: CurrentUser) -> FileResponse:
+    """Serve back an attachment's bytes, for the centre pane.
+
+    Ownership is proven by the path, not by looking up the Turn: the slug
+    comes from the verified Identity and never appears in the URL, so there is
+    no input by which a caller can name another user's directory. A
+    `turn.user_email` check would prove the same fact more weakly, and would
+    404 a perfectly valid file once the in-process Registry evicts it (bounded
+    to 200 turns, oldest-finished first).
+
+    `turn_id` is checked against the shape `Registry` actually stamps BEFORE
+    any path is built from it - `resolve_upload_path`'s containment check
+    passes for any `turn_id`, since the escape would have already happened one
+    directory up, in `uploads_dir_for`. Only `uploads/` is servable, never
+    arbitrary scratch: scratch also holds the bead ledger and everything the
+    agent fetched from the web, on a volume with no savepoint.
+    """
+    if not _TURN_ID.fullmatch(turn_id):
+        raise HTTPException(404, "no such attachment")
+    path = kb.upload_path_for_read(identity.slug, turn_id, name)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "no such attachment")
+
+    media_type, inline = _upload_media_type(path.name)
+    disposition = "inline" if inline else "attachment"
+    # safe_upload_name only strips non-printable characters, not quotes or
+    # backslashes - both are escaped here so a crafted filename cannot break
+    # out of the quoted-string and inject a header.
+    safe_name = path.name.replace("\\", "\\\\").replace('"', '\\"')
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+    }
+    return FileResponse(path, media_type=media_type, headers=headers)
+
+
 def _sse_escape(text: str) -> str:
     """SSE data lines cannot contain raw newlines."""
     return text.replace("\r\n", "\n").replace("\n", "\\n")
 
 
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
-
-
+@app.get("/", dependencies=AUTHENTICATED)
 @app.get("/kb", dependencies=AUTHENTICATED)
 @app.get("/kb/{path:path}", dependencies=AUTHENTICATED)
-async def kb_ui() -> FileResponse:
-    return FileResponse(STATIC_DIR / "kb.html")
+async def index() -> FileResponse:
+    """The merged tree/renderer/chat page, at every URL that used to be two.
+
+    `/` was unauthenticated when it was an empty shell whose every fetch was
+    authenticated anyway - that stopped being harmless once `/` became the
+    wiki itself, since an open shell that 403s its own tree fetch is a worse
+    experience than the Access login redirect it now gets instead. `fly.toml`
+    probes `/healthz`, not this route.
+
+    `/kb/{path:path}` still takes no `path` argument: the server has nothing
+    to do with it, and the client reads `location.pathname` to pick the
+    initial centre pane. Serving the same document rather than redirecting
+    means a copied URL is the URL you land on.
+    """
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

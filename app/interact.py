@@ -55,6 +55,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from .config import config
+from .kb import WORKSPACE_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -148,6 +149,45 @@ def describe_tool_input(name: str, tool_input: Mapping[str, Any] | None) -> str:
     if not value:
         value = first(*sorted(k for k, v in args.items() if isinstance(v, str)))
     return _clip(value)
+
+
+# Read is deliberately absent: following every Read would flicker the centre
+# pane through the whole corpus while the agent researches, for a call that
+# changed nothing.
+KB_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def describe_tool_target(
+    name: str, tool_input: Mapping[str, Any] | None
+) -> dict[str, str]:
+    """Where this call landed, as something the UI can open. Pure.
+
+    Not the same value as `describe_tool_input`: that one is a display
+    string, clipped to `MAX_DETAIL_CHARS` and only mount-stripped, so a write
+    to `$KB_MOUNT/memory/x.md` shows as `memory/x.md` there. This one is an
+    identifier, and it has to be byte-identical to what `/api/kb/file?path=`
+    accepts - which is rooted at `$KB_MOUNT/memory`, not `$KB_MOUNT` (see
+    `kb.workspace_root` and `export_backlog`, which writes `backlog.md`, not
+    `memory/backlog.md`). Stripping only the mount, the way `describe_tool_input`
+    does, would 404 every path this function is meant to produce.
+
+    Empty dict for anything outside the KB workspace, or for a tool that does
+    not write files at all - most calls have nothing openable, and the caller
+    treats `{}` as "do not move the pane".
+    """
+    if name not in KB_WRITE_TOOLS:
+        return {}
+    args = tool_input or {}
+    raw = ""
+    for key in ("file_path", "path", "notebook_path"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            raw = value.strip()
+            break
+    workspace_prefix = f"{config.kb_mount.rstrip('/')}/{WORKSPACE_NAME}/"
+    if not raw.startswith(workspace_prefix):
+        return {}
+    return {"kind": "kb", "path": raw[len(workspace_prefix) :]}
 
 
 # ---------------------------------------------------------------------------

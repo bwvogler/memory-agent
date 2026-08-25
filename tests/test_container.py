@@ -20,6 +20,8 @@ import time
 import httpx
 import pytest
 
+from app import interact
+
 from .conftest import REPO_ROOT, USER_SLUG, app_exec, bd, bd_json
 
 pytestmark = pytest.mark.container
@@ -98,6 +100,32 @@ def test_stack_is_healthy_and_the_kb_is_mounted(stack):
         "TigerFS mounted but the workspace is unusable - check the Postgres "
         "version provides uuidv7()"
     )
+
+
+def test_the_merged_page_and_its_split_assets_are_in_the_image(stack):
+    """The only tier that can catch a missing COPY.
+
+    `docker-compose.override.yml` bind-mounts ./static over the image's copy
+    for local dev, so a file that never made it into the image is invisible
+    there by construction - and `tests/conftest.py` passes an explicit -f list
+    precisely so this tier does not load that override and exercises what the
+    image actually contains.
+    """
+    page = httpx.get(f"{stack}/", timeout=10)
+    assert page.status_code == 200
+    assert "/static/app.js" in page.text
+    assert "/static/app.css" in page.text
+    assert "/static/vendor/marked.min.js" in page.text
+
+    assert httpx.get(f"{stack}/static/app.js", timeout=10).status_code == 200
+    assert httpx.get(f"{stack}/static/app.css", timeout=10).status_code == 200
+    vendor = httpx.get(f"{stack}/static/vendor/marked.min.js", timeout=10)
+    assert vendor.status_code == 200
+
+    # /kb and /kb/{path} serve the same merged document rather than a
+    # separate page or a redirect, so a copied deep link is the link you land on.
+    assert httpx.get(f"{stack}/kb", timeout=10).status_code == 200
+    assert httpx.get(f"{stack}/kb/recipes/pasta.md", timeout=10).status_code == 200
 
 
 def test_healthz_reports_the_outbound_mcp_catalog(stack):
@@ -236,6 +264,42 @@ def test_backlog_page_is_exported_into_the_kb(beads):
         f"{beads}/api/kb/file", params={"path": "backlog.md"}, timeout=10
     ).json()["content"]
     assert body.startswith("# Backlog")
+
+
+PROBE_WRITE_SCRIPT = """
+from pathlib import Path
+p = Path('/mnt/kb/memory/container-probe')
+p.mkdir(parents=True, exist_ok=True)
+(p / 'target-check.md').write_text('# probe\\n')
+"""
+
+
+def test_the_path_the_ui_would_open_is_the_path_the_api_accepts(stack):
+    """Gates `interact.describe_tool_target` against a real TigerFS table.
+
+    Everything else about the three-pane UI's "follow the agent's write"
+    feature is unit-tested against an assumption: that /api/kb/files and
+    /api/kb/file are rooted at $KB_MOUNT/memory, not $KB_MOUNT. That is only
+    provable against a real mount - `export_backlog` writes 'backlog.md', not
+    'memory/backlog.md', which is the evidence, but this pins the actual
+    contract so a future change to the recursive CTE's root cannot silently
+    reintroduce a 404 on every file the agent writes. Starts no turn.
+    """
+    app_exec("python", "-c", PROBE_WRITE_SCRIPT)
+
+    files = httpx.get(f"{stack}/api/kb/files", timeout=10).json()["files"]
+    expected_path = "container-probe/target-check.md"
+    assert expected_path in files
+
+    content = httpx.get(
+        f"{stack}/api/kb/file", params={"path": expected_path}, timeout=10
+    ).json()["content"]
+    assert content == "# probe\n"
+
+    target = interact.describe_tool_target(
+        "Write", {"file_path": f"/mnt/kb/memory/{expected_path}"}
+    )
+    assert target == {"kind": "kb", "path": expected_path}
 
 
 APPEND_PROBE = """
@@ -420,6 +484,14 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
 
     staged = f"/work/{USER_SLUG}/uploads/{turn_id}/deck.csv"
     assert app_exec("cat", staged).stdout.startswith("Card,Category")
+
+    # The centre pane's other way of reaching this file: the HTTP route, not
+    # `docker exec`. Proves the read-only path (`upload_path_for_read`) agrees
+    # with the write path on where the file actually landed.
+    readback = httpx.get(f"{stack}/api/uploads/{turn_id}/deck.csv", timeout=10)
+    assert readback.status_code == 200
+    assert readback.text.startswith("Card,Category")
+    assert readback.headers["content-disposition"].startswith("inline;")
 
     # Nothing new in the workspace, and the file is nowhere under it. Scoped to
     # the workspace and NOT to /mnt/kb: the mount root exposes TigerFS's own

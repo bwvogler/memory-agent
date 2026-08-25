@@ -1028,6 +1028,7 @@ def _render_stream(message: StreamEvent) -> list[tuple[str, str]]:
                     id=block.get("id") or "",
                     name=block.get("name") or "",
                     detail="",
+                    target={},
                     agent=agent or "",
                 ),
             )
@@ -1068,6 +1069,7 @@ def _render_tool_use(
                 id=block.id,
                 name=block.name,
                 detail=interact.describe_tool_input(block.name, tool_input),
+                target=interact.describe_tool_target(block.name, tool_input),
                 agent=agent or "",
             ),
         )

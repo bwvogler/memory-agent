@@ -450,6 +450,26 @@ explicitly one household rather than many tenants.
 
 Neither is implemented. Both are `**Status:** proposed`.
 
+**One page, three panes: tree, renderer, chat.** `/`, `/kb` and
+`/kb/{path:path}` now serve the same `static/index.html`; the old
+`static/kb.html` navigated away from the chat entirely, which lost the
+session, so a turn that said "I updated your recipes index" gave you no way
+to look without leaving. `/` is authenticated now that it *is* the wiki. The
+centre pane is driven by the tree, and separately pushed to by chat: a
+successful KB write auto-opens (`interact.describe_tool_target` adds a
+`target` to the `tool_use` payload, correlated against `tool_result`'s `ok`
+by tool id so a *failed* write never moves the pane), while an upload only
+opens on click — you already know what you attached, the agent's write is
+the thing that's news. `GET /api/uploads/{turn_id}/{name}` serves upload
+bytes back, ownership proved by path (the slug comes from `Identity`, never
+the URL) rather than by the in-process, evictable `Registry`. The renderer
+gained a sanitizer at the parser (`marked`'s `html` token is escaped, and any
+`href`/`src` outside `http(s):`/`mailto:` is dropped) because the centre pane
+now renders uploaded documents too, not just agent-written wiki pages — see
+docs/decisions/0016, including the reload-resume bug that first cut of this
+shipped with (`onerror` clearing the same localStorage marker a page reload
+needs intact) and the fix (clear only on an authoritative `done`/`failed`).
+
 ## Local dev
 
 ```sh

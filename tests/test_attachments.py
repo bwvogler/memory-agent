@@ -13,13 +13,16 @@ into memory and written to the volume before anything can object.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json as jsonlib
 import types
 
 import pytest
 from fastapi import HTTPException
 
-from app import agent, kb, main
+from app import agent, auth, kb, main
+from app.turns import Registry
 
 
 @pytest.fixture
@@ -157,6 +160,124 @@ def test_an_empty_attachment_is_refused():
         main._decode_attachments([payload("deck.csv", b"")])
 
     assert caught.value.status_code == 400
+
+
+# --- the attachment lands on the event stream, not just on disk ------------
+
+
+def _coro(value):
+    async def _call():
+        return value
+
+    return _call
+
+
+def _request(body: dict):
+    return types.SimpleNamespace(json=_coro(body))
+
+
+def test_an_attachment_is_named_on_the_event_stream_before_spawn(
+    scratch, caps, monkeypatch
+):
+    """A reload reconnects with Last-Event-ID and replays events - so a
+    chip surviving a refresh depends on this landing on the stream itself,
+    not on a Turn.files field, and not deferred until the agent coroutine
+    (which spawn only schedules, and which this test never lets run) does it.
+    """
+    fresh = Registry()
+    monkeypatch.setattr(main, "registry", fresh)
+    # spawn() only schedules agent.run_turn; closing the coroutine here rather
+    # than letting it run keeps this test from touching the real SDK.
+    monkeypatch.setattr(main, "spawn", lambda coro, **kw: coro.close())
+
+    body = {"message": "here's a file", "files": [payload("deck.csv", b"a,b\n1,2\n")]}
+    response = asyncio.run(main.create_turn(_request(body), _identity()))
+    turn_id = jsonlib.loads(bytes(response.body))["turn_id"]
+
+    turn = fresh.get(turn_id)
+    assert turn is not None
+    attachment_events = [e for e in turn.events if e.kind == "attachment"]
+    assert len(attachment_events) == 1
+    payload_out = jsonlib.loads(attachment_events[0].data)
+    assert payload_out["name"] == "deck.csv"
+    assert payload_out["url"] == f"/api/uploads/{turn_id}/deck.csv"
+
+
+# --- GET /api/uploads/{turn_id}/{name} --------------------------------------
+#
+# Ownership here is proven by the path, not by looking up a Turn: the slug
+# comes from the verified Identity and never appears in the URL. What has to
+# be tested instead is that a URL-supplied turn_id can neither create a
+# directory nor read across a slug boundary.
+
+
+def _identity(email: str = "dev@localhost") -> auth.Identity:
+    return auth.Identity(email=email, subject="s")
+
+
+def test_media_type_allowlist_is_a_pure_table():
+    assert main._upload_media_type("notes.md") == ("text/plain; charset=utf-8", True)
+    assert main._upload_media_type("photo.PNG") == ("image/png", True)
+    assert main._upload_media_type("evil.html") == ("application/octet-stream", False)
+    assert main._upload_media_type("evil.svg") == ("application/octet-stream", False)
+    assert main._upload_media_type("noext") == ("application/octet-stream", False)
+
+
+def test_a_malformed_turn_id_is_refused_before_the_filesystem_is_touched(scratch):
+    """A GET must not be able to `mkdir` on the volume just by naming a path."""
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.uploaded_file("../../etc", "passwd", _identity()))
+
+    assert caught.value.status_code == 404
+    assert not (scratch / "dev_localhost").exists()
+
+
+def test_a_well_formed_but_unknown_turn_id_creates_no_directory(scratch):
+    """The read path must never mkdir - only the write path may."""
+    turn_id = "0" * 32
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.uploaded_file(turn_id, "deck.csv", _identity()))
+
+    assert caught.value.status_code == 404
+    assert not (scratch / "dev_localhost").exists()
+
+
+def test_a_file_under_another_slug_is_unreachable(scratch):
+    turn_id = "1" * 32
+    other = kb.uploads_dir_for("someone_else_example_com", turn_id)
+    (other / "deck.csv").write_bytes(b"not yours")
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(main.uploaded_file(turn_id, "deck.csv", _identity()))
+
+    assert caught.value.status_code == 404
+
+
+def test_a_valid_upload_is_served_back_with_safe_headers(scratch):
+    turn_id = "2" * 32
+    path = kb.resolve_upload_path("dev_localhost", turn_id, "deck.csv")
+    assert path is not None
+    path.write_bytes(b"a,b\n1,2\n")
+
+    response = asyncio.run(main.uploaded_file(turn_id, "deck.csv", _identity()))
+
+    assert response.media_type == "text/plain; charset=utf-8"
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_an_unrecognised_extension_is_an_opaque_download(scratch):
+    """The one thing this route must never do: serve an upload as text/html
+    or image/svg+xml, both scripting contexts on this origin."""
+    turn_id = "3" * 32
+    path = kb.resolve_upload_path("dev_localhost", turn_id, "evil.html")
+    assert path is not None
+    path.write_bytes(b"<script>alert(1)</script>")
+
+    response = asyncio.run(main.uploaded_file(turn_id, "evil.html", _identity()))
+
+    assert response.media_type == "application/octet-stream"
+    assert response.headers["content-disposition"].startswith("attachment;")
 
 
 # --- the prompt the agent actually sees ------------------------------------
