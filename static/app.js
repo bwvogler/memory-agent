@@ -163,6 +163,20 @@ async function loadFiles(openPath) {
   }
   fixPaths(tree, '');
 
+  // Un-nest a skill's references/ child into the skill folder itself: the
+  // tree still reflects the real filesystem shape underneath, this just
+  // changes how a skill directory's node is rendered.
+  function hoistReferences(node) {
+    Object.values(node.dirs).forEach(hoistReferences);
+    if (fileSet.has(node.path + '/SKILL.md') && node.dirs.references) {
+      const ref = node.dirs.references;
+      node.files.push(...ref.files);
+      Object.keys(ref.dirs).forEach(name => { node.dirs[name] = ref.dirs[name]; });
+      delete node.dirs.references;
+    }
+  }
+  hoistReferences(tree);
+
   function renderNode(node, container, depth) {
     Object.keys(node.dirs).sort().forEach(name => {
       const child = node.dirs[name];
@@ -174,8 +188,10 @@ async function loadFiles(openPath) {
         section.className = 'section-header';
         section.textContent = name;
         section.onclick = () => {
+          const skillPath = dirPath + '/SKILL.md';
           const guidePath = dirPath + '/GUIDE.md';
-          if (fileSet.has(guidePath)) openKbFile(guidePath);
+          const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
+          if (openPath) openKbFile(openPath);
         };
         container.appendChild(section);
         renderNode(child, container, depth + 1);
@@ -197,8 +213,10 @@ async function loadFiles(openPath) {
         header.onclick = () => {
           const collapsed = children.classList.toggle('collapsed');
           toggle.classList.toggle('collapsed', collapsed);
+          const skillPath = dirPath + '/SKILL.md';
           const guidePath = dirPath + '/GUIDE.md';
-          if (fileSet.has(guidePath)) openKbFile(guidePath);
+          const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
+          if (openPath) openKbFile(openPath);
         };
 
         container.appendChild(header);
@@ -208,8 +226,9 @@ async function loadFiles(openPath) {
     });
 
     node.files.sort().forEach(f => {
-      if (f.split('/').pop() === 'GUIDE.md') return;
-      const name = f.split('/').pop().replace(/\.md$/, '');
+      const base = f.split('/').pop();
+      if (base === 'GUIDE.md' || base === 'SKILL.md') return;
+      const name = base.replace(/\.md$/, '');
       const a = document.createElement('a');
       a.textContent = name;
       a.href = '#';
