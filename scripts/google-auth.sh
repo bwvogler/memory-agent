@@ -165,7 +165,13 @@ trap 'rm -rf "$WORK"' EXIT
 log "working in $WORK (deleted on exit)"
 
 emit() {  # emit VAR FILE
-  printf '%s=%s' "$1" "$(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$2")"
+  # The printed `fly secrets set` line wraps VAR=VALUE in single quotes, which
+  # bash passes through literally with no escaping - so the raw file content
+  # IS what belongs after `=`. json.dumps()-ing it here was double-encoding:
+  # the secret ended up holding a JSON string literal (its own file content
+  # escaped and re-quoted) instead of the file content itself, and every
+  # server reading it back failed with "Invalid credentials file format."
+  printf '%s=%s' "$1" "$(cat "$2")"
 }
 
 SECRETS=()
@@ -182,9 +188,17 @@ fi
 
 if [ "$DO_GMAIL" = 1 ]; then
   log "--- Gmail: consent as the SAME household account, scopes $GMAIL_SCOPES ---"
+  # gmail-mcp's OAuth callback hardcodes localhost:3000 unless a positional
+  # http(s):// argv entry overrides it (any arg starting with http(s):// -
+  # see parseCallbackArg in the package). 3000 is a common dev-server port,
+  # so a laptop with something else already listening there fails auth with
+  # no way around it short of this override. A Desktop-app OAuth client
+  # accepts any localhost port for its loopback redirect, so this needs no
+  # change on Google's side - 3501 just avoids calendar's own 3500 above.
   GMAIL_OAUTH_PATH="$KEYS" \
   GMAIL_CREDENTIALS_PATH="$WORK/gmail-credentials.json" \
-    npx -y "@klodr/gmail-mcp@${GM_VERSION}" auth "--scopes=${GMAIL_SCOPES}"
+    npx -y "@klodr/gmail-mcp@${GM_VERSION}" auth "--scopes=${GMAIL_SCOPES}" \
+      "http://localhost:3501/oauth2callback"
   [ -s "$WORK/gmail-credentials.json" ] || die "gmail auth produced no token file"
   SECRETS+=("$(emit MCP_GMAIL_TOKEN "$WORK/gmail-credentials.json")")
 fi
