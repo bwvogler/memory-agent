@@ -18,3 +18,11 @@ pytest>=8.0.0
 # .pre-commit-config.yaml and .github/workflows/ci.yml in the same commit.
 ruff==0.15.18
 ty==0.0.71
+
+# Headless browser driver for the `browser-test` skill
+# (.claude/skills/browser-test) - verifying frontend/JS behavior that no
+# Python-only test tier can see, since none of them execute the served
+# JavaScript. Pinned for the same reason as ruff/ty: each release bundles a
+# specific Chromium build, so an unpinned bump could silently change what
+# actually runs. After bumping, re-run `playwright install chromium`.
+playwright==1.62.0
