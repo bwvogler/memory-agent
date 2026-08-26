@@ -120,6 +120,7 @@ function scroll() {
 // specific path to be selected once the tree finishes loading.
 
 let knownKbFiles = new Set(); // populated by loadFiles, read by linkifyKbPaths
+let dirNodes = new Map(); // dirPath -> {children, toggle}, populated by loadFiles, read by expandAncestors
 
 async function loadFiles(openPath) {
   navFileList.innerHTML = '<div class="empty">Loading…</div>';
@@ -136,6 +137,7 @@ async function loadFiles(openPath) {
     return;
   }
   knownKbFiles = new Set(files);
+  dirNodes = new Map();
   if (!files.length) { navFileList.innerHTML = '<div class="empty">Empty.</div>'; return; }
 
   // Build a recursive tree: { dirs: {name: node}, files: [path] }
@@ -186,41 +188,35 @@ async function loadFiles(openPath) {
       const guidePath = dirPath + '/GUIDE.md';
       const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
 
-      if (depth === 0) {
-        // Top-level dirs are section headers, not collapsible
-        const section = document.createElement('div');
-        section.className = 'section-header';
-        section.textContent = name;
-        if (openPath) section.dataset.path = openPath;
-        section.onclick = () => { if (openPath) openKbFile(openPath); };
-        container.appendChild(section);
-        renderNode(child, container, depth + 1);
-      } else {
-        const header = document.createElement('div');
-        header.className = 'dir-header';
-        header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
-        if (openPath) header.dataset.path = openPath;
-        const toggle = document.createElement('span');
-        toggle.className = 'dir-toggle';
-        toggle.textContent = '▾';
-        const label = document.createElement('span');
-        label.textContent = name;
-        header.appendChild(toggle);
-        header.appendChild(label);
+      // Every directory, top-level sections included, is a collapsible
+      // header that starts collapsed - expandAncestors() opens the path to
+      // whichever file ends up active instead.
+      const header = document.createElement('div');
+      header.className = depth === 0 ? 'section-header' : 'dir-header';
+      if (depth > 0) header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
+      if (openPath) header.dataset.path = openPath;
+      const toggle = document.createElement('span');
+      toggle.className = 'dir-toggle collapsed';
+      toggle.textContent = '▾';
+      const label = document.createElement('span');
+      label.textContent = name;
+      header.appendChild(toggle);
+      header.appendChild(label);
 
-        const children = document.createElement('div');
-        children.className = 'dir-children';
+      const children = document.createElement('div');
+      children.className = 'dir-children collapsed';
 
-        header.onclick = () => {
-          const collapsed = children.classList.toggle('collapsed');
-          toggle.classList.toggle('collapsed', collapsed);
-          if (openPath) openKbFile(openPath);
-        };
+      header.onclick = () => {
+        const collapsed = children.classList.toggle('collapsed');
+        toggle.classList.toggle('collapsed', collapsed);
+        if (openPath) openKbFile(openPath);
+      };
 
-        container.appendChild(header);
-        renderNode(child, children, depth + 1);
-        container.appendChild(children);
-      }
+      dirNodes.set(dirPath, { children, toggle });
+
+      container.appendChild(header);
+      renderNode(child, children, depth + 1);
+      container.appendChild(children);
     });
 
     node.files.sort().forEach(f => {
@@ -252,7 +248,22 @@ async function loadFiles(openPath) {
   openKbFile(target);
 }
 
+function expandAncestors(path) {
+  if (!path) return;
+  const parts = path.split('/');
+  let prefix = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    prefix = prefix ? prefix + '/' + parts[i] : parts[i];
+    const node = dirNodes.get(prefix);
+    if (node) {
+      node.children.classList.remove('collapsed');
+      node.toggle.classList.remove('collapsed');
+    }
+  }
+}
+
 function setActiveTreeLink(path) {
+  expandAncestors(path);
   document.querySelectorAll('nav a, nav .dir-header, nav .section-header, .nav-title').forEach(el =>
     el.classList.toggle('active', el.dataset.path === path));
 }

@@ -58,9 +58,11 @@ nav {
   font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
 .refresh:hover { color: var(--accent); background: var(--line); }
 nav .section-header {
+  display: flex; align-items: center; gap: 4px;
   padding: 3px 12px; font-size: 12px; font-weight: 600;
   text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
   margin-top: 14px; cursor: pointer; border-left: 2px solid transparent;
+  user-select: none;
 }
 nav .section-header:first-child { margin-top: 4px; }
 nav .section-header:hover { color: var(--accent); }
