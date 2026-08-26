@@ -56,14 +56,25 @@ unchanged, which is what let every existing caller of `Turn` — signals,
 guards, interact, `mcp_server._text` — stay untouched. Only the browser path
 (`app/main.py`) ever sets it.
 
-`app/main.py` replaces `POST /api/turns`, `GET /api/turns/{id}`, and
-`GET /api/turns/{id}/events` outright with `GET`/`POST /api/conversations`,
-`PATCH /api/conversations/{id}`, `GET /api/conversations/{id}/events`
-(replays from `Last-Event-ID`, where `0` now means "the whole conversation,"
-falling back to Postgres for anything older than the in-memory tail), and
-`POST /api/conversations/{id}/messages`. Removed rather than kept as compat
-shims: this shipped as one pass, not a staged rollout, so there was no
-in-flight client to keep working against the old routes.
+`app/main.py` replaces `POST /api/turns` and `GET /api/turns/{id}/events`
+outright with `GET`/`POST /api/conversations`, `PATCH /api/conversations/{id}`,
+`GET /api/conversations/{id}/events` (replays from `Last-Event-ID`, where `0`
+now means "the whole conversation," falling back to Postgres for anything
+older than the in-memory tail), and `POST /api/conversations/{id}/messages`.
+Not kept as compat shims: this shipped as one pass, not a staged rollout, and
+the browser was the only caller of either.
+
+**`GET /api/turns/{id}` is the one route this kept, and that was a real
+correction, not the original plan.** The first cut of this removed it too, on
+the assumption that streaming had made polling obsolete - true for the
+browser, and wrong for `tests/test_live_turn.py`, which polls a turn in a loop
+specifically to avoid holding an SSE connection open through a multi-minute
+live model call. `GET /api/turns/{id}` returns `{**turn.summary(), "events":
+[...]}`, unchanged in shape; for a conversation turn, `events` is now filtered
+out of the conversation's own buffer by `turn_id` rather than read from
+`turn.events`, which stays empty once a turn has a `conversation_id` (see
+`turns.Turn.append`). Caught by `pytest --container` actually failing, not by
+review - the exact reason this repo keeps that tier at all.
 
 **Turn-taking by injection, not a second lock.** `_stream_prompt` becomes
 `agent._input_stream`: for a conversation turn it stays open after its first
@@ -191,3 +202,11 @@ showed blank. `main.py`'s "one turn at a time, instance-wide" 409 was also
 observed firing correctly and legibly across two unrelated test runs that
 raced each other by accident, which is closer to a live demonstration of the
 rule than a synthetic test would have been.
+
+`pytest --container` was not run before the first push of this change, only
+the fast tier and the live Playwright session above - both real gaps in the
+check performed, not in the tier itself. It caught two things neither of the
+others could have: `tests/test_container.py` posting straight to the removed
+`POST /api/turns`, and `tests/test_live_turn.py` depending on `GET
+/api/turns/{id}` as a polling client, which is what turned "removed outright"
+back into "kept, deliberately, as the one exception" above.

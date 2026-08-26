@@ -471,8 +471,11 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
     before = app_exec("ls", "/mnt/kb/memory").stdout
 
     wait_until_idle(stack)
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
     response = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={
             "message": "what is in this file?",
             "files": [{"name": "deck.csv", "data": body}],
@@ -507,9 +510,12 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
 def test_an_oversized_attachment_is_refused_before_a_turn_starts(stack):
     """413 from the real route, with no turn left behind streaming forever."""
     oversized = base64.b64encode(b"x" * (11 * 1024 * 1024)).decode()
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
 
     response = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={"message": "too big", "files": [{"name": "huge.bin", "data": oversized}]},
         timeout=60,
     )
@@ -556,18 +562,50 @@ def test_a_second_turn_is_refused_by_the_real_stack(stack):
     What it protects is the revert button. Savepoints are a `git add -A` over
     one shared workspace, so overlapping turns sweep each other's half-written
     files into the wrong savepoint and reverting either rolls back both.
+
+    A message for the SAME conversation is deliberately not this case any
+    more - see docs/decisions/0017's turn-taking-by-injection. Only a
+    DIFFERENT conversation's message still hits the refusal, which is what
+    this test now has to construct to keep exercising it.
     """
     wait_until_idle(stack)
-    first = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
-    assert first.status_code == 202, first.text
+    conv_a = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
+    conv_b = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
 
-    second = httpx.post(
-        f"{stack}/api/turns", json={"message": "also hello"}, timeout=30
+    first = httpx.post(
+        f"{stack}/api/conversations/{conv_a}/messages",
+        json={"message": "hello"},
+        timeout=30,
     )
+    assert first.status_code == 202, first.text
+    turn_id = first.json()["turn_id"]
 
+    # A different conversation still refuses outright.
+    second = httpx.post(
+        f"{stack}/api/conversations/{conv_b}/messages",
+        json={"message": "also hello"},
+        timeout=30,
+    )
     assert second.status_code == 409, second.text
     # The UI renders `detail` verbatim, so it has to explain itself.
     assert "already running" in second.json()["detail"]
+
+    # The SAME conversation, in contrast, is injected into the running turn
+    # rather than refused - the whole point of docs/decisions/0017.
+    injected = httpx.post(
+        f"{stack}/api/conversations/{conv_a}/messages",
+        json={"message": "and one more thing"},
+        timeout=30,
+    )
+    assert injected.status_code == 202, injected.text
+    payload = injected.json()
+    assert payload["turn_id"] == turn_id, payload
+    assert payload["injected"] is True, payload
+    assert isinstance(payload["seq"], int) and payload["seq"] > 0, payload
 
     # And the refusal is temporary, not a wedge: the gate reopens on its own.
     wait_until_idle(stack)
@@ -597,7 +635,14 @@ def test_the_answer_and_permission_routes_reject_what_they_should(stack):
     # A real turn, so the 409 path is reached rather than the 404 one. The turn
     # fails immediately on the placeholder API key, which is all this needs.
     wait_until_idle(stack)
-    started = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
+    started = httpx.post(
+        f"{stack}/api/conversations/{conversation_id}/messages",
+        json={"message": "hello"},
+        timeout=30,
+    )
     assert started.status_code == 202, started.text
     turn_id = started.json()["turn_id"]
 

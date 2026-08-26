@@ -502,6 +502,40 @@ async def post_message(
     return JSONResponse({"turn_id": turn.id, "injected": False}, status_code=202)
 
 
+@app.get("/api/turns/{turn_id}")
+async def get_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:  # noqa: ARG001
+    """Polling fallback, for a caller that would rather not hold an SSE
+    connection open - the `--live` test tier in particular, which polls this
+    in a loop instead of consuming a stream. No ownership check, matching
+    every other turn route now - see docs/decisions/0017.
+
+    For a conversation turn, `events` is filtered out of the conversation's
+    own buffer by `turn_id`; `turn.events` itself stays empty in that case
+    (see turns.Turn.append), so reading it directly here would silently
+    under-report.
+    """
+    turn = registry.get(turn_id)
+    if not turn:
+        raise HTTPException(404, "no such turn")
+    if turn.conversation_id is not None:
+        conv = conversations.get(turn.conversation_id)
+        events = (
+            [
+                {"seq": e.seq, "kind": e.kind, "data": e.data}
+                for e in conv.events
+                if e.turn_id == turn_id
+            ]
+            if conv is not None
+            else []
+        )
+    else:
+        events = [{"seq": e.seq, "kind": e.kind, "data": e.data} for e in turn.events]
+    # summary()'s event_count reads turn.events directly, which is empty for
+    # a conversation turn (see turns.Turn.append) - overridden here so it
+    # does not silently under-report against the `events` list above.
+    return {**turn.summary(), "event_count": len(events), "events": events}
+
+
 @app.post("/api/turns/{turn_id}/stop")
 async def stop_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:  # noqa: ARG001
     """Cancel a running turn. See agent._run_turn's CancelledError handling.

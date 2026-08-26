@@ -494,9 +494,15 @@ one (`Turn.conversation_id`, set only by the browser path; reflection and
 /api/conversations/{id}/events` replays the WHOLE conversation from seq 0 on
 a fresh `EventSource`, not just whatever turn happened to be running, which
 is what `docs/decisions/0016` flagged as "not a general transcript-durability
-fix." `POST /api/turns`, `GET /api/turns/{id}`, and
-`GET /api/turns/{id}/events` are gone, replaced by
-`GET`/`POST /api/conversations` and `POST /api/conversations/{id}/messages`.
+fix." `POST /api/turns` and `GET /api/turns/{id}/events` are gone, replaced
+by `GET`/`POST /api/conversations` and `POST /api/conversations/{id}/messages`.
+`GET /api/turns/{id}` is kept, deliberately: it is a polling fallback the
+`--live` test tier actually depends on (it polls a turn in a loop rather than
+holding an SSE connection open through a multi-minute model call), which
+`pytest --container` caught missing after the first cut removed it too. For a
+conversation turn its `events` are filtered out of the conversation's own
+buffer by `turn_id`, since `turn.events` itself stays empty once a turn has a
+`conversation_id`.
 
 Ownership checks on `/revert`, `/answer` and `/permission` are dropped, not
 narrowed: any allowlisted household member can watch, answer, or revert any
