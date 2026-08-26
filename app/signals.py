@@ -59,6 +59,10 @@ OUTCOME_OK = "ok"
 OUTCOME_ERROR = "error"
 OUTCOME_MAX_TURNS = "max_turns"
 OUTCOME_REVERTED = "reverted"
+# A person pressing Stop is not a deployment defect - the same reasoning as
+# human_denials below, applied to a whole turn rather than one tool call. See
+# docs/decisions/0017 and app/agent.py's CancelledError handling.
+OUTCOME_STOPPED = "stopped"
 
 
 class TurnOutcomeStore(Protocol):
@@ -171,6 +175,12 @@ def observe_message(turn: Turn, message: object) -> None:
 
 
 def _outcome(turn: Turn) -> str:
+    # Checked first, regardless of `state`: a stopped turn finishes as DONE
+    # (it reads as "done", not "failed", in the UI - the person meant to end
+    # it), but must not be filed as OUTCOME_OK either, since neither of the
+    # blocks below would file anything for it and that silence is correct.
+    if turn.terminal_reason == OUTCOME_STOPPED:
+        return OUTCOME_STOPPED
     if turn.state is TurnState.ERROR:
         return OUTCOME_ERROR
     if turn.terminal_reason == OUTCOME_MAX_TURNS:
@@ -394,21 +404,33 @@ async def note_rejected_proposals(turn: Turn, user_slug: str) -> None:
     )
 
 
-async def on_revert(turn: Turn, user_slug: str, diff_stat: str) -> str | None:
+async def on_revert(
+    turn: Turn, user_slug: str, diff_stat: str, reverted_by: str | None = None
+) -> str | None:
     """Record a Revert click. The highest-value signal in the system.
 
     `diff_stat` must be captured BEFORE the undo runs - afterwards the working
     tree matches the savepoint and there is nothing left to describe.
+
+    `reverted_by` is who clicked the button, which is not necessarily who
+    prompted the turn now that a conversation is household-shared - either
+    person can revert either turn. See docs/decisions/0017.
     """
     try:
         if _store:
             await _store.mark_turn_outcome(turn.id, OUTCOME_REVERTED)
 
+        by_line = (
+            f"Reverted by: {reverted_by}\n"
+            if reverted_by and reverted_by != turn.actor_email
+            else ""
+        )
         body = (
             "The human clicked Revert on this turn - an explicit, precisely "
             "scoped 'that was wrong', bound to an exact turn.\n\n"
             f"Turn: {turn.id}\n"
             f"Savepoint: {turn.savepoint}\n"
+            f"{by_line}"
             f"Skills that turn used: {_skill_list(turn)}\n\n"
             f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
             "Knowledge-base changes that were rolled back:\n```\n"

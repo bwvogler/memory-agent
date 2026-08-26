@@ -20,6 +20,8 @@ import time
 import httpx
 import pytest
 
+from app import interact
+
 from .conftest import REPO_ROOT, USER_SLUG, app_exec, bd, bd_json
 
 pytestmark = pytest.mark.container
@@ -98,6 +100,32 @@ def test_stack_is_healthy_and_the_kb_is_mounted(stack):
         "TigerFS mounted but the workspace is unusable - check the Postgres "
         "version provides uuidv7()"
     )
+
+
+def test_the_merged_page_and_its_split_assets_are_in_the_image(stack):
+    """The only tier that can catch a missing COPY.
+
+    `docker-compose.override.yml` bind-mounts ./static over the image's copy
+    for local dev, so a file that never made it into the image is invisible
+    there by construction - and `tests/conftest.py` passes an explicit -f list
+    precisely so this tier does not load that override and exercises what the
+    image actually contains.
+    """
+    page = httpx.get(f"{stack}/", timeout=10)
+    assert page.status_code == 200
+    assert "/static/app.js" in page.text
+    assert "/static/app.css" in page.text
+    assert "/static/vendor/marked.min.js" in page.text
+
+    assert httpx.get(f"{stack}/static/app.js", timeout=10).status_code == 200
+    assert httpx.get(f"{stack}/static/app.css", timeout=10).status_code == 200
+    vendor = httpx.get(f"{stack}/static/vendor/marked.min.js", timeout=10)
+    assert vendor.status_code == 200
+
+    # /kb and /kb/{path} serve the same merged document rather than a
+    # separate page or a redirect, so a copied deep link is the link you land on.
+    assert httpx.get(f"{stack}/kb", timeout=10).status_code == 200
+    assert httpx.get(f"{stack}/kb/recipes/pasta.md", timeout=10).status_code == 200
 
 
 def test_healthz_reports_the_outbound_mcp_catalog(stack):
@@ -236,6 +264,42 @@ def test_backlog_page_is_exported_into_the_kb(beads):
         f"{beads}/api/kb/file", params={"path": "backlog.md"}, timeout=10
     ).json()["content"]
     assert body.startswith("# Backlog")
+
+
+PROBE_WRITE_SCRIPT = """
+from pathlib import Path
+p = Path('/mnt/kb/memory/container-probe')
+p.mkdir(parents=True, exist_ok=True)
+(p / 'target-check.md').write_text('# probe\\n')
+"""
+
+
+def test_the_path_the_ui_would_open_is_the_path_the_api_accepts(stack):
+    """Gates `interact.describe_tool_target` against a real TigerFS table.
+
+    Everything else about the three-pane UI's "follow the agent's write"
+    feature is unit-tested against an assumption: that /api/kb/files and
+    /api/kb/file are rooted at $KB_MOUNT/memory, not $KB_MOUNT. That is only
+    provable against a real mount - `export_backlog` writes 'backlog.md', not
+    'memory/backlog.md', which is the evidence, but this pins the actual
+    contract so a future change to the recursive CTE's root cannot silently
+    reintroduce a 404 on every file the agent writes. Starts no turn.
+    """
+    app_exec("python", "-c", PROBE_WRITE_SCRIPT)
+
+    files = httpx.get(f"{stack}/api/kb/files", timeout=10).json()["files"]
+    expected_path = "container-probe/target-check.md"
+    assert expected_path in files
+
+    content = httpx.get(
+        f"{stack}/api/kb/file", params={"path": expected_path}, timeout=10
+    ).json()["content"]
+    assert content == "# probe\n"
+
+    target = interact.describe_tool_target(
+        "Write", {"file_path": f"/mnt/kb/memory/{expected_path}"}
+    )
+    assert target == {"kind": "kb", "path": expected_path}
 
 
 APPEND_PROBE = """
@@ -407,8 +471,11 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
     before = app_exec("ls", "/mnt/kb/memory").stdout
 
     wait_until_idle(stack)
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
     response = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={
             "message": "what is in this file?",
             "files": [{"name": "deck.csv", "data": body}],
@@ -420,6 +487,14 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
 
     staged = f"/work/{USER_SLUG}/uploads/{turn_id}/deck.csv"
     assert app_exec("cat", staged).stdout.startswith("Card,Category")
+
+    # The centre pane's other way of reaching this file: the HTTP route, not
+    # `docker exec`. Proves the read-only path (`upload_path_for_read`) agrees
+    # with the write path on where the file actually landed.
+    readback = httpx.get(f"{stack}/api/uploads/{turn_id}/deck.csv", timeout=10)
+    assert readback.status_code == 200
+    assert readback.text.startswith("Card,Category")
+    assert readback.headers["content-disposition"].startswith("inline;")
 
     # Nothing new in the workspace, and the file is nowhere under it. Scoped to
     # the workspace and NOT to /mnt/kb: the mount root exposes TigerFS's own
@@ -435,9 +510,12 @@ def test_an_attachment_lands_in_scratch_and_never_in_the_kb(stack):
 def test_an_oversized_attachment_is_refused_before_a_turn_starts(stack):
     """413 from the real route, with no turn left behind streaming forever."""
     oversized = base64.b64encode(b"x" * (11 * 1024 * 1024)).decode()
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
 
     response = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={"message": "too big", "files": [{"name": "huge.bin", "data": oversized}]},
         timeout=60,
     )
@@ -484,18 +562,50 @@ def test_a_second_turn_is_refused_by_the_real_stack(stack):
     What it protects is the revert button. Savepoints are a `git add -A` over
     one shared workspace, so overlapping turns sweep each other's half-written
     files into the wrong savepoint and reverting either rolls back both.
+
+    A message for the SAME conversation is deliberately not this case any
+    more - see docs/decisions/0017's turn-taking-by-injection. Only a
+    DIFFERENT conversation's message still hits the refusal, which is what
+    this test now has to construct to keep exercising it.
     """
     wait_until_idle(stack)
-    first = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
-    assert first.status_code == 202, first.text
+    conv_a = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
+    conv_b = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
 
-    second = httpx.post(
-        f"{stack}/api/turns", json={"message": "also hello"}, timeout=30
+    first = httpx.post(
+        f"{stack}/api/conversations/{conv_a}/messages",
+        json={"message": "hello"},
+        timeout=30,
     )
+    assert first.status_code == 202, first.text
+    turn_id = first.json()["turn_id"]
 
+    # A different conversation still refuses outright.
+    second = httpx.post(
+        f"{stack}/api/conversations/{conv_b}/messages",
+        json={"message": "also hello"},
+        timeout=30,
+    )
     assert second.status_code == 409, second.text
     # The UI renders `detail` verbatim, so it has to explain itself.
     assert "already running" in second.json()["detail"]
+
+    # The SAME conversation, in contrast, is injected into the running turn
+    # rather than refused - the whole point of docs/decisions/0017.
+    injected = httpx.post(
+        f"{stack}/api/conversations/{conv_a}/messages",
+        json={"message": "and one more thing"},
+        timeout=30,
+    )
+    assert injected.status_code == 202, injected.text
+    payload = injected.json()
+    assert payload["turn_id"] == turn_id, payload
+    assert payload["injected"] is True, payload
+    assert isinstance(payload["seq"], int) and payload["seq"] > 0, payload
 
     # And the refusal is temporary, not a wedge: the gate reopens on its own.
     wait_until_idle(stack)
@@ -525,7 +635,14 @@ def test_the_answer_and_permission_routes_reject_what_they_should(stack):
     # A real turn, so the 409 path is reached rather than the 404 one. The turn
     # fails immediately on the placeholder API key, which is all this needs.
     wait_until_idle(stack)
-    started = httpx.post(f"{stack}/api/turns", json={"message": "hello"}, timeout=30)
+    conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
+    started = httpx.post(
+        f"{stack}/api/conversations/{conversation_id}/messages",
+        json={"message": "hello"},
+        timeout=30,
+    )
     assert started.status_code == 202, started.text
     turn_id = started.json()["turn_id"]
 

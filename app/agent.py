@@ -57,6 +57,7 @@ from claude_agent_sdk.types import (
     AssistantMessage,
     HookEvent,
     HookMatcher,
+    ResultMessage,
     ServerToolUseBlock,
     StreamEvent,
     SystemMessage,
@@ -66,7 +67,9 @@ from claude_agent_sdk.types import (
 )
 
 from . import evolve, guards, interact, kb, mcp_catalog, signals
+from .auth import display_name_for
 from .config import config
+from .conversations import conversations
 from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
 log = logging.getLogger(__name__)
@@ -193,9 +196,9 @@ def _write_and_read_back(path: Path, payload: bytes) -> bytes:
 
 
 def seed_bootstrap() -> None:
-    """Copy bootstrap skill files into the KB workspace.
+    """Copy bootstrap skill and wiki files into the KB workspace.
 
-    These skills live in the KB so the human can improve them, which means we
+    These files live in the KB so the human can improve them, which means we
     cannot simply overwrite on upgrade. But never overwriting is worse: a
     shipped fix would silently never reach any existing deployment, and the
     seeder would look like it worked.
@@ -222,21 +225,30 @@ def seed_bootstrap() -> None:
     """
     if not kb.is_mounted():
         return
-    skills_src = BOOTSTRAP_DIR / "skills"
-    if not skills_src.is_dir():
+    _seed_tree(BOOTSTRAP_DIR / "skills", kb.workspace_root() / "skills")
+    _seed_tree(BOOTSTRAP_DIR / "wiki", kb.workspace_root() / "wiki")
+
+
+def _seed_tree(src_dir: Path, dst_dir: Path) -> None:
+    """Hash-tracked copy of one bootstrap tree into the KB workspace.
+
+    See seed_bootstrap's docstring for why this is hash-tracked rather than
+    write-once (skills) or always-overwrite: files here are meant to be
+    human-editable, and a naive overwrite would clobber that on every deploy.
+    """
+    if not src_dir.is_dir():
         return
 
-    skills_dst = kb.workspace_root() / "skills"
-    state_path = skills_dst / SEED_STATE_FILE
+    state_path = dst_dir / SEED_STATE_FILE
     shipped = _read_seed_state(state_path)
     updated: dict[str, SeedEntry] = {}
 
-    for src_file in sorted(skills_src.rglob("*")):
+    for src_file in sorted(src_dir.rglob("*")):
         if not src_file.is_file():
             continue
-        rel = src_file.relative_to(skills_src)
+        rel = src_file.relative_to(src_dir)
         key = rel.as_posix()
-        dst_file = skills_dst / rel
+        dst_file = dst_dir / rel
         payload = src_file.read_bytes()
         source_hash = _digest(payload)
         entry = shipped.get(key)
@@ -247,7 +259,7 @@ def seed_bootstrap() -> None:
 
                 if entry is None:
                     log.warning(
-                        "skill %s predates seed tracking; leaving it alone. "
+                        "%s predates seed tracking; leaving it alone. "
                         "Delete it to take the shipped version.",
                         dst_file,
                     )
@@ -268,7 +280,7 @@ def seed_bootstrap() -> None:
                         updated[key] = {"source": source_hash, "stored": current_hash}
                     else:
                         log.warning(
-                            "skill %s has legacy seed state and differs from "
+                            "%s has legacy seed state and differs from "
                             "the shipped version; leaving it alone. Delete it "
                             "to take the new one.",
                             dst_file,
@@ -278,7 +290,7 @@ def seed_bootstrap() -> None:
 
                 if current_hash != entry.get("stored"):
                     log.warning(
-                        "skill %s has local edits; not overwriting with the "
+                        "%s has local edits; not overwriting with the "
                         "shipped version. Previous content stays in TigerFS "
                         "history if you want to compare.",
                         dst_file,
@@ -296,7 +308,7 @@ def seed_bootstrap() -> None:
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             stored = _write_and_read_back(dst_file, payload)
             updated[key] = {"source": source_hash, "stored": _digest(stored)}
-            log.info("seeded bootstrap skill file %s", dst_file)
+            log.info("seeded bootstrap file %s", dst_file)
         except OSError as exc:
             log.warning("could not seed %s: %s", dst_file, exc)
             updated.pop(key, None)
@@ -454,7 +466,23 @@ def _named_agents() -> dict[str, AgentDefinition]:
     }
 
 
-def _system_prompt_append(bd_context: str = "") -> str:
+_SHARED_CONVERSATION = """\
+--- This is a shared household conversation ---
+
+More than one person may take part in this conversation, taking turns. Each
+message you receive is prefixed with the speaker's name (e.g. "Brian: ..."),
+and a mid-turn follow-up may come from someone other than whoever sent the
+first message. Do not assume "you" always means the same person:
+
+* Address people by name when it is not obvious who you are replying to.
+* Never silently resolve an ambiguous "you" or "I" - ask which person a
+  pronoun refers to if it changes what you write.
+* When you write a preference or a fact to the wiki, attribute it to the
+  person who actually said it, not to whoever started the conversation.
+"""
+
+
+def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
     guide = _read_guide()
     memory = _read_memory()
     parts = [
@@ -470,6 +498,8 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Note that some control paths are path-accessible but deliberately "
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
+        "The only files allowed at the workspace root are `AGENT_GUIDE.md` and "
+        "`backlog.md`; everything else belongs under `wiki/` or `skills/`.",
         # Kept deliberately short. Appends are refused structurally by the
         # PreToolUse hook in app/guards.py, whose denial message explains the
         # safe pattern at the moment it is needed. An earlier version spelled
@@ -484,6 +514,8 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Never fall back to shell redirection to work around it.",
     ]
     parts.append(_ASKING)
+    if shared:
+        parts.append(_SHARED_CONVERSATION)
     # Only when a service is actually live. Returns "" otherwise rather than a
     # paragraph explaining an absence.
     services = mcp_catalog.summaries()
@@ -539,7 +571,9 @@ def _options(
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_prompt_append(bd_context),
+            "append": _system_prompt_append(
+                bd_context, shared=turn is not None and turn.conversation_id is not None
+            ),
         },
         # Still acceptEdits, so writing the wiki never prompts - that is the
         # product. What changed is that a tool this does NOT cover used to be
@@ -745,15 +779,21 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
         await signals.record_turn(turn, user_slug)
 
 
-async def _stream_prompt(text: str, images: list[dict] | None = None):
-    """Yield the turn's single user message, in the SDK's streaming-input form.
+def _speaker_prefix(actor_email: str | None) -> str:
+    """ "Brian: " for an attributed message, "" for a system/reflection turn.
 
-    Every turn goes through this, images or not. A plain string prompt is the
-    simpler call, but `can_use_tool` is only honoured in streaming mode - the SDK
-    raises ValueError on a string - and a permission prompt nobody can answer is
-    the whole thing this replaced. Still unidirectional: one message, then the
-    generator closes.
+    Baked into the message TEXT rather than a separate content block, so it
+    survives into the CLI's own on-disk transcript - which is what makes
+    attribution durable across a `resume=` in a later session. See
+    docs/decisions/0017.
     """
+    return f"{display_name_for(actor_email)}: " if actor_email else ""
+
+
+def _content_message(
+    text: str, images: list[dict] | None, actor_email: str | None
+) -> dict:
+    """One user message in the SDK's streaming-input form."""
     content: list[dict] = [
         {
             "type": "image",
@@ -766,8 +806,9 @@ async def _stream_prompt(text: str, images: list[dict] | None = None):
         for img in images or []
     ]
     if text:
-        content.append({"type": "text", "text": text})
-    yield {
+        prefixed = f"{_speaker_prefix(actor_email)}{text}"
+        content.append({"type": "text", "text": prefixed})
+    return {
         "type": "user",
         "message": {"role": "user", "content": content},
         "parent_tool_use_id": None,
@@ -775,7 +816,34 @@ async def _stream_prompt(text: str, images: list[dict] | None = None):
     }
 
 
-def _attachment_note(files: list[Path]) -> str:
+async def _input_stream(turn: Turn, text: str, images: list[dict] | None = None):
+    """Yield the turn's user message(s), in the SDK's streaming-input form.
+
+    Every turn goes through this. For a reflection/mcp turn (`turn.inbox` is
+    None) it behaves exactly as the old `_stream_prompt` did: one message,
+    then the generator closes - a plain string prompt is not an option
+    because `can_use_tool` only works in streaming mode.
+
+    For a conversation turn, the generator stays open: `POST
+    /api/conversations/{id}/messages` in app/main.py pushes a follow-up onto
+    `turn.inbox` instead of starting a second turn while this one is still
+    running, and `_run_turn` closes it (pushes `None`) once a ResultMessage
+    arrives with nothing queued. This is what "turn-taking by injection"
+    means - see docs/decisions/0017. A whole-turn timeout wraps the caller,
+    so a household member who never replies cannot wedge this open forever.
+    """
+    yield _content_message(text, images, turn.actor_email)
+    if turn.inbox is None:
+        return
+    while True:
+        item = await turn.inbox.get()
+        if item is None:
+            return
+        next_text, next_images, next_actor = item
+        yield _content_message(next_text, next_images, next_actor)
+
+
+def _attachment_note(files: list[Path], actor_email: str | None = None) -> str:
     """Tell the agent where its attachments are, without inlining them.
 
     Paths rather than content: a document the agent has not decided to read
@@ -788,8 +856,9 @@ def _attachment_note(files: list[Path]) -> str:
     is to read it and write what it learned.
     """
     listed = "\n".join(f"- {path}" for path in files)
+    who = display_name_for(actor_email) if actor_email else "The user"
     return (
-        "The user attached the following files. They are on ordinary local "
+        f"{who} attached the following files. They are on ordinary local "
         "disk in your working directory, not in the knowledge base:\n"
         f"{listed}\n"
         "Read them with the Read tool. If a file is a format you cannot read "
@@ -857,17 +926,21 @@ async def _run_turn(
     savepoint = f"turn-{turn.id}"
     if await kb.create_savepoint(savepoint):
         turn.savepoint = savepoint
+        if turn.conversation_id:
+            await conversations.record_turn_savepoint(turn.id, savepoint)
+
+    if turn.conversation_id and turn.actor_email:
+        await conversations.record_turn_start(
+            turn.id, turn.conversation_id, turn.actor_email
+        )
 
     if files:
         # Prepended to the prompt itself rather than to the system prompt, so
         # the attachment is part of what a revert bead quotes. Reconstructing
         # "which file was this turn given?" from the volume afterwards is
         # exactly the archaeology the signal layer exists to avoid.
-        prompt = (
-            f"{_attachment_note(files)}\n\n{prompt}"
-            if prompt
-            else _attachment_note(files)
-        )
+        note = _attachment_note(files, turn.actor_email)
+        prompt = f"{note}\n\n{prompt}" if prompt else note
 
     # Kept for the signal layer: a revert files a bead quoting the prompt, and
     # by then run_turn is long gone.
@@ -879,26 +952,78 @@ async def _run_turn(
         bd_context = await kb.bd_prime(user_slug)
 
     try:
-        async for message in query(
-            prompt=_stream_prompt(prompt, images),
-            options=_options(user_slug, resume, bd_context, turn),
-        ):
-            for kind, data in _render(message):
-                turn.append(kind, data)
-            signals.observe_message(turn, message)
-            session_id = _extract_session_id(message)
-            if session_id and not turn.session_id:
-                turn.session_id = session_id
-                turn.append("session", session_id)
+        # A whole-turn backstop, independent of max_turns (which counts model
+        # turns, not wall-clock time). Without it a stuck turn is never
+        # evicted and blocks the whole household behind it - see img-r7o.
+        async with asyncio.timeout(config.turn_timeout_seconds):
+            async for message in query(
+                prompt=_input_stream(turn, prompt, images),
+                options=_options(user_slug, resume, bd_context, turn),
+            ):
+                for kind, data in _render(message):
+                    turn.append(kind, data)
+                signals.observe_message(turn, message)
+                session_id = _extract_session_id(message)
+                if session_id and not turn.session_id:
+                    turn.session_id = session_id
+                    turn.append("session", session_id)
+                    if turn.conversation_id:
+                        await conversations.record_session(
+                            turn.conversation_id, session_id
+                        )
+                # Nothing queued: close the input stream so the SDK ends the
+                # run cleanly. Something queued: leave it open - that is
+                # turn-taking by injection, see _input_stream.
+                if (
+                    isinstance(message, ResultMessage)
+                    and turn.inbox is not None
+                    and turn.inbox.empty()
+                ):
+                    turn.inbox.put_nowait(None)
         await kb.export_backlog(user_slug)
         turn.finish(TurnState.DONE)
+    except asyncio.CancelledError:
+        # POST /api/turns/{id}/stop. Finished as DONE, not ERROR - the person
+        # meant to end it, and the SDK's own transcript already holds
+        # whatever the turn got done, so a later resume sees it. Re-raised so
+        # the task the Registry is tracking actually observes the
+        # cancellation (never swallow CancelledError).
+        turn.terminal_reason = signals.OUTCOME_STOPPED
+        turn.append("status", "stopped")
+        turn.finish(TurnState.DONE)
+        raise
+    except TimeoutError:
+        log.warning(
+            "turn %s exceeded %.0fs and was abandoned",
+            turn.id,
+            config.turn_timeout_seconds,
+        )
+        turn.terminal_reason = "timeout"
+        turn.append("error", f"turn exceeded {config.turn_timeout_seconds:.0f}s")
+        turn.finish(TurnState.ERROR, error="turn timed out")
     except Exception as exc:  # surface everything to the client
         log.exception("turn %s failed", turn.id)
         turn.append("error", str(exc))
         turn.finish(TurnState.ERROR, error=str(exc))
     finally:
-        # After finish() on both paths: a turn that failed is precisely the one
-        # worth recording, and the client is no longer waiting on us.
+        if turn.conversation_id:
+            # A conversation is long-lived - unlike the old per-turn SSE
+            # stream, there is no single "the stream is done" frame, so a
+            # client watching the conversation needs an explicit, turn-scoped
+            # event to know THIS turn reached a terminal state. Appended
+            # before the flush below so it is covered by the same guarantee.
+            kind = "turn_done" if turn.state is TurnState.DONE else "turn_failed"
+            turn.append(
+                kind, interact.json_event(turn_id=turn.id, error=turn.error or "")
+            )
+            await conversations.record_turn_end(turn.id, turn.state.value)
+            # Awaited, not left to the background flusher: a client told this
+            # turn is done must be able to trust every event already landed
+            # in Postgres - see app/conversations.py's module docstring.
+            await conversations.flush_one(turn.conversation_id)
+        # After finish() on every path: a turn that failed or was stopped is
+        # precisely the one worth recording, and the client is no longer
+        # waiting on us.
         filed = await signals.record_turn(turn, user_slug)
 
     if filed:
@@ -1028,6 +1153,7 @@ def _render_stream(message: StreamEvent) -> list[tuple[str, str]]:
                     id=block.get("id") or "",
                     name=block.get("name") or "",
                     detail="",
+                    target={},
                     agent=agent or "",
                 ),
             )
@@ -1068,6 +1194,7 @@ def _render_tool_use(
                 id=block.id,
                 name=block.name,
                 detail=interact.describe_tool_input(block.name, tool_input),
+                target=interact.describe_tool_target(block.name, tool_input),
                 agent=agent or "",
             ),
         )

@@ -13,6 +13,22 @@ def _bool(name: str, *, default: bool = False) -> bool:
     return os.environ.get(name, "1" if default else "0").lower() in ("1", "true", "yes")
 
 
+def _name_map(name: str) -> dict[str, str]:
+    """Parse `email=Name,email=Name` into a lookup. Malformed entries are skipped."""
+    raw = os.environ.get(name, "")
+    out: dict[str, str] = {}
+    for raw_pair in raw.split(","):
+        pair = raw_pair.strip()
+        if "=" not in pair:
+            continue
+        email, _, display = pair.partition("=")
+        email = email.strip().lower()
+        display = display.strip()
+        if email and display:
+            out[email] = display
+    return out
+
+
 @dataclass(frozen=True)
 class Config:
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -48,6 +64,23 @@ class Config:
     dev_fake_email: str = os.environ.get("DEV_FAKE_EMAIL", "dev@localhost")
 
     max_turns: int = int(os.environ.get("MAX_TURNS", "30"))
+
+    # A whole-turn backstop, independent of max_turns (which counts model turns,
+    # not wall-clock time - a single slow tool call never trips it). Exists
+    # because a stuck turn is never evicted (see turns.Registry._evict) and
+    # blocks the whole household behind it until the process restarts. See
+    # img-r7o and docs/decisions/0017.
+    turn_timeout_seconds: float = float(os.environ.get("TURN_TIMEOUT_SECONDS", "900"))
+
+    # Display names for the household chat, since Cloudflare Access does not
+    # reliably carry a name claim. Reviewed config, same shape and same
+    # argument as MCP_CLIENT_IDS/MCP_IDENTITY_EMAIL (ADR 0014): a name is
+    # config, not KB content, because the prompt is built before any KB read.
+    # An email missing from this map falls back to its local part - see
+    # agent.display_name_for - never to blank.
+    household_names: dict[str, str] = field(
+        default_factory=lambda: _name_map("HOUSEHOLD_NAMES")
+    )
 
     # How long a turn waits for a human. The two differ because their timeouts
     # resolve in opposite directions: an unanswered *question* proceeds on the

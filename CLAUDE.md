@@ -19,6 +19,9 @@ the TigerFS workspace.
   about its own skills, enforced as a hook, plus the evolution log
 - `app/interact.py` — the round-trips to the human (a question tool, a
   permission callback) and the hooks that report tool results and subagents
+- `app/conversations.py` — the durable, household-shared event log a
+  household conversation streams from; `turns.Turn` still exists per turn but
+  no longer owns the stream once it belongs to one (`docs/decisions/0017`)
 - `app/mcp_server.py` — the four capabilities as MCP tools, for a machine caller
 - `app/mcp_catalog.py` — the opposite direction: outbound MCP servers the agent
   may connect to, defined in the image and credentialed from the environment
@@ -101,6 +104,18 @@ This is a refusal, not a queue: a queued turn hands the browser a turn id that
 streams nothing until the turn ahead finishes, which is the "it looked hung"
 failure this UI has already been fixed for once. The UI restores the composer
 on a 409 so a refusal never eats a typed message.
+
+That refusal is instance-wide, not conversation-wide, and stays that way —
+what changed with conversations (`docs/decisions/0017`) is what a caller does
+*before* reaching it. `POST /api/conversations/{id}/messages` checks whether
+the turn already running belongs to the SAME conversation; if so the message
+is injected into it (`turns.Turn.inbox`, `agent._input_stream`) instead of
+calling `begin()` a second time. A turn running for a *different*
+conversation still gets the refusal above, now naming who is busy instead of
+repeating the bare `BUSY` text. Injection is not a second exemption from "one
+turn at a time" — it is still exactly one turn, one savepoint — it is a
+second person's message joining the turn already in flight rather than
+starting a competing one.
 
 It also makes `run_turn` reaching a terminal state load-bearing. An unfinished
 turn is never evicted, so a turn that raised before `finish()` would wedge
@@ -450,22 +465,75 @@ explicitly one household rather than many tenants.
 
 Neither is implemented. Both are `**Status:** proposed`.
 
+**One page, three panes: tree, renderer, chat.** `/`, `/kb` and
+`/kb/{path:path}` now serve the same `static/index.html`; the old
+`static/kb.html` navigated away from the chat entirely, which lost the
+session, so a turn that said "I updated your recipes index" gave you no way
+to look without leaving. `/` is authenticated now that it *is* the wiki. The
+centre pane is driven by the tree, and separately pushed to by chat: a
+successful KB write auto-opens (`interact.describe_tool_target` adds a
+`target` to the `tool_use` payload, correlated against `tool_result`'s `ok`
+by tool id so a *failed* write never moves the pane), while an upload only
+opens on click — you already know what you attached, the agent's write is
+the thing that's news. `GET /api/uploads/{turn_id}/{name}` serves upload
+bytes back, ownership proved by path (the slug comes from `Identity`, never
+the URL) rather than by the in-process, evictable `Registry`. The renderer
+gained a sanitizer at the parser (`marked`'s `html` token is escaped, and any
+`href`/`src` outside `http(s):`/`mailto:` is dropped) because the centre pane
+now renders uploaded documents too, not just agent-written wiki pages — see
+docs/decisions/0016, including the reload-resume bug that first cut of this
+shipped with (`onerror` clearing the same localStorage marker a page reload
+needs intact) and the fix (clear only on an authoritative `done`/`failed`).
+
+**The conversation is the unit, not the turn.** `app/conversations.py`'s
+`Conversation` is a durable, household-shared, seq-numbered event log —
+`conversation_events`/`conversation_turns`/`conversations` in
+`session_store.SCHEMA` — that a `turns.Turn` streams into when it belongs to
+one (`Turn.conversation_id`, set only by the browser path; reflection and
+`/mcp` turns keep their old private per-turn buffer unchanged). `GET
+/api/conversations/{id}/events` replays the WHOLE conversation from seq 0 on
+a fresh `EventSource`, not just whatever turn happened to be running, which
+is what `docs/decisions/0016` flagged as "not a general transcript-durability
+fix." `POST /api/turns` and `GET /api/turns/{id}/events` are gone, replaced
+by `GET`/`POST /api/conversations` and `POST /api/conversations/{id}/messages`.
+`GET /api/turns/{id}` is kept, deliberately: it is a polling fallback the
+`--live` test tier actually depends on (it polls a turn in a loop rather than
+holding an SSE connection open through a multi-minute model call), which
+`pytest --container` caught missing after the first cut removed it too. For a
+conversation turn its `events` are filtered out of the conversation's own
+buffer by `turn_id`, since `turn.events` itself stays empty once a turn has a
+`conversation_id`.
+
+Ownership checks on `/revert`, `/answer` and `/permission` are dropped, not
+narrowed: any allowlisted household member can watch, answer, or revert any
+turn (`auth.verify()`'s allowlist is the real boundary, and always was). A
+message sent while a turn is already running for the SAME conversation is
+injected into it (`Turn.inbox`, `agent._input_stream`) rather than refused —
+see the amendment above and `docs/decisions/0017`. `POST
+/api/turns/{id}/stop` cancels the running task; `_run_turn` treats
+`CancelledError` as a clean stop, not a failure
+(`signals.OUTCOME_STOPPED`), and every turn is now also wrapped in
+`asyncio.timeout(config.turn_timeout_seconds)` — a backstop `img-r7o` asked
+for, independent of ever revisiting `ClaudeSDKClient.interrupt()`, which stays
+avoided for the reason that bead documents.
+
+Attribution matters once more than one person can speak in one conversation:
+`auth.display_name_for` (backed by a `HOUSEHOLD_NAMES` config map) is
+prefixed onto the message TEXT sent to the model — not a separate content
+block, so it survives into the CLI's own transcript across a `resume=` — and
+a system-prompt note tells the agent "you" is not guaranteed to mean the same
+person twice.
+
+Not done in this pass, each for a stated reason in `docs/decisions/0017`:
+presence/typing indicators, the `SessionStore` SDK-protocol rewrite that
+would close `img-2jj`, and the Phase-5 backlog (`@agent` addressing,
+auto-titling, search, KB provenance links, revert-to-a-message, a context
+budget warning).
+
 ## Local dev
 
-```sh
-cp .env.example .env   # fill in ANTHROPIC_API_KEY, KB_DATABASE_URL
-docker compose up
-```
-
-Chat: http://localhost:8080  
-Wiki: http://localhost:8080/kb
-
-`docker-compose.override.yml` bind-mounts `static/` over the copy in the image,
-so a CSS or JS change needs only a reload. Compose loads that file automatically
-for a bare `docker compose up` and **not** when a file list is passed with `-f`,
-which is how the container test tier invokes it (`tests/conftest.py`) — so the
-tier keeps exercising what the image actually contains. `app/` is not mounted, so
-a Python change still needs `docker compose up -d --build app`.
+See the `dev-checks` skill for the setup commands, the chat/wiki URLs, and the
+`static/` vs `app/` bind-mount nuance.
 
 **`docker compose down -v` destroys the local ledger.** The dev stack's `/work`
 is a named volume, so the bead graph, `kb.git` and every savepoint go with it.
@@ -475,17 +543,9 @@ not, so treat anything it holds as scratch.
 
 ## Tests
 
-```sh
-uv venv .venv
-uv pip install -r requirements-dev.txt --python .venv/bin/python
-
-.venv/bin/python -m pytest                 # fast units only (~1s)
-.venv/bin/python -m pytest --container     # + real Docker stack (~1 min, no API key)
-.venv/bin/python -m pytest --live          # + one real agent turn (spends tokens)
-```
-
-Both slow tiers are opt-in, so a bare `pytest` needs no Docker, database or API
-key. `--live` implies `--container`.
+See the `dev-checks` skill for setup and the exact tier commands. Both slow
+tiers (`--container`, `--live`) are opt-in — a bare `pytest` needs no Docker,
+database, or API key — and `--live` implies `--container`.
 
 **Only `--live` gets a real key, and `--container` is now forced onto a
 placeholder even when you have one.** That overwrite is deliberate. The smoke
@@ -518,11 +578,7 @@ separately assert that a real subagent's output never reached the reply.
 
 ## Linting and types
 
-```sh
-ruff check app tests          # lint
-ruff format app tests         # format
-ty check app tests            # types
-```
+See the `dev-checks` skill for the commands and where each pin lives.
 
 Config is in `pyproject.toml`, which exists for these two tools and nothing
 else — there is no `[project]` table, because the image pip-installs
@@ -543,12 +599,8 @@ a third place, because it reads the pins out of `requirements-dev.txt`.
 CI runs four jobs on every push: ruff, ty, the fast pytest tier, and
 `pytest --container`. The commit hook deliberately runs only the static checks —
 a commit hook that stands up Docker and Postgres gets bypassed with
-`--no-verify` until it may as well not be installed.
-
-```sh
-scripts/install-hooks.sh
-git config blame.ignoreRevsFile .git-blame-ignore-revs   # skip the format commit
-```
+`--no-verify` until it may as well not be installed. `dev-checks` has the
+`scripts/install-hooks.sh` and blame-ignore setup commands.
 
 **Why that is a script and not `pre-commit install`.** `bd` sets
 `core.hooksPath` to `.beads/hooks` for its own hooks, and `core.hooksPath`
@@ -609,15 +661,10 @@ overwritten.
 
 ## The work ledger
 
-```sh
-bd ready                     # what is workable now
-bd list --all                # everything, including closed
-scripts/beads-pull.sh        # collect new image beads from prod
-scripts/fly.sh bd list --all # look at prod without pulling
-```
-
 `bd ready` is the source of truth for what is open. This file deliberately keeps
-no snapshot of the backlog — a list here would be wrong within a week.
+no snapshot of the backlog — a list here would be wrong within a week. The
+`prod-ops` skill has the commands for reaching the deployed ledger, and `ship`
+has the ritual for closing a bead after its code lands.
 
 **With one exception, and it is upstream's: a blocking edge between the two
 prefixes does not block.** `bd dep add kb-x img-y` is accepted, stored, and
@@ -685,19 +732,10 @@ stopped it. **Never roll back a volume ledger while an image pinning the older
 binary can still take a turn** — the next turn undoes it and says nothing. Deploy
 first, always.
 
-**Getting what prod has filed.** `scripts/beads-pull.sh [user_slug]` needs
-`flyctl` (logged in), `jq` and `bd` on PATH, and wakes the suspended machine
-itself, so a slow first run is not a hang. Only `image`-labelled beads travel:
-beads about the KB's *content* stay on the volume, where the agent that filed
-them can also work them, and signal beads stay there as evidence.
-
-It is an upsert and safe to re-run. A bead arriving for the first time flips
-`deferred` → `open`; one already tracked has `status` dropped from the payload,
-so prod can go on saying `deferred` without reopening work closed here. It ends
-by running `bd export`, so a real pull shows up in `git status` — and that, not
-the output, is the thing to read. `bd import` reports `Imported N issues` for
-rows it re-applied unchanged, so a pull that brought nothing still announces a
-number. A clean `git diff .beads/issues.jsonl` means nothing arrived.
+**Getting what prod has filed.** Only `image`-labelled beads travel: beads
+about the KB's *content* stay on the volume, where the agent that filed them
+can also work them, and signal beads stay there as evidence. The `prod-ops`
+skill has the pull command and its upsert/stale-skip mechanics.
 
 **The two ledgers are expected to disagree, and the disagreement is safe.** A
 bead worked here drifts from its prod twin immediately — rescoped, retitled,
@@ -721,80 +759,26 @@ So: do not `--write` prod to reconcile a bead you are actively working. The
 divergence costs nothing and closes itself, because `docs/shipped-beads.jsonl`
 closes the prod copy by id and a closed bead's description no longer matters.
 
-**Looking without pulling.** `scripts/fly.sh` reaches the deployed ledger and is
-read-only by default. Use it when you only want to see what prod has; it touches
-no local state. It is also how you spot a bead that *should* have travelled and
-did not — the `image` label is the only filter, so an idea about the image filed
-without it stays stranded on the volume.
+**Looking without pulling** is read-only and touches no local state — it is
+also how you spot a bead that *should* have travelled and did not, since the
+`image` label is the only filter `beads-pull.sh` applies. **Mutating the
+volume needs `--write`, and past the flag there is no confirmation and no
+undo** — that graph is on an unreplicated volume with no savepoint covering
+it. The guard is a list of verbs, which makes it exactly as good as that list
+is complete: a verb nobody added is not a weaker guard, it is *no* guard, and
+silently (`bd sql` proved this once, with no flag needed at all). The
+`prod-ops` skill has the full verb list, the read-vs-write recipes, and the
+recovery commands for an accidental mutation.
 
-Mutating verbs need `--write`, because that graph is on an unreplicated volume
-with no savepoint covering it, and `--write` is the *whole* of that protection:
-past the flag there is no confirmation and no undo. `scripts/fly.sh --write bd
-close <id>` closes a live bead immediately, which is easy to do while meaning to
-test that the guard refuses. Recovering is two commands rather than one, because
-`bd reopen` restores a bead to `open` and not to the status it had:
-
-The guard is a list of verbs, which makes it exactly as good as that list is
-complete — a verb nobody added is not a weaker guard, it is *no* guard, and
-silently. `bd sql` proved it: it reads like a query, takes arbitrary SQL, and
-`fly.sh bd sql 'DELETE FROM issues'` went through with no flag at all. `sql`,
-`dolt`, `admin` and `migrate` are on the list now, deliberately at verb
-granularity, so a few read-only diagnostics (`bd dolt status`,
-`bd migrate --dry-run`) need `--write` they do not really need. That is the
-cheap direction to be wrong in. `tests/test_fly_guard.py` holds the list to it,
-and asserts the refusal happens *before* the machine is woken — stubbing
-`flyctl` and `curl` to prove it rather than trusting the ordering.
-
-`run` is deliberately not guarded: it is the documented escape hatch, and
-`run rm -rf /work` announces itself in a way `bd sql` does not. This is a guard
-against accidents, not against someone who means it.
-
-```sh
-scripts/fly.sh --write bd reopen <id>
-scripts/fly.sh --write bd update <id> --status deferred   # image beads only
-```
-
-Miss the second and the bead starts showing up in the prod agent's `bd ready`,
-which `deferred` exists to prevent. Rescuing a stranded bead is the one routine
-reason to reach for `--write` at all:
-`scripts/fly.sh --write bd label <id> image`, then pull.
-
-**Closing a bead after shipping.** Because ids survive the pull, a `kb-` bead
-exists in two ledgers and `bd close` here closes one of them. The volume goes on
-showing it open until a line in `docs/shipped-beads.jsonl` — `id`, `summary`,
-`commit` — reaches `reconcile_shipped` at the next startup. Shipping the code is
-not finishing the bead; appending that line is. An `img-` bead was created here,
-has no second copy, and needs no manifest line.
-
-Check the id against `bd list` before appending, because a wrong one fails
-silently and permanently. A bead the ledger never had is the common case rather
-than a fault — every user's ledger sees the same manifest — so `reconcile_shipped`
-records the id as applied and never retries it (`app/kb.py`). The only trace is
-one `log.info`.
-
-**Absence is the only failure treated as permanent, and that distinction was
-learned the hard way.** `bd close` refuses a bead whose blocker is still open
-(`cannot close blocked issue: … (use --force to override)`), and manifest lines
-are in append order, not dependency order. `kb-068` depends on `kb-b82` and was
-listed first, so its close was refused, filed as applied, and never retried — the
-image shipped, prod went on showing the work open, and the only trace was one
-`log.info` nobody reads. `reconcile_shipped` now makes passes until one closes
-nothing new, so closing the blocker in the same run unblocks the line above it,
-and it tells `no issue found` (permanent, recorded) apart from every other
-refusal (retried next boot, and warned about each time). Do not reorder the
-manifest to work around this and do not reach for `--force`: the point of a
-warning every boot is that shipped work still open is somebody's problem.
-
-One bead was already past rescue by code, because its id sits in the applied
-list, and closing it by hand cost it the thing that makes a close auditable. The
-reason field is not the audit trail — `reconcile_shipped` puts the manifest's
-summary and commit in a `bd note`, and a hand-close writes no note. So a rescue
-is two commands, and the second is the one that matters:
-
-```sh
-scripts/fly.sh --write bd close <id> --reason "shipped by hand"
-scripts/fly.sh --write bd note <id> "<manifest summary> (commit <sha>)"
-```
+**Closing a bead after shipping is not the same as shipping the code.**
+Because ids survive the pull, a `kb-` bead exists in two ledgers and `bd
+close` here closes only one — the volume keeps showing it open until a line
+in `docs/shipped-beads.jsonl` reaches `reconcile_shipped` at the next
+startup. An `img-` bead has no second copy and needs no manifest line. The
+`ship` skill has the full ritual, including the one failure mode that has
+already bitten this project once: a close refused for an open blocker gets
+recorded as applied and never retried, silently, unless the blocker ships
+first — never work around this with `--force` or by reordering the manifest.
 
 **Before committing ledger changes**, run `bd export -o .beads/issues.jsonl`. The
 Dolt database beside it is gitignored and the JSONL is what git tracks.

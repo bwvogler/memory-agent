@@ -70,6 +70,46 @@ CREATE TABLE IF NOT EXISTS turn_skill_uses (
 );
 
 CREATE INDEX IF NOT EXISTS turn_skill_uses_skill_idx ON turn_skill_uses (skill);
+
+-- Household-shared, durable chat conversations (app/conversations.py). A
+-- conversation is the unit a reload rejoins and multiple people watch live;
+-- see docs/decisions/0017. `data` is TEXT, not JSONB: Event.data is sometimes
+-- a JSON payload and sometimes a raw string (text_delta, session), and
+-- app/main.py's _sse_escape depends on that distinction - round-tripping
+-- through jsonb would reorder keys and break byte-identical replay.
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    session_id TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS conversation_events (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    seq BIGINT NOT NULL,
+    turn_id TEXT,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL,
+    actor TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (conversation_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    turn_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    actor_email TEXT NOT NULL,
+    savepoint TEXT,
+    state TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS conversation_turns_conv_idx
+    ON conversation_turns (conversation_id);
 """
 
 
@@ -237,3 +277,165 @@ class PostgresSessionStore:
                 limit,
             )
         return [dict(r) for r in rows]
+
+    # -- conversations --------------------------------------------------
+    #
+    # A conversation is household-shared (docs/decisions/0012), so unlike
+    # everything above it these methods take no user_email filter - every
+    # allowlisted member sees every conversation. See docs/decisions/0017.
+
+    async def create_conversation(
+        self, conversation_id: str, created_by: str, title: str | None = None
+    ) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "INSERT INTO conversations (id, created_by, title) "
+                "VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+                conversation_id,
+                created_by,
+                title,
+            )
+
+    async def list_conversations(self, *, limit: int = 100) -> list[dict]:
+        """Newest first. `last_actor` is whoever started the most recent turn."""
+        async with self._ready().acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.title, c.created_by, c.created_at, c.updated_at,
+                       c.archived,
+                       (SELECT t.actor_email FROM conversation_turns t
+                        WHERE t.conversation_id = c.id
+                        ORDER BY t.started_at DESC LIMIT 1) AS last_actor
+                FROM conversations c
+                WHERE NOT c.archived
+                ORDER BY c.updated_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(r) for r in rows]
+
+    async def get_conversation(self, conversation_id: str) -> dict | None:
+        async with self._ready().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, title, session_id, created_by, created_at, "
+                "updated_at, archived FROM conversations WHERE id = $1",
+                conversation_id,
+            )
+        return dict(row) if row else None
+
+    async def set_conversation_session(
+        self, conversation_id: str, session_id: str
+    ) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET session_id = $2, updated_at = now() "
+                "WHERE id = $1",
+                conversation_id,
+                session_id,
+            )
+
+    async def set_conversation_title(self, conversation_id: str, title: str) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET title = $2 WHERE id = $1",
+                conversation_id,
+                title,
+            )
+
+    async def set_conversation_archived(
+        self, conversation_id: str, *, archived: bool
+    ) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "UPDATE conversations SET archived = $2 WHERE id = $1",
+                conversation_id,
+                archived,
+            )
+
+    async def max_conversation_seq(self, conversation_id: str) -> int:
+        """The highest seq already durable, or 0. Seeds a Conversation's
+        in-process counter after a restart so seq assignment stays monotonic."""
+        async with self._ready().acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT max(seq) FROM conversation_events WHERE conversation_id = $1",
+                conversation_id,
+            )
+        return int(value) if value is not None else 0
+
+    async def append_conversation_events(
+        self, conversation_id: str, events: list[dict]
+    ) -> None:
+        """Batch-insert a flush of events. Idempotent on (conversation_id, seq),
+        because a flush that fails partway is retried whole by the caller."""
+        if not events:
+            return
+        async with self._ready().acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO conversation_events
+                    (conversation_id, seq, turn_id, kind, data, actor)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (conversation_id, seq) DO NOTHING
+                """,
+                [
+                    (
+                        conversation_id,
+                        e["seq"],
+                        e.get("turn_id"),
+                        e["kind"],
+                        e["data"],
+                        e.get("actor"),
+                    )
+                    for e in events
+                ],
+            )
+            await conn.execute(
+                "UPDATE conversations SET updated_at = now() WHERE id = $1",
+                conversation_id,
+            )
+
+    async def read_conversation_events(
+        self, conversation_id: str, after_seq: int = 0
+    ) -> list[dict]:
+        async with self._ready().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT seq, turn_id, kind, data, actor FROM conversation_events "
+                "WHERE conversation_id = $1 AND seq > $2 ORDER BY seq ASC",
+                conversation_id,
+                after_seq,
+            )
+        return [dict(r) for r in rows]
+
+    async def create_conversation_turn(
+        self, turn_id: str, conversation_id: str, actor_email: str
+    ) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "INSERT INTO conversation_turns "
+                "(turn_id, conversation_id, actor_email, state) "
+                "VALUES ($1, $2, $3, 'running') "
+                "ON CONFLICT (turn_id) DO NOTHING",
+                turn_id,
+                conversation_id,
+                actor_email,
+            )
+
+    async def set_conversation_turn_savepoint(
+        self, turn_id: str, savepoint: str
+    ) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "UPDATE conversation_turns SET savepoint = $2 WHERE turn_id = $1",
+                turn_id,
+                savepoint,
+            )
+
+    async def finish_conversation_turn(self, turn_id: str, state: str) -> None:
+        async with self._ready().acquire() as conn:
+            await conn.execute(
+                "UPDATE conversation_turns SET state = $2, ended_at = now() "
+                "WHERE turn_id = $1",
+                turn_id,
+                state,
+            )

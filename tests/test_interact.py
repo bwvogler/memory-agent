@@ -171,6 +171,42 @@ def test_long_details_are_clipped():
     assert detail.endswith("...")
 
 
+# --- describe_tool_target: what the centre pane opens ----------------------
+
+
+def test_a_write_into_the_kb_names_the_api_accepted_path():
+    """Must be byte-identical to what /api/kb/file?path= accepts - which is
+    rooted at $KB_MOUNT/memory, not $KB_MOUNT (see export_backlog, which
+    writes backlog.md, not memory/backlog.md)."""
+    target = interact.describe_tool_target(
+        "Write", {"file_path": "/mnt/kb/memory/recipes/x.md"}
+    )
+    assert target == {"kind": "kb", "path": "recipes/x.md"}
+
+
+def test_an_edit_into_the_kb_root_names_a_bare_path():
+    assert interact.describe_tool_target(
+        "Edit", {"file_path": "/mnt/kb/memory/backlog.md"}
+    ) == {"kind": "kb", "path": "backlog.md"}
+
+
+def test_a_write_into_scratch_is_not_the_wiki():
+    assert interact.describe_tool_target("Write", {"file_path": "/work/dev/x.md"}) == {}
+
+
+def test_a_read_is_never_a_target():
+    """Following every Read would flicker the pane through the whole corpus
+    while the agent researches, for a call that changed nothing."""
+    assert (
+        interact.describe_tool_target("Read", {"file_path": "/mnt/kb/memory/a.md"})
+        == {}
+    )
+
+
+def test_a_tool_with_no_input_has_no_target():
+    assert interact.describe_tool_target("Write", None) == {}
+
+
 # --- payloads have to survive the wire -------------------------------------
 
 
@@ -505,6 +541,8 @@ def test_the_start_and_the_completed_call_share_an_id():
     assert complete["detail"] == "/work/dev/deck.csv", (
         "the second event carries the detail"
     )
+    assert start["target"] == {}, "arguments are not there yet at content_block_start"
+    assert complete["target"] == {}, "scratch is not the wiki"
 
 
 def test_a_subagents_tool_call_is_announced_against_the_subagent():

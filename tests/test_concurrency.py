@@ -18,6 +18,7 @@ point to it, including the two that answer something other than an exception.
 from __future__ import annotations
 
 import asyncio
+import json as jsonlib
 import pathlib
 import types
 
@@ -123,11 +124,12 @@ def _coro(value):
 
 def test_the_browser_path_answers_409(clean_registry):
     """The regression this whole change exists for: it used to answer 202."""
-    clean_registry.begin(user_email="someone@e.com")
+    clean_registry.begin(user_email="someone@e.com")  # a turn in another conversation
     identity = auth.Identity(email="brian@e.com", subject="s")
+    body = {"message": "hello"}
 
     with pytest.raises(HTTPException) as caught:
-        asyncio.run(main.create_turn(_request({"message": "hello"}), identity))
+        asyncio.run(main.post_message("conv-elsewhere", _request(body), identity))
 
     assert caught.value.status_code == 409
     assert "savepoints" in caught.value.detail
@@ -135,14 +137,39 @@ def test_the_browser_path_answers_409(clean_registry):
 
 def test_the_browser_path_says_why_it_refused(clean_registry):
     """The UI renders `detail` verbatim, so the reason has to be in it."""
-    clean_registry.begin(user_email="someone@e.com")
+    clean_registry.begin(user_email="someone@e.com")  # a turn in another conversation
     identity = auth.Identity(email="brian@e.com", subject="s")
+    body = {"message": "hello"}
 
     with pytest.raises(HTTPException) as caught:
-        asyncio.run(main.create_turn(_request({"message": "hello"}), identity))
+        asyncio.run(main.post_message("conv-elsewhere", _request(body), identity))
 
     assert "already running" in caught.value.detail
     assert "Try again" in caught.value.detail
+
+
+def test_a_message_for_the_same_conversation_is_injected_not_refused(clean_registry):
+    """Turn-taking by injection: the whole point of docs/decisions/0017.
+
+    A second household member's message for the conversation ALREADY running
+    joins that turn instead of hitting the global one-turn-at-a-time refusal -
+    that refusal still applies to every OTHER conversation, unchanged.
+    """
+    running = clean_registry.begin(
+        user_email="someone@e.com", conversation_id="conv1", actor_email="someone@e.com"
+    )
+    identity = auth.Identity(email="brian@e.com", subject="s")
+
+    body = {"message": "hello"}
+
+    async def go():
+        return await main.post_message("conv1", _request(body), identity)
+
+    response = asyncio.run(go())
+    body = jsonlib.loads(bytes(response.body))
+
+    assert body == {"turn_id": running.id, "injected": True, "seq": 1}
+    assert running.inbox.qsize() == 1
 
 
 def test_the_reflect_route_answers_409(clean_registry):

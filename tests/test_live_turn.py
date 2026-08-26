@@ -38,9 +38,18 @@ PROMPT = (
 )
 
 
+def _new_conversation(base_url: str) -> str:
+    return httpx.post(f"{base_url}/api/conversations", timeout=10).json()[
+        "conversation_id"
+    ]
+
+
 def _run_turn(base_url: str, message: str, timeout_s: int = 240) -> dict:
+    conversation_id = _new_conversation(base_url)
     turn_id = httpx.post(
-        f"{base_url}/api/turns", json={"message": message}, timeout=30
+        f"{base_url}/api/conversations/{conversation_id}/messages",
+        json={"message": message},
+        timeout=30,
     ).json()["turn_id"]
 
     deadline = time.time() + timeout_s
@@ -262,8 +271,9 @@ def test_an_unapproved_tool_asks_the_human_instead_of_failing_silently(stack):
     consulted. WebFetch is absent from `allowed_tools` entirely, so nothing short
     of the callback can approve it.
     """
+    conversation_id = _new_conversation(stack)
     turn_id = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={
             "message": "Use the WebFetch tool on https://example.com and tell me "
             "the page title. Nothing else.",
@@ -296,8 +306,9 @@ def test_denying_a_tool_files_evidence_and_not_a_deployment_defect(beads, stack)
     """A person saying no must not produce a P1 'check allowed_tools' bead."""
     before = {i["id"] for i in bd_json("list", "--label", "signal")}
 
+    conversation_id = _new_conversation(stack)
     turn_id = httpx.post(
-        f"{stack}/api/turns",
+        f"{stack}/api/conversations/{conversation_id}/messages",
         json={
             "message": "Use the WebFetch tool on https://example.org and tell me "
             "the page title. Nothing else.",

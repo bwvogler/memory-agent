@@ -11,17 +11,21 @@ import base64
 import binascii
 import logging
 import os
+import re
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, kb, mcp_catalog, mcp_server, signals
-from .auth import Identity, current_identity
+from . import agent, interact, kb, mcp_catalog, mcp_server, signals
+from .auth import Identity, current_identity, display_name_for
 from .config import config
+from .conversations import conversations
 from .session_store import PostgresSessionStore
 from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
@@ -119,6 +123,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if config.session_database_url:
         store = await _start_session_store()
     signals.attach_store(store)
+    conversations.attach_store(store)
+    conversations.start_flusher()
 
     # The MCP surface is a MOUNTED sub-app, and a mount's own lifespan never
     # runs. Its session manager therefore has to be started from here or every
@@ -126,6 +132,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     async with mcp_server.session_manager():
         yield
 
+    # Drains anything still queued before the store closes underneath it.
+    await conversations.stop_flusher()
     if store:
         await store.close()
     await kb.close_pool()
@@ -242,49 +250,245 @@ def _stage_attachments(
     return staged
 
 
-@app.post("/api/turns")
-async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
-    """Submit a message. Returns immediately with a turn id.
+# uuid4().hex, which is what turns.Registry stamps every turn id with. Checked
+# before anything touches the filesystem: an id that fails this can never be a
+# real turn, so there is no reason to let it reach a path lookup at all.
+_TURN_ID = re.compile(r"\A[0-9a-f]{32}\Z")
 
-    The agent runs detached so that no single HTTP request has to survive for
-    the whole turn.
+# A pure allowlist, never mimetypes.guess_type: this route serves attacker-
+# controlled bytes back over an authenticated origin that can also submit a
+# turn, so the one thing that must never happen is an upload coming back as
+# text/html or image/svg+xml (both are scripting contexts on this origin).
+# Everything not listed is an opaque download, not a render.
+_UPLOAD_MEDIA_TYPES = {
+    ".md": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".csv": "text/plain; charset=utf-8",
+    ".json": "text/plain; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
-    Attachments take a different route from images and deliberately so. An
-    image becomes a base64 content block in the message, which is right for a
-    screenshot; a document is written to the agent's scratch directory and only
-    its path is mentioned, so a 5 MB CSV costs nothing until the agent decides
-    to read it. See `agent._attachment_note`.
+
+def _upload_media_type(name: str) -> tuple[str, bool]:
+    """(content-type, inline?) for an uploaded file's name. Pure, so it is
+    testable as a lookup table rather than through a route."""
+    media_type = _UPLOAD_MEDIA_TYPES.get(Path(name).suffix.lower())
+    if media_type is None:
+        return "application/octet-stream", False
+    return media_type, True
+
+
+def _sse_frame(seq: int, kind: str, data: str) -> str:
+    return f"id: {seq}\nevent: {kind}\ndata: {_sse_escape(data)}\n\n"
+
+
+_SSE_HEADERS = {
+    # Cloudflare and cloudflared will happily buffer text/event-stream and
+    # deliver the whole turn in one lump at the end. These three headers are
+    # what stop that. Re-test after every deploy: this has regressed more
+    # than once.
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
+@app.get("/api/conversations")
+async def list_conversations(identity: CurrentUser) -> dict[str, Any]:  # noqa: ARG001
+    """Every household conversation, newest first. See docs/decisions/0012:
+    there is no per-user filter - conversations are household-shared."""
+    if not store:
+        return {"conversations": []}
+    return {"conversations": await store.list_conversations()}
+
+
+@app.post("/api/conversations")
+async def create_conversation(identity: CurrentUser) -> JSONResponse:
+    """Start a new, empty conversation. The explicit "New chat" kb-nb4 asked for."""
+    conversation_id = uuid.uuid4().hex
+    if store:
+        await store.create_conversation(conversation_id, identity.email)
+    await conversations.get_or_load(conversation_id)
+    return JSONResponse({"conversation_id": conversation_id}, status_code=201)
+
+
+@app.patch("/api/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: str,
+    request: Request,
+    identity: CurrentUser,  # noqa: ARG001
+) -> dict[str, Any]:
+    if not store:
+        raise HTTPException(409, "no durable store configured")
+    body = await request.json()
+    if "title" in body:
+        await store.set_conversation_title(conversation_id, str(body["title"] or ""))
+    if "archived" in body:
+        await store.set_conversation_archived(
+            conversation_id, archived=bool(body["archived"])
+        )
+    return {"ok": True}
+
+
+@app.get("/api/conversations/{conversation_id}/events")
+async def stream_conversation(
+    conversation_id: str,
+    request: Request,
+    identity: CurrentUser,  # noqa: ARG001
+) -> StreamingResponse:
+    """SSE stream for a whole conversation, replayable via Last-Event-ID.
+
+    `0` (a fresh EventSource, no header at all) means "from the beginning" -
+    the change from the old per-turn stream, which only ever replayed one
+    turn. Household-shared: unlike the old route, there is no ownership check
+    here at all - any allowlisted member watches the same stream. See
+    docs/decisions/0017.
+
+    SSE rather than WebSocket, unchanged from the old route: it survives
+    Access cleanly with cookie auth, reconnects with replay for free, and
+    browsers cannot set headers on `new WebSocket()`.
+    """
+    conv = await conversations.get_or_load(conversation_id)
+    try:
+        last_seq = int(request.headers.get("Last-Event-ID", "0"))
+    except ValueError:
+        last_seq = 0
+
+    async def generate():
+        cursor = last_seq
+        # Anything older than the in-memory tail lives only in Postgres - a
+        # fresh Conversation object after a restart, or a reconnect from
+        # further back than EVENT_BUFFER_MAX events ago.
+        if store is not None and cursor < conv.earliest_buffered_seq:
+            history = await store.read_conversation_events(
+                conversation_id, after_seq=cursor
+            )
+            for row in history:
+                cursor = row["seq"]
+                yield _sse_frame(row["seq"], row["kind"], row["data"])
+
+        while True:
+            if await request.is_disconnected():
+                return
+            for event in conv.since_buffered(cursor):
+                cursor = event.seq
+                yield _sse_frame(event.seq, event.kind, event.data)
+            # A comment frame counts as bytes, which keeps Cloudflare's
+            # time-to-next-byte timer from firing during long silent thinking.
+            yield ": keepalive\n\n"
+            await conv.wait_for_change(timeout=HEARTBEAT_SECONDS)
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
+
+
+@app.post("/api/conversations/{conversation_id}/messages")
+async def post_message(
+    conversation_id: str, request: Request, identity: CurrentUser
+) -> JSONResponse:
+    """Submit a message into a conversation.
+
+    If a turn is already running IN THIS conversation, the message is
+    injected into it rather than refused - turn-taking by injection, see
+    `agent._input_stream` and docs/decisions/0017. A turn running in a
+    DIFFERENT conversation still refuses: exactly one turn runs at a time,
+    instance-wide (savepoints are workspace-wide - ADR 0009), unchanged.
     """
     body = await request.json()
     prompt = (body.get("message") or "").strip()
-    images = body.get("images") or []  # list of {"media_type": str, "data": str}
-    files = body.get("files") or []  # list of {"name": str, "data": str}
+    images = body.get("images") or []
+    files = body.get("files") or []
     if not prompt and not images and not files:
         raise HTTPException(400, "message is required")
-    resume = body.get("session_id") or None
-
-    # Before registry.create, so a 400 or 413 leaves no orphan turn behind.
     decoded = _decode_attachments(files)
 
-    # 409 rather than a queue, and the message says why. Queueing would hand the
-    # browser a turn id that streams nothing for however long the turn in front
-    # of it takes, which is the "it looked hung" failure this UI has already had
-    # to be fixed for once. Refusing is at least legible.
+    conv = await conversations.get_or_load(conversation_id)
+    running = registry.running()
+
+    if running is not None and running.conversation_id == conversation_id:
+        if decoded:
+            # Attaching a file mid-turn would need a turn id to stage it
+            # under, and this message has none yet - simpler to ask the
+            # sender to wait than to invent a second staging path.
+            raise HTTPException(
+                409,
+                "attachments cannot be added to a running turn; wait for it to finish",
+            )
+        if running.inbox is None:  # pragma: no cover - every conversation turn has one
+            raise HTTPException(409, str(TurnInProgressError(running)))
+        # turn_id/actor are duplicated into the JSON payload as well as the
+        # column: the SSE frame only forwards (seq, kind, data), and the
+        # client needs both to detect a turn boundary and attribute the
+        # bubble without a second round trip. See docs/decisions/0017.
+        event = conv.append(
+            "user_message",
+            interact.json_event(
+                text=prompt,
+                images=bool(images),
+                turn_id=running.id,
+                actor=identity.email,
+            ),
+            turn_id=running.id,
+            actor=identity.email,
+        )
+        running.inbox.put_nowait((prompt, images or None, identity.email))
+        return JSONResponse(
+            {"turn_id": running.id, "injected": True, "seq": event.seq}, status_code=202
+        )
+
+    if running is not None:
+        # Named, not the bare BUSY text - the point of a shared log is that a
+        # refusal can say WHY instead of just that. See docs/decisions/0017.
+        who = (
+            display_name_for(running.actor_email) if running.actor_email else "Someone"
+        )
+        detail = f"{who} has a turn running elsewhere. {TurnInProgressError(running)}"
+        raise HTTPException(409, detail)
+
     try:
-        turn = registry.begin(user_email=identity.email, session_id=resume)
-    except TurnInProgressError as exc:
+        turn = registry.begin(
+            user_email=identity.email,
+            interactive=True,
+            conversation_id=conversation_id,
+            actor_email=identity.email,
+        )
+    except TurnInProgressError as exc:  # a race with the check above
         raise HTTPException(409, str(exc)) from exc
 
     try:
         staged = _stage_attachments(identity.slug, turn.id, decoded)
     except OSError as exc:
-        # The turn exists but will never run, and an unfinished turn streams
-        # forever. Terminate it here rather than leaving the UI waiting.
         log.exception("could not stage attachments for turn %s", turn.id)
         turn.finish(TurnState.ERROR, error=f"could not save attachments: {exc}")
         raise HTTPException(500, "could not save attachments") from exc
 
-    spawn(
+    conv.append(
+        "user_message",
+        interact.json_event(
+            text=prompt, images=bool(images), turn_id=turn.id, actor=identity.email
+        ),
+        turn_id=turn.id,
+        actor=identity.email,
+    )
+    for path in staged:
+        turn.append(
+            "attachment",
+            interact.json_event(
+                name=path.name, url=f"/api/uploads/{turn.id}/{quote(path.name)}"
+            ),
+        )
+
+    resume = None
+    if store:
+        conv_row = await store.get_conversation(conversation_id)
+        resume = (conv_row or {}).get("session_id")
+
+    turn.task = spawn(
         agent.run_turn(
             turn,
             prompt=prompt,
@@ -295,88 +499,73 @@ async def create_turn(request: Request, identity: CurrentUser) -> JSONResponse:
         ),
         name=f"turn-{turn.id}",
     )
-    return JSONResponse({"turn_id": turn.id}, status_code=202)
+    return JSONResponse({"turn_id": turn.id, "injected": False}, status_code=202)
 
 
 @app.get("/api/turns/{turn_id}")
-async def get_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
-    """Polling fallback, for when streaming misbehaves."""
-    turn = registry.get(turn_id)
-    if not turn or turn.user_email != identity.email:
-        raise HTTPException(404, "no such turn")
-    return {
-        **turn.summary(),
-        "events": [{"seq": e.seq, "kind": e.kind, "data": e.data} for e in turn.events],
-    }
+async def get_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:  # noqa: ARG001
+    """Polling fallback, for a caller that would rather not hold an SSE
+    connection open - the `--live` test tier in particular, which polls this
+    in a loop instead of consuming a stream. No ownership check, matching
+    every other turn route now - see docs/decisions/0017.
 
-
-@app.get("/api/turns/{turn_id}/events")
-async def stream_turn(
-    turn_id: str, request: Request, identity: CurrentUser
-) -> StreamingResponse:
-    """SSE stream, replayable via Last-Event-ID.
-
-    SSE rather than WebSocket on purpose: it survives Access cleanly with cookie
-    auth, reconnects with replay for free, and browsers cannot set headers on
-    `new WebSocket()` - which would force any non-browser client onto Access
-    service tokens.
+    For a conversation turn, `events` is filtered out of the conversation's
+    own buffer by `turn_id`; `turn.events` itself stays empty in that case
+    (see turns.Turn.append), so reading it directly here would silently
+    under-report.
     """
     turn = registry.get(turn_id)
-    if not turn or turn.user_email != identity.email:
+    if not turn:
         raise HTTPException(404, "no such turn")
+    if turn.conversation_id is not None:
+        conv = conversations.get(turn.conversation_id)
+        events = (
+            [
+                {"seq": e.seq, "kind": e.kind, "data": e.data}
+                for e in conv.events
+                if e.turn_id == turn_id
+            ]
+            if conv is not None
+            else []
+        )
+    else:
+        events = [{"seq": e.seq, "kind": e.kind, "data": e.data} for e in turn.events]
+    # summary()'s event_count reads turn.events directly, which is empty for
+    # a conversation turn (see turns.Turn.append) - overridden here so it
+    # does not silently under-report against the `events` list above.
+    return {**turn.summary(), "event_count": len(events), "events": events}
 
-    try:
-        last_seq = int(request.headers.get("Last-Event-ID", "0"))
-    except ValueError:
-        last_seq = 0
 
-    async def generate():
-        cursor = last_seq
-        while True:
-            if await request.is_disconnected():
-                return
+@app.post("/api/turns/{turn_id}/stop")
+async def stop_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:  # noqa: ARG001
+    """Cancel a running turn. See agent._run_turn's CancelledError handling.
 
-            for event in turn.since(cursor):
-                cursor = event.seq
-                yield (
-                    f"id: {event.seq}\n"
-                    f"event: {event.kind}\n"
-                    f"data: {_sse_escape(event.data)}\n\n"
-                )
-
-            if turn.finished and cursor >= len(turn.events):
-                terminal = "done" if turn.state is TurnState.DONE else "failed"
-                yield f"event: {terminal}\ndata: {_sse_escape(turn.error or '')}\n\n"
-                return
-
-            # A comment frame counts as bytes, which keeps Cloudflare's
-            # time-to-next-byte timer from firing during long silent thinking.
-            yield ": keepalive\n\n"
-            await turn.wait_for_change(timeout=HEARTBEAT_SECONDS)
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            # Cloudflare and cloudflared will happily buffer text/event-stream
-            # and deliver the whole turn in one lump at the end. These three
-            # headers are what stop that. Re-test after every deploy: this has
-            # regressed more than once.
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    Household-shared: whoever asked and whoever stops it may be different
+    people, which is fine - the trace up to this point is already durable
+    (app/conversations.py), and the SDK's own transcript holds the partial
+    work for a later resume.
+    """
+    turn = registry.get(turn_id)
+    if not turn:
+        raise HTTPException(404, "no such turn")
+    if turn.finished:
+        raise HTTPException(409, "this turn has already finished")
+    if turn.task is None:
+        raise HTTPException(409, "this turn cannot be stopped")
+    turn.task.cancel()
+    return {"stopping": turn_id}
 
 
 @app.post("/api/turns/{turn_id}/revert")
 async def revert_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     """Roll the knowledge base back to this turn's savepoint.
 
-    Safe to expose in the UI: TigerFS undo is itself reversible.
+    Safe to expose in the UI: TigerFS undo is itself reversible. No ownership
+    check: any allowlisted household member may revert any turn - see
+    docs/decisions/0017's household-thread consequence.
     """
     turn = registry.get(turn_id)
-    if not turn or turn.user_email != identity.email:
+    if not turn:
         raise HTTPException(404, "no such turn")
     if not turn.savepoint:
         raise HTTPException(409, "this turn has no savepoint to revert to")
@@ -392,23 +581,24 @@ async def revert_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     # A revert is the strongest signal this system gets: a human saying "that
     # was wrong" about one exact turn. Recorded, not acted on - see
     # app/signals.py and bead kb-3sv.
-    bead_id = await signals.on_revert(turn, identity.slug, diff_stat)
+    bead_id = await signals.on_revert(
+        turn, identity.slug, diff_stat, reverted_by=identity.email
+    )
     # If this was a reflection turn, the revert is also a rejection of the
     # self-edit it made. Recorded so the loop cannot re-propose it forever.
     await signals.note_rejected_proposals(turn, identity.slug)
     return {"reverted_to": turn.savepoint, "signal_bead": bead_id}
 
 
-def _pending_turn(turn_id: str, identity: CurrentUser) -> Turn:
+def _pending_turn(turn_id: str, identity: CurrentUser) -> Turn:  # noqa: ARG001
     """The turn a human is answering, or the right HTTP error.
 
-    Ownership is the same raw comparison the rest of this file uses. It matters
-    more here than on a read: these two routes let a caller unblock a *running*
-    agent, so answering someone else's question would be putting words in their
-    turn.
+    No ownership check: any allowlisted household member may answer a
+    question or a permission prompt on any running turn, since the turn is
+    now visible to all of them - see docs/decisions/0017.
     """
     turn = registry.get(turn_id)
-    if not turn or turn.user_email != identity.email:
+    if not turn:
         raise HTTPException(404, "no such turn")
     return turn
 
@@ -430,7 +620,8 @@ async def answer_turn(
     notes = str(body.get("notes") or "")
     if not request_id:
         raise HTTPException(400, "request_id is required")
-    if not turn.resolve(request_id, {"answers": answers, "notes": notes}):
+    answer = {"answers": answers, "notes": notes, "actor": identity.email}
+    if not turn.resolve(request_id, answer):
         raise HTTPException(409, "that question is not waiting for an answer")
     return {"answered": request_id}
 
@@ -448,7 +639,11 @@ async def decide_permission(
         raise HTTPException(400, "request_id is required")
     if decision not in ("allow", "deny"):
         raise HTTPException(400, "decision must be 'allow' or 'deny'")
-    answer = {"decision": decision, "note": str(body.get("note") or "")}
+    answer = {
+        "decision": decision,
+        "note": str(body.get("note") or ""),
+        "actor": identity.email,
+    }
     if not turn.resolve(request_id, answer):
         raise HTTPException(409, "that request is not waiting for a decision")
     return {"decided": request_id, "decision": decision}
@@ -522,20 +717,69 @@ async def kb_file(path: str) -> dict[str, str]:
     return {"path": path, "content": content}
 
 
+@app.get("/api/uploads/{turn_id}/{name}")
+async def uploaded_file(turn_id: str, name: str, identity: CurrentUser) -> FileResponse:
+    """Serve back an attachment's bytes, for the centre pane.
+
+    Ownership is proven by the path, not by looking up the Turn: the slug
+    comes from the verified Identity and never appears in the URL, so there is
+    no input by which a caller can name another user's directory. A
+    `turn.user_email` check would prove the same fact more weakly, and would
+    404 a perfectly valid file once the in-process Registry evicts it (bounded
+    to 200 turns, oldest-finished first).
+
+    `turn_id` is checked against the shape `Registry` actually stamps BEFORE
+    any path is built from it - `resolve_upload_path`'s containment check
+    passes for any `turn_id`, since the escape would have already happened one
+    directory up, in `uploads_dir_for`. Only `uploads/` is servable, never
+    arbitrary scratch: scratch also holds the bead ledger and everything the
+    agent fetched from the web, on a volume with no savepoint.
+    """
+    if not _TURN_ID.fullmatch(turn_id):
+        raise HTTPException(404, "no such attachment")
+    path = kb.upload_path_for_read(identity.slug, turn_id, name)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "no such attachment")
+
+    media_type, inline = _upload_media_type(path.name)
+    disposition = "inline" if inline else "attachment"
+    # safe_upload_name only strips non-printable characters, not quotes or
+    # backslashes - both are escaped here so a crafted filename cannot break
+    # out of the quoted-string and inject a header.
+    safe_name = path.name.replace("\\", "\\\\").replace('"', '\\"')
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+    }
+    return FileResponse(path, media_type=media_type, headers=headers)
+
+
 def _sse_escape(text: str) -> str:
     """SSE data lines cannot contain raw newlines."""
     return text.replace("\r\n", "\n").replace("\n", "\\n")
 
 
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
-
-
+@app.get("/", dependencies=AUTHENTICATED)
 @app.get("/kb", dependencies=AUTHENTICATED)
 @app.get("/kb/{path:path}", dependencies=AUTHENTICATED)
-async def kb_ui() -> FileResponse:
-    return FileResponse(STATIC_DIR / "kb.html")
+@app.get("/c/{conversation_id}", dependencies=AUTHENTICATED)
+async def index() -> FileResponse:
+    """The merged tree/renderer/chat page, at every URL that used to be two.
+
+    `/` was unauthenticated when it was an empty shell whose every fetch was
+    authenticated anyway - that stopped being harmless once `/` became the
+    wiki itself, since an open shell that 403s its own tree fetch is a worse
+    experience than the Access login redirect it now gets instead. `fly.toml`
+    probes `/healthz`, not this route.
+
+    `/kb/{path:path}` still takes no `path` argument: the server has nothing
+    to do with it, and the client reads `location.pathname` to pick the
+    initial centre pane. Serving the same document rather than redirecting
+    means a copied URL is the URL you land on. `/c/{conversation_id}` is the
+    same trick for the conversation the chat pane opens - see
+    docs/decisions/0017.
+    """
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
