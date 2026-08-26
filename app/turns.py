@@ -28,6 +28,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .conversations import conversations
+
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
@@ -94,11 +96,29 @@ class Event:
 class Turn:
     id: str
     user_email: str
+    # Set only for a turn started from the browser (app/main.py). When set,
+    # this turn's events live on the shared app/conversations.Conversation
+    # instead of the local `events` list below, so a reload and a second
+    # household member both see them. Reflection and /mcp turns leave this
+    # None and keep using `events` exactly as before - see the module
+    # docstring in app/conversations.py for why that split is deliberate.
+    conversation_id: str | None = None
+    # Who to attribute this turn's `user_message` event to. None for
+    # reflection/mcp turns, which are not a person speaking in a household
+    # conversation. See docs/decisions/0017.
+    actor_email: str | None = None
     session_id: str | None = None
     savepoint: str | None = None
     state: TurnState = TurnState.RUNNING
     error: str | None = None
     events: list[Event] = field(default_factory=list)
+    # Held so POST /api/turns/{id}/stop can cancel it. None until spawn() sets
+    # it, and always None for a turn with no stop route (reflection).
+    task: asyncio.Task | None = field(default=None, repr=False)
+    # Messages sent while this turn is already running, for the same
+    # conversation - injected rather than starting a second turn. None for a
+    # turn that does not support injection (conversation_id is None).
+    inbox: asyncio.Queue | None = field(default=None, repr=False)
 
     # Whether a human is watching this turn and can answer it. True for a turn
     # started from the browser, False for one started by a machine caller over
@@ -145,7 +165,24 @@ class Turn:
 
     _waiters: list[asyncio.Event] = field(default_factory=list, repr=False)
 
-    def append(self, kind: str, data: str) -> Event:
+    def append(self, kind: str, data: str, *, actor: str | None = None) -> Event:
+        """Record one event.
+
+        Routed to the shared Conversation when this turn belongs to one -
+        that is what makes it visible to a reload and to a second household
+        member. `actor` is only meaningful there (it becomes
+        `conversation_events.actor`); a reflection/mcp turn's local buffer has
+        no such column and ignores it.
+        """
+        if self.conversation_id is not None:
+            conv = conversations.get(self.conversation_id)
+            if conv is not None:
+                conv_event = conv.append(
+                    kind, data, turn_id=self.id, actor=actor or self.actor_email
+                )
+                return Event(
+                    seq=conv_event.seq, kind=conv_event.kind, data=conv_event.data
+                )
         event = Event(seq=len(self.events) + 1, kind=kind, data=data)
         self.events.append(event)
         self._wake()
@@ -240,6 +277,8 @@ class Registry:
         session_id: str | None = None,
         *,
         interactive: bool = True,
+        conversation_id: str | None = None,
+        actor_email: str | None = None,
     ) -> Turn:
         """Admit one turn, or raise TurnInProgressError. The only way to start one.
 
@@ -253,11 +292,23 @@ class Registry:
         own asyncio.Lock, POST /api/reflect and maybe_reflect each rolled their
         own check, and POST /api/turns - the browser path, which carries very
         nearly all of the traffic - had no check at all. Two tabs was enough.
+
+        Still exactly one turn at a time, instance-wide (docs/decisions/0009):
+        this does not change with conversations. What changes is at the
+        caller - app/main.py checks whether the turn already running belongs
+        to the SAME conversation before calling this, and injects into it
+        instead of calling begin() a second time. See docs/decisions/0017.
         """
         in_flight = self.running()
         if in_flight is not None:
             raise TurnInProgressError(in_flight)
-        return self._create(user_email, session_id=session_id, interactive=interactive)
+        return self._create(
+            user_email,
+            session_id=session_id,
+            interactive=interactive,
+            conversation_id=conversation_id,
+            actor_email=actor_email,
+        )
 
     def _create(
         self,
@@ -265,12 +316,19 @@ class Registry:
         session_id: str | None = None,
         *,
         interactive: bool = True,
+        conversation_id: str | None = None,
+        actor_email: str | None = None,
     ) -> Turn:
         turn = Turn(
             id=uuid.uuid4().hex,
             user_email=user_email,
             session_id=session_id,
             interactive=interactive,
+            conversation_id=conversation_id,
+            actor_email=actor_email,
+            # Only a conversation turn can be steered mid-flight - see
+            # agent._input_stream, which is the only reader.
+            inbox=asyncio.Queue() if conversation_id is not None else None,
         )
         self._turns[turn.id] = turn
         self._evict()

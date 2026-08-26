@@ -17,11 +17,13 @@ import asyncio
 import base64
 import json as jsonlib
 import types
+import uuid
 
 import pytest
 from fastapi import HTTPException
 
 from app import agent, auth, kb, main
+from app.conversations import conversations
 from app.turns import Registry
 
 
@@ -179,10 +181,11 @@ def _request(body: dict):
 def test_an_attachment_is_named_on_the_event_stream_before_spawn(
     scratch, caps, monkeypatch
 ):
-    """A reload reconnects with Last-Event-ID and replays events - so a
-    chip surviving a refresh depends on this landing on the stream itself,
-    not on a Turn.files field, and not deferred until the agent coroutine
-    (which spawn only schedules, and which this test never lets run) does it.
+    """A reload replays a conversation's events from Postgres/the in-memory
+    tail - so a chip surviving a refresh depends on this landing on the
+    stream itself, not on a Turn.files field, and not deferred until the
+    agent coroutine (which spawn only schedules, and which this test never
+    lets run) does it.
     """
     fresh = Registry()
     monkeypatch.setattr(main, "registry", fresh)
@@ -190,13 +193,16 @@ def test_an_attachment_is_named_on_the_event_stream_before_spawn(
     # than letting it run keeps this test from touching the real SDK.
     monkeypatch.setattr(main, "spawn", lambda coro, **kw: coro.close())
 
+    conversation_id = uuid.uuid4().hex
+    conv = asyncio.run(conversations.get_or_load(conversation_id))
+
     body = {"message": "here's a file", "files": [payload("deck.csv", b"a,b\n1,2\n")]}
-    response = asyncio.run(main.create_turn(_request(body), _identity()))
+    response = asyncio.run(
+        main.post_message(conversation_id, _request(body), _identity())
+    )
     turn_id = jsonlib.loads(bytes(response.body))["turn_id"]
 
-    turn = fresh.get(turn_id)
-    assert turn is not None
-    attachment_events = [e for e in turn.events if e.kind == "attachment"]
+    attachment_events = [e for e in conv.events if e.kind == "attachment"]
     assert len(attachment_events) == 1
     payload_out = jsonlib.loads(attachment_events[0].data)
     assert payload_out["name"] == "deck.csv"

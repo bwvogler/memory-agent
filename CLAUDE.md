@@ -19,6 +19,9 @@ the TigerFS workspace.
   about its own skills, enforced as a hook, plus the evolution log
 - `app/interact.py` — the round-trips to the human (a question tool, a
   permission callback) and the hooks that report tool results and subagents
+- `app/conversations.py` — the durable, household-shared event log a
+  household conversation streams from; `turns.Turn` still exists per turn but
+  no longer owns the stream once it belongs to one (`docs/decisions/0017`)
 - `app/mcp_server.py` — the four capabilities as MCP tools, for a machine caller
 - `app/mcp_catalog.py` — the opposite direction: outbound MCP servers the agent
   may connect to, defined in the image and credentialed from the environment
@@ -101,6 +104,18 @@ This is a refusal, not a queue: a queued turn hands the browser a turn id that
 streams nothing until the turn ahead finishes, which is the "it looked hung"
 failure this UI has already been fixed for once. The UI restores the composer
 on a 409 so a refusal never eats a typed message.
+
+That refusal is instance-wide, not conversation-wide, and stays that way —
+what changed with conversations (`docs/decisions/0017`) is what a caller does
+*before* reaching it. `POST /api/conversations/{id}/messages` checks whether
+the turn already running belongs to the SAME conversation; if so the message
+is injected into it (`turns.Turn.inbox`, `agent._input_stream`) instead of
+calling `begin()` a second time. A turn running for a *different*
+conversation still gets the refusal above, now naming who is busy instead of
+repeating the bare `BUSY` text. Injection is not a second exemption from "one
+turn at a time" — it is still exactly one turn, one savepoint — it is a
+second person's message joining the turn already in flight rather than
+starting a competing one.
 
 It also makes `run_turn` reaching a terminal state load-bearing. An unfinished
 turn is never evicted, so a turn that raised before `finish()` would wedge
@@ -469,6 +484,45 @@ now renders uploaded documents too, not just agent-written wiki pages — see
 docs/decisions/0016, including the reload-resume bug that first cut of this
 shipped with (`onerror` clearing the same localStorage marker a page reload
 needs intact) and the fix (clear only on an authoritative `done`/`failed`).
+
+**The conversation is the unit, not the turn.** `app/conversations.py`'s
+`Conversation` is a durable, household-shared, seq-numbered event log —
+`conversation_events`/`conversation_turns`/`conversations` in
+`session_store.SCHEMA` — that a `turns.Turn` streams into when it belongs to
+one (`Turn.conversation_id`, set only by the browser path; reflection and
+`/mcp` turns keep their old private per-turn buffer unchanged). `GET
+/api/conversations/{id}/events` replays the WHOLE conversation from seq 0 on
+a fresh `EventSource`, not just whatever turn happened to be running, which
+is what `docs/decisions/0016` flagged as "not a general transcript-durability
+fix." `POST /api/turns`, `GET /api/turns/{id}`, and
+`GET /api/turns/{id}/events` are gone, replaced by
+`GET`/`POST /api/conversations` and `POST /api/conversations/{id}/messages`.
+
+Ownership checks on `/revert`, `/answer` and `/permission` are dropped, not
+narrowed: any allowlisted household member can watch, answer, or revert any
+turn (`auth.verify()`'s allowlist is the real boundary, and always was). A
+message sent while a turn is already running for the SAME conversation is
+injected into it (`Turn.inbox`, `agent._input_stream`) rather than refused —
+see the amendment above and `docs/decisions/0017`. `POST
+/api/turns/{id}/stop` cancels the running task; `_run_turn` treats
+`CancelledError` as a clean stop, not a failure
+(`signals.OUTCOME_STOPPED`), and every turn is now also wrapped in
+`asyncio.timeout(config.turn_timeout_seconds)` — a backstop `img-r7o` asked
+for, independent of ever revisiting `ClaudeSDKClient.interrupt()`, which stays
+avoided for the reason that bead documents.
+
+Attribution matters once more than one person can speak in one conversation:
+`auth.display_name_for` (backed by a `HOUSEHOLD_NAMES` config map) is
+prefixed onto the message TEXT sent to the model — not a separate content
+block, so it survives into the CLI's own transcript across a `resume=` — and
+a system-prompt note tells the agent "you" is not guaranteed to mean the same
+person twice.
+
+Not done in this pass, each for a stated reason in `docs/decisions/0017`:
+presence/typing indicators, the `SessionStore` SDK-protocol rewrite that
+would close `img-2jj`, and the Phase-5 backlog (`@agent` addressing,
+auto-titling, search, KB provenance links, revert-to-a-message, a context
+budget warning).
 
 ## Local dev
 

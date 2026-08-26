@@ -128,9 +128,33 @@ aside#chat {
   width: var(--chat-w); flex-shrink: 0; min-width: 320px; max-width: 720px;
   display: flex; flex-direction: column; border-left: 1px solid var(--line);
 }
+.chat-header {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); flex-shrink: 0;
+}
+#conversation-picker {
+  flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 5px 8px;
+  border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink);
+}
+button.new-chat {
+  font: inherit; font-size: 13px; flex: none; padding: 5px 12px;
+  border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+}
+button.new-chat:hover { color: var(--ink); border-color: var(--accent); }
+button.stop {
+  font: inherit; flex: none; padding: 0 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--err); background: var(--panel); color: var(--err);
+}
+button.stop:hover { background: var(--err); color: #fff; }
 .chat-log { flex: 1; overflow-y: auto; padding: 16px; }
 .msg { margin-bottom: 14px; }
 .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 4px; }
+/* A speaker name in a household-shared conversation - shown only when it
+   differs from "you"/"agent", i.e. for a message from someone else, or an
+   answer/decision made by someone other than who was asked. */
+.msg .who { font-weight: 600; text-transform: none; letter-spacing: 0; }
 .msg .body {
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px;
@@ -139,6 +163,11 @@ aside#chat {
 .msg .body p + p { margin-top: 0.6em; }
 .msg .body p a { color: var(--accent); }
 .msg.me .body { background: transparent; border-style: dashed; }
+/* A message from someone else in a household-shared conversation - same
+   shape as .me, distinguished by the .who name label rather than a second
+   color scheme. See docs/decisions/0017. */
+.msg.other .body { background: transparent; border-style: dashed; border-color: var(--accent); }
+.msg-images-note { color: var(--muted); font-size: 12px; font-style: italic; }
 .tool { color: var(--tool); font-size: 13px; font-style: italic; margin: 4px 0; }
 .tool .detail { color: var(--muted); font-style: normal; }
 /* A failed tool call has to look different from a successful one. It used to

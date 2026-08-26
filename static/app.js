@@ -17,8 +17,10 @@ const send = document.getElementById('send');
 const hint = document.getElementById('hint');
 const previews = document.getElementById('previews');
 const filepicker = document.getElementById('filepicker');
+const conversationPicker = document.getElementById('conversation-picker');
+const newChatBtn = document.getElementById('new-chat');
+const stopBtn = document.getElementById('stop');
 
-let sessionId = null;
 let pendingImages = []; // [{dataUrl, mediaType, base64}]
 let pendingFiles = [];  // [{name, size, base64}]
 
@@ -26,10 +28,15 @@ let pendingFiles = [];  // [{name, size, base64}]
 // answers 413; this only exists so the user learns before a 10 MB upload.
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
-// The turn currently streaming, persisted so a full page reload can resume
-// it - localStorage, not a JS variable, because a JS variable dies with the
-// tab. Cleared the instant the turn reaches a terminal state.
-const ACTIVE_TURN_KEY = 'memory-agent:active-turn';
+// The conversation is the unit now, not the turn - see docs/decisions/0017.
+// One EventSource per conversation, opened once and left open: a reload
+// replays the whole thing from seq 0 (Postgres/the in-process tail), not just
+// whatever turn happened to be running. `myEmail` labels which bubbles are
+// "you" in a household-shared conversation where more than one person's
+// messages can appear in the same log.
+let myEmail = null;
+let activeConversationId = null;
+let es = null;
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -574,9 +581,16 @@ form.addEventListener('drop', (e) => {
   for (const file of e.dataTransfer.files) acceptFile(file);
 });
 
-function addMessage(role, cls) {
+function addMessage(role, cls, who) {
   const wrap = el('div', 'msg ' + (cls || ''));
-  wrap.appendChild(el('div', 'role', role));
+  const roleEl = el('div', 'role', who ? '' : role);
+  if (who) {
+    // A speaker name in a household-shared conversation: shown for a
+    // message from someone other than the viewer, or an answer/decision made
+    // by someone other than who was asked. See docs/decisions/0017.
+    roleEl.appendChild(el('span', 'who', who));
+  }
+  wrap.appendChild(roleEl);
   const body = el('div', 'body', '');
   wrap.appendChild(body);
   chatLog.appendChild(wrap);
@@ -584,9 +598,488 @@ function addMessage(role, cls) {
   return { wrap, body };
 }
 
+// --- the conversation: one persistent stream, many turns over its life ----
+//
+// A conversation is household-shared and long-lived (docs/decisions/0017),
+// so unlike the old per-turn stream(), there is exactly ONE EventSource per
+// open conversation, and it is never closed except by switching to another
+// conversation. Turn boundaries within that one stream are detected from the
+// events themselves: a `user_message` whose turn_id differs from the current
+// one starts a fresh agent bubble (a NEW turn); one with the SAME turn_id is
+// an injected follow-up into the turn already running - see
+// app/agent.py's _input_stream. `turn_done`/`turn_failed` end it.
+
+function freshTurnUI(turnId) {
+  return {
+    turnId, finished: false,
+    msg: null, working: null, tick: null, startedAt: null,
+    toolLines: new Map(),   // tool_use id -> its .tool div
+    toolTargets: new Map(), // tool_use id -> its {kind, path}, if any
+    forms: new Map(),       // request_id -> the ask/permission element
+    agents: new Map(),      // agent key -> its <details> container
+    lastAgentType: '',
+    thought: null, todos: null,
+    currentPara: null,      // the <p> currently receiving streamed tokens
+    newParaNext: true,      // start a fresh <p> on the next text chunk
+    hasTextDelta: false,    // true once the CLI streams at least one token
+  };
+}
+
+// The most recent "you" (or someone else's) message bubble, so a following
+// `attachment` event has somewhere to put its chip. Attachments only ever
+// follow the ONE user_message that started a fresh turn - an injected
+// message cannot carry them (app/main.py refuses that combination) - so
+// "most recent" is unambiguous.
+let lastYouBubble = null; // {wrap, body, filesBox}
+
+function ensureTurnUI(turnId) {
+  if (turnUI && turnUI.turnId === turnId) return turnUI;
+  turnUI = freshTurnUI(turnId);
+  return turnUI;
+}
+
+function updateStopButton() {
+  stopBtn.hidden = !(turnUI && !turnUI.finished);
+}
+
+function startAgentBubble() {
+  const msg = addMessage('agent', '');
+  turnUI.msg = msg;
+  // Pulsing indicator, with the elapsed time beside it. It stays for the
+  // WHOLE turn and is removed only when it reaches a terminal state.
+  //
+  // It used to be removed on the first token instead, which read as
+  // "finished" for the rest of the turn: after one sentence like "Reading
+  // the CSV now." there could be minutes of real work - a long tool call, a
+  // subagent, a long stretch of thinking - with nothing on screen moving.
+  // The elapsed clock is the other half: it distinguishes "slow" from "hung"
+  // without anyone having to guess.
+  const working = el('div', 'working');
+  const dots = el('div', 'thinking');
+  for (let i = 0; i < 3; i++) dots.appendChild(el('span'));
+  working.appendChild(dots);
+  const elapsed = el('span', 'elapsed', '');
+  working.appendChild(elapsed);
+  msg.wrap.appendChild(working);
+  turnUI.working = working;
+  turnUI.startedAt = Date.now();
+  turnUI.tick = setInterval(() => {
+    const s = Math.round((Date.now() - turnUI.startedAt) / 1000);
+    elapsed.textContent = s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }, 1000);
+  updateStopButton();
+}
+
+function appendText(raw) {
+  if (!turnUI || !turnUI.msg) return;
+  if (turnUI.newParaNext) {
+    turnUI.currentPara = el('p', '');
+    turnUI.msg.body.appendChild(turnUI.currentPara);
+    turnUI.newParaNext = false;
+  }
+  turnUI.currentPara.textContent += raw.replace(/\\n/g, '\n');
+  scroll();
+}
+
+// Structured events carry a JSON payload; text ones stay raw strings.
+const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
+
+// Insert into the current turn's message, keeping the working indicator last
+// so it always sits below the newest thing that happened rather than above.
+function insert(node, into) {
+  if (!turnUI || !turnUI.msg) return;
+  if (into) { into.appendChild(node); }
+  else { turnUI.msg.wrap.insertBefore(node, turnUI.working); }
+  scroll();
+}
+
+// Subagent output must never land in the reply, which is why the server tags
+// it. Containers are keyed by whatever tag the event carries: agent_start
+// reports the SDK's agent id while message events report the Task call's
+// tool_use id, and those are different identifiers, so with several subagents
+// running at once attribution between blocks can be wrong. What cannot go
+// wrong is subagent text reaching the main paragraph.
+function agentBox(key) {
+  if (!turnUI || !key) return null;
+  if (!turnUI.agents.has(key)) {
+    const d = el('details', 'subagent');
+    d.appendChild(el('summary', '', 'subagent' + (turnUI.lastAgentType ? ': ' + turnUI.lastAgentType : '') + ' — working'));
+    insert(d);
+    turnUI.agents.set(key, d);
+  }
+  return turnUI.agents.get(key);
+}
+
+function displayNameFor(email) {
+  if (!email) return 'Someone';
+  const local = email.split('@')[0];
+  return local.charAt(0).toUpperCase() + local.slice(1);
+}
+
+function finishTurn(d, failed) {
+  // Idempotent, and stale-guarded: a duplicate `turn_done`/`turn_failed`
+  // (a replay overlapping the live tail) or one for a turn that is no longer
+  // the current one must not touch a bubble that already finished, or worse,
+  // the WRONG bubble.
+  if (!d || !turnUI || turnUI.turnId !== d.turn_id || turnUI.finished) return;
+  turnUI.finished = true;
+  clearInterval(turnUI.tick);
+  if (turnUI.working) turnUI.working.remove();
+  if (failed) {
+    turnUI.msg.wrap.appendChild(el('div', 'body err', d.error || 'the turn failed'));
+  }
+  linkifyKbPaths(turnUI.msg.wrap);
+  // Every turn is wrapped in a TigerFS savepoint, so reverting is atomic —
+  // and the undo is itself reversible.
+  const btn = el('button', 'revert', 'Revert this turn');
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Reverting…';
+    const r = await fetch('/api/turns/' + d.turn_id + '/revert', { method: 'POST' });
+    btn.textContent = r.ok ? 'Reverted' : 'Revert failed';
+  };
+  turnUI.msg.wrap.appendChild(btn);
+  updateStopButton();
+  scroll();
+}
+
+// --- the two round-trips back into the running turn -------------------
+//
+// Both post to the turn that is still executing, and both are disabled by
+// the matching resolution event — which also arrives when someone else
+// answered first, or when the request timed out on the server.
+
+async function resolveForm(path, body, box, verdict) {
+  if (!turnUI) return;
+  box.classList.add('resolved');
+  const r = await fetch('/api/turns/' + turnUI.turnId + '/' + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let note = verdict;
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).detail || ''; } catch {}
+    note = detail || 'could not send that';
+  }
+  box.appendChild(el('div', 'verdict', note));
+  scroll();
+}
+
+function closeForm(e, timedOutNote, resolvedNote) {
+  const d = parse(e); if (!d || !turnUI) return;
+  const box = turnUI.forms.get(d.request_id);
+  if (!box || box.classList.contains('resolved')) return;
+  box.classList.add('resolved');
+  let note = d.timeout ? timedOutNote : resolvedNote(d);
+  // Named when it was not the person who was asked - either person may
+  // answer a form either person can see. See docs/decisions/0017.
+  if (!d.timeout && d.actor && d.actor !== myEmail) note += ` (by ${displayNameFor(d.actor)})`;
+  box.appendChild(el('div', 'verdict', note));
+  scroll();
+}
+
+const LABELS = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
+                 Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
+                 WebFetch: 'web fetch', Task: 'delegate', TodoWrite: 'plan' };
+
+function wireStreamHandlers(stream) {
+  // Token-by-token streaming (requires --include-partial-messages support).
+  stream.addEventListener('text_delta', (e) => {
+    if (turnUI) turnUI.hasTextDelta = true;
+    appendText(e.data);
+  });
+  // Full-turn text from AssistantMessage — used when streaming isn't
+  // available, ignored if text_delta already delivered the content.
+  stream.addEventListener('text', (e) => {
+    if (turnUI && !turnUI.hasTextDelta) { turnUI.newParaNext = true; appendText(e.data); }
+  });
+
+  stream.addEventListener('agent_text', (e) => {
+    const d = parse(e); if (!d) return;
+    const box = agentBox(d.agent); if (!box) return;
+    let p = box.querySelector('.agent-text');
+    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); }
+    p.textContent += (d.text || '').replace(/\\n/g, '\n');
+  });
+
+  function thinkingInto() {
+    if (!turnUI) return null;
+    if (!turnUI.thought) {
+      turnUI.thought = el('details', 'thought');
+      turnUI.thought.appendChild(el('summary', '', 'thinking'));
+      turnUI.thought.appendChild(el('div', 'text', ''));
+      insert(turnUI.thought);
+    }
+    return turnUI.thought.querySelector('.text');
+  }
+  stream.addEventListener('thinking_delta', (e) => {
+    const t = thinkingInto(); if (t) t.textContent += e.data.replace(/\\n/g, '\n');
+  });
+  stream.addEventListener('thinking', (e) => {
+    if (turnUI && !turnUI.thought) {
+      const t = thinkingInto(); if (t) t.textContent = e.data.replace(/\\n/g, '\n');
+    }
+  });
+
+  // Two events arrive per tool call, both carrying the same id: one the
+  // instant the call starts (name only, from content_block_start) and one
+  // when the assistant message completes (with the arguments). The first is
+  // what makes a slow tool visible at all; the second fills it in. Keyed by
+  // id so the line is updated rather than drawn twice.
+  stream.addEventListener('tool_use', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    turnUI.newParaNext = true;   // next text starts a new paragraph
+    let t = d.id ? turnUI.toolLines.get(d.id) : null;
+    if (!t) {
+      const label = LABELS[d.name] || String(d.name || '').toLowerCase();
+      t = el('div', 'tool', '→ ' + label + ' ');
+      if (d.id) turnUI.toolLines.set(d.id, t);
+      insert(t, agentBox(d.agent));
+    }
+    if (d.detail) {
+      // .args, not .detail: tool_result appends its own .detail span for a
+      // failure, and this must never overwrite that.
+      let args = t.querySelector('.args');
+      if (!args) { args = el('span', 'detail args', ''); t.appendChild(args); }
+      args.textContent = d.detail;
+      scroll();
+    }
+    // Stashed, not acted on: the tool has not run yet, and a Write that then
+    // fails must not move the centre pane. tool_result is what decides.
+    if (d.id && d.target && d.target.kind) turnUI.toolTargets.set(d.id, d.target);
+  });
+
+  stream.addEventListener('tool_result', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    const line = turnUI.toolLines.get(d.id);
+    if (line && !d.ok) {   // successes stay quiet; only failures speak up
+      line.classList.add('failed');
+      line.appendChild(el('span', 'detail', ' — failed' + (d.detail ? ': ' + d.detail : '')));
+      scroll();
+    }
+    if (d.ok) {
+      const target = turnUI.toolTargets.get(d.id);
+      if (target) openInPane(target);
+    }
+  });
+
+  stream.addEventListener('agent_start', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    turnUI.lastAgentType = d.agent_type || '';
+    agentBox(d.agent_id);
+  });
+  stream.addEventListener('agent_stop', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    const box = turnUI.agents.get(d.agent_id);
+    if (box) box.querySelector('summary').textContent =
+      'subagent' + (d.agent_type ? ': ' + d.agent_type : '') + ' — done';
+  });
+
+  stream.addEventListener('todo', (e) => {
+    const d = parse(e); if (!d || !turnUI || !Array.isArray(d.todos)) return;
+    if (!turnUI.todos) { turnUI.todos = el('div', 'todos'); insert(turnUI.todos); }
+    turnUI.todos.innerHTML = '';
+    for (const t of d.todos) {
+      const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '·';
+      const text = t.status === 'in_progress' ? (t.activeForm || t.content) : t.content;
+      turnUI.todos.appendChild(el('div', 'item ' + (t.status || ''), mark + ' ' + text));
+    }
+    scroll();
+  });
+
+  // The message that starts (or steers) a turn - see the module comment
+  // above. Rendered purely from the stream, for every person and every
+  // reload alike: nothing is drawn client-side before this event confirms it
+  // actually landed.
+  stream.addEventListener('user_message', (e) => {
+    const d = parse(e); if (!d) return;
+    const isMe = d.actor === myEmail;
+    const isNewTurn = !turnUI || turnUI.turnId !== d.turn_id;
+    const { wrap, body } = addMessage(isMe ? 'you' : 'them', isMe ? 'me' : 'other',
+                                       isMe ? null : displayNameFor(d.actor));
+    if (d.text) {
+      const p = document.createElement('p');
+      p.textContent = d.text;
+      body.appendChild(p);
+    }
+    // Images are never persisted server-side (only sent as base64 content
+    // blocks), so unlike a file attachment there is nothing to re-render
+    // after a reload — see docs/decisions/0017.
+    if (d.images) body.appendChild(el('div', 'msg-images-note', '📎 image attached'));
+    lastYouBubble = { wrap, body, filesBox: null };
+
+    ensureTurnUI(d.turn_id);
+    if (isNewTurn) startAgentBubble();
+    else turnUI.newParaNext = true; // an injected message is a paragraph break too
+  });
+
+  stream.addEventListener('attachment', (e) => {
+    const d = parse(e); if (!d || !lastYouBubble) return;
+    if (!lastYouBubble.filesBox) {
+      lastYouBubble.filesBox = el('div', 'msg-files');
+      lastYouBubble.body.appendChild(lastYouBubble.filesBox);
+    }
+    const chip = el('div', 'file-chip clickable');
+    chip.appendChild(el('span', 'name', d.name));
+    chip.onclick = () => openUpload({ url: d.url, name: d.name });
+    lastYouBubble.filesBox.appendChild(chip);
+    scroll();
+  });
+
+  stream.addEventListener('ask', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    const box = el('div', 'ask');
+    if (d.header) box.appendChild(el('div', 'sub', d.header));
+    box.appendChild(el('div', 'q', d.question || ''));
+    const type = d.multi_select ? 'checkbox' : 'radio';
+    (d.options || []).forEach((opt, i) => {
+      const label = el('label');
+      const cb = document.createElement('input');
+      cb.type = type; cb.name = 'opt-' + d.request_id; cb.value = opt;
+      if (!d.multi_select && i === 0) cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + opt));
+      box.appendChild(label);
+    });
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.placeholder = (d.options || []).length ? 'or write your own…' : 'your answer…';
+    box.appendChild(other);
+
+    const actions = el('div', 'actions');
+    const submit = el('button', 'primary', 'Answer');
+    submit.onclick = () => {
+      const picked = [...box.querySelectorAll('input[type=' + type + ']:checked')].map(i => i.value);
+      resolveForm('answer', { request_id: d.request_id, answers: picked, notes: other.value.trim() },
+                  box, 'answered');
+    };
+    actions.appendChild(submit);
+    box.appendChild(actions);
+    turnUI.forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  stream.addEventListener('permission', (e) => {
+    const d = parse(e); if (!d || !turnUI) return;
+    const box = el('div', 'perm');
+    box.appendChild(el('div', 'q', d.title || ('Allow ' + d.tool + '?')));
+    const sub = [d.description, d.detail, d.blocked_path, d.reason].filter(Boolean).join(' — ');
+    if (sub) box.appendChild(el('div', 'sub', sub));
+
+    const actions = el('div', 'actions');
+    const allow = el('button', 'allow', 'Allow');
+    const deny = el('button', 'deny', 'Deny');
+    allow.onclick = () => resolveForm('permission',
+      { request_id: d.request_id, decision: 'allow' }, box, 'allowed');
+    deny.onclick = () => resolveForm('permission',
+      { request_id: d.request_id, decision: 'deny' }, box, 'denied');
+    actions.appendChild(allow);
+    actions.appendChild(deny);
+    box.appendChild(actions);
+    turnUI.forms.set(d.request_id, box);
+    insert(box);
+  });
+
+  stream.addEventListener('answered', (e) =>
+    closeForm(e, 'nobody answered in time; the agent carried on', () => 'answered'));
+  stream.addEventListener('permission_resolved', (e) =>
+    closeForm(e, 'not approved in time; denied', (d) => d.decision === 'allow' ? 'allowed' : 'denied'));
+
+  stream.addEventListener('turn_done', (e) => finishTurn(parse(e), false));
+  stream.addEventListener('turn_failed', (e) => finishTurn(parse(e), true));
+
+  stream.onerror = () => {
+    // EventSource reconnects on its own and the server replays from
+    // Last-Event-ID, so a transient drop needs no handling here. CLOSED
+    // means the browser gave up for good (e.g. a fatal auth failure).
+    if (stream.readyState === EventSource.CLOSED) {
+      hint.textContent = 'Lost the connection to this conversation. Reload to reconnect.';
+    }
+  };
+}
+
+stopBtn.addEventListener('click', async () => {
+  if (!turnUI || turnUI.finished) return;
+  stopBtn.disabled = true;
+  try {
+    await fetch('/api/turns/' + turnUI.turnId + '/stop', { method: 'POST' });
+  } finally {
+    stopBtn.disabled = false;
+  }
+});
+
+// --- the conversation list, and switching between conversations -----------
+
+function initialConversationIdFromUrl() {
+  const fromQuery = new URLSearchParams(location.search).get('c');
+  if (fromQuery) return fromQuery;
+  const m = location.pathname.match(/^\/c\/([^/]+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function setConversationUrlParam(id) {
+  const url = new URL(location.href);
+  url.searchParams.set('c', id);
+  history.replaceState({}, '', url.pathname + url.search + url.hash);
+}
+
+async function loadConversations() {
+  try {
+    const { conversations } = await (await fetch('/api/conversations')).json();
+    conversationPicker.innerHTML = '';
+    for (const c of conversations) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.title || 'Untitled — ' + new Date(c.updated_at).toLocaleString();
+      conversationPicker.appendChild(opt);
+    }
+    return conversations;
+  } catch {
+    return [];
+  }
+}
+
+function openConversation(id) {
+  if (es) { es.close(); es = null; }
+  activeConversationId = id;
+  turnUI = null;
+  lastYouBubble = null;
+  chatLog.innerHTML = '';
+  stopBtn.hidden = true;
+  setConversationUrlParam(id);
+  if (!conversationPicker.querySelector(`option[value="${CSS.escape(id)}"]`)) {
+    // A direct link to a conversation the list happened not to include yet
+    // (e.g. one just created, or a bookmark) - <select>.value silently
+    // ignores an id with no matching <option>, so give it one.
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = 'This conversation';
+    conversationPicker.appendChild(opt);
+  }
+  conversationPicker.value = id;
+
+  es = new EventSource('/api/conversations/' + id + '/events');
+  wireStreamHandlers(es);
+}
+
+conversationPicker.addEventListener('change', () => {
+  if (conversationPicker.value) openConversation(conversationPicker.value);
+});
+
+newChatBtn.addEventListener('click', async () => {
+  const res = await fetch('/api/conversations', { method: 'POST' });
+  if (!res.ok) return;
+  const { conversation_id } = await res.json();
+  await loadConversations();
+  openConversation(conversation_id);
+});
+
 async function boot() {
   try {
     const me = await (await fetch('/api/me')).json();
+    myEmail = me.email;
     document.getElementById('who').textContent = me.email;
   } catch { document.getElementById('who').textContent = 'not signed in'; }
   try {
@@ -613,12 +1106,20 @@ async function boot() {
 
   loadFiles();
 
-  const resumeId = localStorage.getItem(ACTIVE_TURN_KEY);
-  if (resumeId) {
-    send.disabled = true;
-    send.textContent = 'Working…';
-    stream(resumeId, { resuming: true });
+  let conversationList = await loadConversations();
+  let target = initialConversationIdFromUrl() || (conversationList[0] && conversationList[0].id);
+  if (!target) {
+    const res = await fetch('/api/conversations', { method: 'POST' });
+    if (res.ok) {
+      target = (await res.json()).conversation_id;
+      // The picker's <option>s come from this list - setting .value to an id
+      // with no matching option is silently ignored by the browser, so a
+      // freshly created conversation has to be reloaded into it before
+      // openConversation() below can select it.
+      conversationList = await loadConversations();
+    }
   }
+  if (target) openConversation(target);
 }
 
 form.addEventListener('submit', async (e) => {
@@ -626,435 +1127,48 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   const images = pendingImages.slice();
   const files = pendingFiles.slice();
-  if (!text && !images.length && !files.length) return;
+  if ((!text && !images.length && !files.length) || !activeConversationId) return;
   input.value = '';
   pendingImages = [];
   pendingFiles = [];
   previews.innerHTML = '';
   send.disabled = true;
-  send.textContent = 'Working…';
 
-  const { wrap: youWrap, body: youBody } = addMessage('you', 'me');
-  const fileChips = []; // [{chip, name, base64}], wired to a click handler once turnId is known
-  if (images.length) {
-    const imgRow = document.createElement('div');
-    imgRow.className = 'msg-images';
-    for (const img of images) {
-      const el = document.createElement('img');
-      el.src = img.dataUrl;
-      el.onclick = () => openUpload({ url: img.dataUrl, name: 'image' });
-      imgRow.appendChild(el);
-    }
-    youBody.appendChild(imgRow);
-  }
-  if (files.length) {
-    const fileRow = el('div', 'msg-files');
-    for (const f of files) {
-      const chip = el('div', 'file-chip clickable');
-      chip.appendChild(el('span', 'name', f.name));
-      chip.appendChild(el('span', 'size', humanSize(f.size)));
-      chip.onclick = () => openUpload({ url: dataUrlFor(f.name, f.base64), name: f.name });
-      fileRow.appendChild(chip);
-      fileChips.push(chip);
-    }
-    youBody.appendChild(fileRow);
-  }
-  if (text) {
-    const p = document.createElement('p');
-    p.textContent = text;
-    youBody.appendChild(p);
-  }
-
-  let turnId;
   try {
-    const res = await fetch('/api/turns', {
+    const res = await fetch('/api/conversations/' + activeConversationId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message: text,
-        session_id: sessionId,
         images: images.map(i => ({ media_type: i.mediaType, data: i.base64 })),
         files: files.map(f => ({ name: f.name, data: f.base64 })),
       }),
     });
     if (!res.ok) {
-      // Surface the server's own reason. A rejected attachment answers 400 or
-      // 413 with a detail that names the file, and "submit failed: 413" alone
-      // sends the user hunting for a problem the server already described.
+      // Surface the server's own reason. A rejected attachment answers 400
+      // or 413 with a detail that names the file, and a 409 names who is
+      // busy - "submit failed: 409" alone sends the user hunting for a
+      // problem the server already described.
       let detail = '';
       try { detail = (await res.json()).detail || ''; } catch {}
       throw new Error(detail || 'submit failed: ' + res.status);
     }
-    turnId = (await res.json()).turn_id;
+    // Nothing to render here: the `user_message` event on the stream is what
+    // draws the bubble, for this sender exactly the same as for anyone else.
   } catch (err) {
-    // Put the composer back. A 409 ("a turn is already running") is an ordinary
-    // outcome now that one turn runs at a time, not an exceptional one, and
-    // losing a paragraph and its attachments to it would teach people to copy
-    // their message before every send. The submitted bubble goes too, so the
-    // log does not show a message that was never sent.
-    // Re-added through the same helpers rather than by reassigning the arrays,
-    // so each restored chip gets its remove button wired up again. Nothing
-    // pasted while the request was in flight is cleared, and the text is only
-    // restored if the box is still empty - recovering the old message must not
-    // destroy a newer one.
-    youWrap.remove();
+    // Put the composer back so nothing pasted or typed is lost. Re-added
+    // through the same helpers rather than by reassigning the arrays, so
+    // each restored chip gets its remove button wired up again. The text is
+    // only restored if the box is still empty - recovering the old message
+    // must not destroy a newer one typed while the request was in flight.
     if (!input.value) input.value = text;
     for (const i of images) addImagePreview(i.dataUrl, i.mediaType, i.base64);
     for (const f of files) addFilePreview(f.name, f.size, f.base64);
     addMessage('error', '').body.classList.add('err');
     chatLog.lastChild.querySelector('.body').textContent = String(err);
+  } finally {
     send.disabled = false;
-    send.textContent = 'Send';
-    return;
   }
-  localStorage.setItem(ACTIVE_TURN_KEY, turnId);
-  stream(turnId, { resuming: false });
 });
-
-function stream(turnId, { resuming }) {
-  const msg = addMessage('agent', '');
-  let attachmentsBox = null; // built lazily, only when resuming
-
-  // Pulsing indicator, with the elapsed time beside it. It stays for the WHOLE
-  // turn and is removed only by finish().
-  //
-  // It used to be removed on the first token instead, which read as "finished"
-  // for the rest of the turn: after one sentence like "Reading the CSV now."
-  // there could be minutes of real work — a long tool call, a subagent, a long
-  // stretch of thinking — with nothing on screen moving. The only remaining hint
-  // that the turn was alive was the Revert button not being there yet, which is
-  // not a signal anyone reads. The elapsed clock is the other half: it
-  // distinguishes "slow" from "hung" without anyone having to guess.
-  const working = el('div', 'working');
-  const dots = el('div', 'thinking');
-  for (let i = 0; i < 3; i++) dots.appendChild(el('span'));
-  working.appendChild(dots);
-  const elapsed = el('span', 'elapsed', '');
-  working.appendChild(elapsed);
-  msg.wrap.appendChild(working);
-
-  const startedAt = Date.now();
-  const tick = setInterval(() => {
-    const s = Math.round((Date.now() - startedAt) / 1000);
-    elapsed.textContent = s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
-  }, 1000);
-
-  const es = new EventSource('/api/turns/' + turnId + '/events');
-  let hasTextDelta = false; // true once the CLI streams at least one token
-  let currentPara = null;   // the <p> currently receiving streamed tokens
-  let newParaNext = true;   // start a fresh <p> on the next text chunk
-
-  function appendText(raw) {
-    if (newParaNext) {
-      currentPara = el('p', '');
-      msg.body.appendChild(currentPara);
-      newParaNext = false;
-    }
-    currentPara.textContent += raw.replace(/\\n/g, '\n');
-    scroll();
-  }
-
-  // Structured events carry a JSON payload; text ones stay raw strings.
-  const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
-
-  // Insert into the main message, keeping the working indicator last so it
-  // always sits below the newest thing that happened rather than above it.
-  function insert(node, into) {
-    if (into) { into.appendChild(node); }
-    else { msg.wrap.insertBefore(node, working); }
-    scroll();
-  }
-
-  const toolLines = new Map();   // tool_use id -> its .tool div
-  const toolTargets = new Map(); // tool_use id -> its {kind, path}, if any
-  const forms = new Map();       // request_id -> the ask/permission element
-  const agents = new Map();      // agent key -> its <details> container
-  let lastAgentType = '';
-  let thought = null;
-  let todos = null;
-
-  // Subagent output must never land in the reply, which is why the server tags
-  // it. Containers are keyed by whatever tag the event carries: agent_start
-  // reports the SDK's agent id while message events report the Task call's
-  // tool_use id, and those are different identifiers, so with several subagents
-  // running at once attribution between blocks can be wrong. What cannot go
-  // wrong is subagent text reaching the main paragraph.
-  function agentBox(key) {
-    if (!key) return null;
-    if (!agents.has(key)) {
-      const d = el('details', 'subagent');
-      d.appendChild(el('summary', '', 'subagent' + (lastAgentType ? ': ' + lastAgentType : '') + ' — working'));
-      insert(d);
-      agents.set(key, d);
-    }
-    return agents.get(key);
-  }
-
-  // Token-by-token streaming (requires --include-partial-messages support).
-  es.addEventListener('text_delta', (e) => { hasTextDelta = true; appendText(e.data); });
-  // Full-turn text from AssistantMessage — used when streaming isn't available,
-  // ignored if text_delta already delivered the content.
-  es.addEventListener('text', (e) => {
-    if (!hasTextDelta) { newParaNext = true; appendText(e.data); }
-  });
-
-  es.addEventListener('agent_text', (e) => {
-    const d = parse(e); if (!d) return;
-    const box = agentBox(d.agent); if (!box) return;
-    let p = box.querySelector('.agent-text');
-    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); }
-    p.textContent += (d.text || '').replace(/\\n/g, '\n');
-  });
-
-  const thinkingInto = () => {
-    if (!thought) {
-      thought = el('details', 'thought');
-      thought.appendChild(el('summary', '', 'thinking'));
-      thought.appendChild(el('div', 'text', ''));
-      insert(thought);
-    }
-    return thought.querySelector('.text');
-  };
-  es.addEventListener('thinking_delta', (e) => {
-    thinkingInto().textContent += e.data.replace(/\\n/g, '\n');
-  });
-  es.addEventListener('thinking', (e) => {
-    if (!thought) thinkingInto().textContent = e.data.replace(/\\n/g, '\n');
-  });
-
-  const LABELS = { Bash: 'bash', Read: 'read', Write: 'write', Edit: 'edit',
-                   Glob: 'glob', Grep: 'grep', WebSearch: 'web search',
-                   WebFetch: 'web fetch', Task: 'delegate', TodoWrite: 'plan' };
-
-  // Two events arrive per tool call, both carrying the same id: one the instant
-  // the call starts (name only, from content_block_start) and one when the
-  // assistant message completes (with the arguments). The first is what makes a
-  // slow tool visible at all; the second fills it in. Keyed by id so the line is
-  // updated rather than drawn twice.
-  es.addEventListener('tool_use', (e) => {
-    const d = parse(e); if (!d) return;
-    newParaNext = true;   // next text starts a new paragraph
-    let t = d.id ? toolLines.get(d.id) : null;
-    if (!t) {
-      const label = LABELS[d.name] || String(d.name || '').toLowerCase();
-      t = el('div', 'tool', '→ ' + label + ' ');
-      if (d.id) toolLines.set(d.id, t);
-      insert(t, agentBox(d.agent));
-    }
-    if (d.detail) {
-      // .args, not .detail: tool_result appends its own .detail span for a
-      // failure, and this must never overwrite that.
-      let args = t.querySelector('.args');
-      if (!args) { args = el('span', 'detail args', ''); t.appendChild(args); }
-      args.textContent = d.detail;
-      scroll();
-    }
-    // Stashed, not acted on: the tool has not run yet, and a Write that then
-    // fails must not move the centre pane. tool_result is what decides.
-    if (d.id && d.target && d.target.kind) toolTargets.set(d.id, d.target);
-  });
-
-  es.addEventListener('tool_result', (e) => {
-    const d = parse(e); if (!d) return;
-    const line = toolLines.get(d.id);
-    if (line && !d.ok) {   // successes stay quiet; only failures speak up
-      line.classList.add('failed');
-      line.appendChild(el('span', 'detail', ' — failed' + (d.detail ? ': ' + d.detail : '')));
-      scroll();
-    }
-    if (d.ok) {
-      const target = toolTargets.get(d.id);
-      if (target) openInPane(target);
-    }
-  });
-
-  es.addEventListener('agent_start', (e) => {
-    const d = parse(e); if (!d) return;
-    lastAgentType = d.agent_type || '';
-    agentBox(d.agent_id);
-  });
-  es.addEventListener('agent_stop', (e) => {
-    const d = parse(e); if (!d) return;
-    const box = agents.get(d.agent_id);
-    if (box) box.querySelector('summary').textContent =
-      'subagent' + (d.agent_type ? ': ' + d.agent_type : '') + ' — done';
-  });
-
-  es.addEventListener('todo', (e) => {
-    const d = parse(e); if (!d || !Array.isArray(d.todos)) return;
-    if (!todos) { todos = el('div', 'todos'); insert(todos); }
-    todos.innerHTML = '';
-    for (const t of d.todos) {
-      const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '·';
-      const text = t.status === 'in_progress' ? (t.activeForm || t.content) : t.content;
-      todos.appendChild(el('div', 'item ' + (t.status || ''), mark + ' ' + text));
-    }
-    scroll();
-  });
-
-  // The user's own message only exists client-side - nothing replays its
-  // text. On a normal send it is already on screen with its own chips, so
-  // this event is ignored there; it exists for the resume path, where a
-  // reload has nothing BUT this event to show what was attached.
-  es.addEventListener('attachment', (e) => {
-    if (!resuming) return;
-    const d = parse(e); if (!d) return;
-    if (!attachmentsBox) {
-      const box = addMessage('you', 'me');
-      attachmentsBox = el('div', 'msg-files');
-      box.body.appendChild(attachmentsBox);
-      chatLog.insertBefore(box.wrap, msg.wrap);
-    }
-    const chip = el('div', 'file-chip clickable');
-    chip.appendChild(el('span', 'name', d.name));
-    chip.onclick = () => openUpload({ url: d.url, name: d.name });
-    attachmentsBox.appendChild(chip);
-  });
-
-  // --- the two round-trips back into the running turn --------------------
-  //
-  // Both post to the turn that is still executing, and both are disabled by the
-  // matching resolution event — which also arrives when another tab answered
-  // first, or when the request timed out on the server.
-
-  async function resolve(path, body, box, verdict) {
-    box.classList.add('resolved');
-    const r = await fetch('/api/turns/' + turnId + '/' + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    let note = verdict;
-    if (!r.ok) {
-      let detail = '';
-      try { detail = (await r.json()).detail || ''; } catch {}
-      note = detail || 'could not send that';
-    }
-    box.appendChild(el('div', 'verdict', note));
-    scroll();
-  }
-
-  es.addEventListener('ask', (e) => {
-    const d = parse(e); if (!d) return;
-    const box = el('div', 'ask');
-    if (d.header) box.appendChild(el('div', 'sub', d.header));
-    box.appendChild(el('div', 'q', d.question || ''));
-    const type = d.multi_select ? 'checkbox' : 'radio';
-    (d.options || []).forEach((opt, i) => {
-      const label = el('label');
-      const cb = document.createElement('input');
-      cb.type = type; cb.name = 'opt-' + d.request_id; cb.value = opt;
-      if (!d.multi_select && i === 0) cb.checked = true;
-      label.appendChild(cb);
-      label.appendChild(document.createTextNode(' ' + opt));
-      box.appendChild(label);
-    });
-    const other = document.createElement('input');
-    other.type = 'text';
-    other.placeholder = (d.options || []).length ? 'or write your own…' : 'your answer…';
-    box.appendChild(other);
-
-    const actions = el('div', 'actions');
-    const submit = el('button', 'primary', 'Answer');
-    submit.onclick = () => {
-      const picked = [...box.querySelectorAll('input[type=' + type + ']:checked')].map(i => i.value);
-      resolve('answer', { request_id: d.request_id, answers: picked, notes: other.value.trim() },
-              box, 'answered');
-    };
-    actions.appendChild(submit);
-    box.appendChild(actions);
-    forms.set(d.request_id, box);
-    insert(box);
-  });
-
-  es.addEventListener('permission', (e) => {
-    const d = parse(e); if (!d) return;
-    const box = el('div', 'perm');
-    box.appendChild(el('div', 'q', d.title || ('Allow ' + d.tool + '?')));
-    const sub = [d.description, d.detail, d.blocked_path, d.reason].filter(Boolean).join(' — ');
-    if (sub) box.appendChild(el('div', 'sub', sub));
-
-    const actions = el('div', 'actions');
-    const allow = el('button', 'allow', 'Allow');
-    const deny = el('button', 'deny', 'Deny');
-    allow.onclick = () => resolve('permission',
-      { request_id: d.request_id, decision: 'allow' }, box, 'allowed');
-    deny.onclick = () => resolve('permission',
-      { request_id: d.request_id, decision: 'deny' }, box, 'denied');
-    actions.appendChild(allow);
-    actions.appendChild(deny);
-    box.appendChild(actions);
-    forms.set(d.request_id, box);
-    insert(box);
-  });
-
-  function closeForm(e, timedOutNote, resolvedNote) {
-    const d = parse(e); if (!d) return;
-    const box = forms.get(d.request_id);
-    if (!box || box.classList.contains('resolved')) return;
-    box.classList.add('resolved');
-    box.appendChild(el('div', 'verdict', d.timeout ? timedOutNote : resolvedNote(d)));
-    scroll();
-  }
-  es.addEventListener('answered', (e) =>
-    closeForm(e, 'nobody answered in time; the agent carried on', () => 'answered'));
-  es.addEventListener('permission_resolved', (e) =>
-    closeForm(e, 'not approved in time; denied', (d) => d.decision === 'allow' ? 'allowed' : 'denied'));
-
-  es.addEventListener('session', (e) => { sessionId = e.data; });
-  es.addEventListener('status', () => {});
-
-  let finished = false;
-  const finish = (failed, detail) => {
-    // Idempotent: `done` and a subsequent onerror can both arrive, and a second
-    // pass would append a second Revert button to the same turn.
-    if (finished) return;
-    finished = true;
-    clearInterval(tick);
-    working.remove();
-    es.close();
-    send.disabled = false;
-    send.textContent = 'Send';
-    linkifyKbPaths(msg.wrap);
-    if (failed) {
-      const n = el('div', 'body err', detail || 'the turn failed');
-      msg.wrap.appendChild(n);
-    }
-    // Every turn is wrapped in a TigerFS savepoint, so reverting is atomic
-    // — and the undo is itself reversible.
-    const btn = el('button', 'revert', 'Revert this turn');
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = 'Reverting…';
-      const r = await fetch('/api/turns/' + turnId + '/revert', { method: 'POST' });
-      btn.textContent = r.ok ? 'Reverted' : 'Revert failed';
-    };
-    msg.wrap.appendChild(btn);
-    scroll();
-  };
-
-  // The marker is cleared ONLY on these two server-authoritative events, not
-  // from onerror below. A page reload closes this EventSource exactly the
-  // same way a truly dead connection does, and that closure fires onerror
-  // synchronously in the dying document, before the reloaded page's boot()
-  // ever runs - clearing the marker there defeated resume for the one case
-  // it exists to handle.
-  es.addEventListener('done', () => { localStorage.removeItem(ACTIVE_TURN_KEY); finish(false); });
-  es.addEventListener('failed', (e) => { localStorage.removeItem(ACTIVE_TURN_KEY); finish(true, e.data); });
-  es.onerror = () => {
-    // EventSource reconnects on its own and the server replays from
-    // Last-Event-ID, so a transient drop needs no handling here.
-    if (es.readyState !== EventSource.CLOSED) return;
-    if (!resuming) { finish(true, 'connection closed'); return; }
-    // A resumed id can be gone for good - the Registry evicts oldest-finished
-    // turns past 200, or the marker is simply stale. Confirmed before
-    // clearing it, so an ordinary network hiccup during resume does not
-    // discard state that a retry would have recovered.
-    fetch('/api/turns/' + turnId)
-      .then((r) => { if (r.status === 404) localStorage.removeItem(ACTIVE_TURN_KEY); })
-      .catch(() => {})
-      .finally(() => finish(true, 'connection closed'));
-  };
-}
 
 boot();

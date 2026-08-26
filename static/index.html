@@ -27,6 +27,10 @@
   <div class="gutter" id="gutter-chat" role="separator" aria-orientation="vertical" aria-label="Resize the chat panel"></div>
 
   <aside id="chat">
+    <div class="chat-header">
+      <select id="conversation-picker" title="Conversations"></select>
+      <button class="new-chat" id="new-chat" type="button" title="New chat">+ New</button>
+    </div>
     <div class="chat-log" id="log"></div>
     <div class="composer">
       <form id="form">
@@ -35,6 +39,7 @@
           <textarea id="input" rows="2" placeholder="Ask, or tell it something worth remembering…"></textarea>
           <input type="file" id="filepicker" multiple hidden>
           <button class="attach" id="attach" type="button" title="Attach files">📎</button>
+          <button class="stop" id="stop" type="button" title="Stop this turn" hidden>Stop</button>
           <button class="send" id="send" type="submit">Send</button>
         </div>
       </form>

@@ -39,6 +39,23 @@ _jwks_cache: dict | None = None
 _jwks_fetched_at: float = 0.0
 
 
+def display_name_for(email: str) -> str:
+    """A name for the shared household chat, from a bare email.
+
+    Module-level (not just Identity.display_name) because app/agent.py needs
+    to resolve a name from `Turn.actor_email` - a plain string, not a verified
+    Identity, since that turn may be replayed long after the request that
+    started it. `config.household_names` is reviewed config the household
+    sets up; never blank, so a member missing from it degrades to their
+    email's local part rather than to anonymity - see docs/decisions/0017.
+    """
+    mapped = config.household_names.get(email.lower())
+    if mapped:
+        return mapped
+    local = email.split("@", 1)[0]
+    return local[:1].upper() + local[1:] if local else email
+
+
 @dataclass(frozen=True)
 class Identity:
     email: str
@@ -50,6 +67,10 @@ class Identity:
         return "".join(
             c if c.isalnum() or c in "-_" else "_" for c in self.email.lower()
         )
+
+    @property
+    def display_name(self) -> str:
+        return display_name_for(self.email)
 
 
 async def _get_jwks(*, force: bool = False) -> dict:
