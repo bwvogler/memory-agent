@@ -193,9 +193,9 @@ def _write_and_read_back(path: Path, payload: bytes) -> bytes:
 
 
 def seed_bootstrap() -> None:
-    """Copy bootstrap skill files into the KB workspace.
+    """Copy bootstrap skill and wiki files into the KB workspace.
 
-    These skills live in the KB so the human can improve them, which means we
+    These files live in the KB so the human can improve them, which means we
     cannot simply overwrite on upgrade. But never overwriting is worse: a
     shipped fix would silently never reach any existing deployment, and the
     seeder would look like it worked.
@@ -222,21 +222,30 @@ def seed_bootstrap() -> None:
     """
     if not kb.is_mounted():
         return
-    skills_src = BOOTSTRAP_DIR / "skills"
-    if not skills_src.is_dir():
+    _seed_tree(BOOTSTRAP_DIR / "skills", kb.workspace_root() / "skills")
+    _seed_tree(BOOTSTRAP_DIR / "wiki", kb.workspace_root() / "wiki")
+
+
+def _seed_tree(src_dir: Path, dst_dir: Path) -> None:
+    """Hash-tracked copy of one bootstrap tree into the KB workspace.
+
+    See seed_bootstrap's docstring for why this is hash-tracked rather than
+    write-once (skills) or always-overwrite: files here are meant to be
+    human-editable, and a naive overwrite would clobber that on every deploy.
+    """
+    if not src_dir.is_dir():
         return
 
-    skills_dst = kb.workspace_root() / "skills"
-    state_path = skills_dst / SEED_STATE_FILE
+    state_path = dst_dir / SEED_STATE_FILE
     shipped = _read_seed_state(state_path)
     updated: dict[str, SeedEntry] = {}
 
-    for src_file in sorted(skills_src.rglob("*")):
+    for src_file in sorted(src_dir.rglob("*")):
         if not src_file.is_file():
             continue
-        rel = src_file.relative_to(skills_src)
+        rel = src_file.relative_to(src_dir)
         key = rel.as_posix()
-        dst_file = skills_dst / rel
+        dst_file = dst_dir / rel
         payload = src_file.read_bytes()
         source_hash = _digest(payload)
         entry = shipped.get(key)
@@ -247,7 +256,7 @@ def seed_bootstrap() -> None:
 
                 if entry is None:
                     log.warning(
-                        "skill %s predates seed tracking; leaving it alone. "
+                        "%s predates seed tracking; leaving it alone. "
                         "Delete it to take the shipped version.",
                         dst_file,
                     )
@@ -268,7 +277,7 @@ def seed_bootstrap() -> None:
                         updated[key] = {"source": source_hash, "stored": current_hash}
                     else:
                         log.warning(
-                            "skill %s has legacy seed state and differs from "
+                            "%s has legacy seed state and differs from "
                             "the shipped version; leaving it alone. Delete it "
                             "to take the new one.",
                             dst_file,
@@ -278,7 +287,7 @@ def seed_bootstrap() -> None:
 
                 if current_hash != entry.get("stored"):
                     log.warning(
-                        "skill %s has local edits; not overwriting with the "
+                        "%s has local edits; not overwriting with the "
                         "shipped version. Previous content stays in TigerFS "
                         "history if you want to compare.",
                         dst_file,
@@ -296,7 +305,7 @@ def seed_bootstrap() -> None:
             dst_file.parent.mkdir(parents=True, exist_ok=True)
             stored = _write_and_read_back(dst_file, payload)
             updated[key] = {"source": source_hash, "stored": _digest(stored)}
-            log.info("seeded bootstrap skill file %s", dst_file)
+            log.info("seeded bootstrap file %s", dst_file)
         except OSError as exc:
             log.warning("could not seed %s: %s", dst_file, exc)
             updated.pop(key, None)
@@ -470,6 +479,8 @@ def _system_prompt_append(bd_context: str = "") -> str:
         "Note that some control paths are path-accessible but deliberately "
         "hidden from `ls`, so do not conclude they are absent just because a "
         "directory listing does not show them.",
+        "The only files allowed at the workspace root are `AGENT_GUIDE.md` and "
+        "`backlog.md`; everything else belongs under `wiki/` or `skills/`.",
         # Kept deliberately short. Appends are refused structurally by the
         # PreToolUse hook in app/guards.py, whose denial message explains the
         # safe pattern at the moment it is needed. An earlier version spelled

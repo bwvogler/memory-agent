@@ -182,23 +182,24 @@ async function loadFiles(openPath) {
       const child = node.dirs[name];
       const dirPath = child.path;
 
+      const skillPath = dirPath + '/SKILL.md';
+      const guidePath = dirPath + '/GUIDE.md';
+      const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
+
       if (depth === 0) {
         // Top-level dirs are section headers, not collapsible
         const section = document.createElement('div');
         section.className = 'section-header';
         section.textContent = name;
-        section.onclick = () => {
-          const skillPath = dirPath + '/SKILL.md';
-          const guidePath = dirPath + '/GUIDE.md';
-          const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
-          if (openPath) openKbFile(openPath);
-        };
+        if (openPath) section.dataset.path = openPath;
+        section.onclick = () => { if (openPath) openKbFile(openPath); };
         container.appendChild(section);
         renderNode(child, container, depth + 1);
       } else {
         const header = document.createElement('div');
         header.className = 'dir-header';
         header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
+        if (openPath) header.dataset.path = openPath;
         const toggle = document.createElement('span');
         toggle.className = 'dir-toggle';
         toggle.textContent = '▾';
@@ -213,9 +214,6 @@ async function loadFiles(openPath) {
         header.onclick = () => {
           const collapsed = children.classList.toggle('collapsed');
           toggle.classList.toggle('collapsed', collapsed);
-          const skillPath = dirPath + '/SKILL.md';
-          const guidePath = dirPath + '/GUIDE.md';
-          const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
           if (openPath) openKbFile(openPath);
         };
 
@@ -228,6 +226,7 @@ async function loadFiles(openPath) {
     node.files.sort().forEach(f => {
       const base = f.split('/').pop();
       if (base === 'GUIDE.md' || base === 'SKILL.md') return;
+      if (depth === 0 && base === 'AGENT_GUIDE.md') return;
       const name = base.replace(/\.md$/, '');
       const a = document.createElement('a');
       a.textContent = name;
@@ -254,8 +253,12 @@ async function loadFiles(openPath) {
 }
 
 function setActiveTreeLink(path) {
-  document.querySelectorAll('nav a').forEach(a =>
-    a.classList.toggle('active', a.dataset.path === path));
+  document.querySelectorAll('nav a, nav .dir-header, nav .section-header, .nav-title').forEach(el =>
+    el.classList.toggle('active', el.dataset.path === path));
+}
+
+function openAgentGuide() {
+  if (knownKbFiles.has('AGENT_GUIDE.md')) openKbFile('AGENT_GUIDE.md');
 }
 
 // --- sanitising rendered markdown ---------------------------------------

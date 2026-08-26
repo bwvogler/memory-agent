@@ -51,6 +51,9 @@ nav {
   padding: 0 12px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .nav-header span { font-size: 12px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .06em; color: var(--muted); }
+.nav-title { cursor: pointer; }
+.nav-title:hover { color: var(--accent); }
+.nav-title.active { color: var(--accent); }
 .refresh { background: none; border: none; cursor: pointer; color: var(--muted);
   font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
 .refresh:hover { color: var(--accent); background: var(--line); }
