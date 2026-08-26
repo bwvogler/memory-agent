@@ -216,7 +216,12 @@ async function loadFiles(openPath) {
       header.onclick = () => {
         const collapsed = children.classList.toggle('collapsed');
         toggle.classList.toggle('collapsed', collapsed);
-        if (openPath) openKbFile(openPath);
+        // Only open the dir's GUIDE/SKILL file when the click just EXPANDED
+        // it, not when it just collapsed it - openKbFile() re-expands this
+        // same header via expandAncestors(), which otherwise undid the
+        // collapse on the same click for any directory with its own guide
+        // (wiki/, skills/, and any wiki/ subdirectory that has one).
+        if (openPath && !collapsed) openKbFile(openPath);
       };
 
       dirNodes.set(dirPath, { children, toggle });
