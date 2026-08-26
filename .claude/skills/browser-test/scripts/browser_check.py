@@ -52,6 +52,10 @@ def main() -> int:
     parser.add_argument(
         "--screenshot", metavar="PATH", help="final full-page screenshot",
     )
+    parser.add_argument(
+        "--console", action="store_true",
+        help="print browser console messages and page errors as they happen",
+    )
     args = parser.parse_args()
 
     # Actions interleave in command-line order: --wait-for, --click and
@@ -69,6 +73,14 @@ def main() -> int:
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": args.width, "height": args.height})
+        if args.console:
+            # Attached before goto, or messages logged during the initial
+            # load would never reach these handlers.
+            page.on(
+                "console",
+                lambda msg: print(f"console.{msg.type}: {msg.text}"),  # noqa: T201
+            )
+            page.on("pageerror", lambda exc: print(f"pageerror: {exc}"))  # noqa: T201
         page.goto(args.url, timeout=args.timeout)
 
         for flag in order:

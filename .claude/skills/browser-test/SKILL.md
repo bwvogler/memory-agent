@@ -7,8 +7,7 @@ description: >
   this in the browser", "verify the UI", "does the tree collapse correctly",
   "check this frontend change works", or after editing static/index.html,
   static/app.js, or static/app.css.
-version: 1.0.0
-user-invocable: true
+allowed-tools: Bash(.venv/bin/python ${CLAUDE_SKILL_DIR}/scripts/browser_check.py *)
 ---
 
 # Browser Test
@@ -79,11 +78,14 @@ uv pip install --python .venv/bin/python -r requirements-dev.txt
 
 `scripts/browser_check.py` runs its actions in the order they appear on the
 command line — mix `--wait-for`, `--click`, `--click-text`, `--eval` freely.
-Each `--eval` prints its JSON result; a trailing `--screenshot` always fires
-last.
+Each `--eval` prints its JSON result; `--console` prints any browser console
+message or page error as it happens; a trailing `--screenshot` always fires
+last. Invoke it exactly this way (matches this skill's `allowed-tools` grant,
+so it runs without a permission prompt):
 
 ```bash
-.venv/bin/python .claude/skills/browser-test/scripts/browser_check.py http://localhost:18080/kb \
+.venv/bin/python ${CLAUDE_SKILL_DIR}/scripts/browser_check.py http://localhost:18080/kb \
+  --console \
   --wait-for .section-header \
   --eval "document.querySelectorAll('.dir-children.collapsed').length" \
   --click-text wiki \
@@ -115,10 +117,12 @@ with sync_playwright() as pw:
 - Stack never becomes healthy: read the app logs before assuming the browser
   side is the problem —
   `docker compose -p memory-agent-test -f docker-compose.yml -f tests/compose.test.yml logs app | tail -50`.
-- A selector never appears: confirm what's actually in the DOM first (e.g.
-  `--eval "document.querySelector('nav').outerHTML"`) before concluding the
-  app is broken — a bug in the check script looks identical to a real
-  regression.
+- A selector never appears: run with `--console` first — a JS error mid-render
+  (a thrown exception in `app.js`) looks identical to "the selector just isn't
+  there yet" until you see the stack trace. Then confirm what's actually in the
+  DOM (e.g. `--eval "document.querySelector('nav').outerHTML"`) before
+  concluding the app is broken — a bug in the check script looks identical to a
+  real regression.
 - Whatever happens, still run the teardown command — a failed check must not
   leave the stack running for the next one to collide with.
 
