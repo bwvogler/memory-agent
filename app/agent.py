@@ -154,6 +154,11 @@ follow its format requirements. If no guide exists and you are creating structur
 content (recipes, notes, etc.), ask the human how they would like it formatted,
 then write a `GUIDE.md` documenting that format for future turns.
 
+A directory may also hold a `VIEW.md`, whose frontmatter decides how that folder
+is displayed — as a table or list of chosen fields, grouped and sorted — and what
+shows above each page inside it. Ask me how I want a folder to look and write the
+spec; do not hand-maintain an index page that a view could generate.
+
 When adding content, look for an existing file to extend before creating a new one.
 Correct facts in place — the version history preserves what was there before.
 """

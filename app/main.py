@@ -14,6 +14,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import quote
@@ -22,7 +23,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, interact, kb, mcp_catalog, mcp_server, signals
+from . import agent, interact, kb, kbview, mcp_catalog, mcp_server, signals
 from .auth import Identity, current_identity, display_name_for
 from .config import config
 from .conversations import conversations
@@ -709,12 +710,111 @@ async def kb_files() -> dict[str, Any]:
 
 
 @app.get("/api/kb/file", dependencies=AUTHENTICATED)
-async def kb_file(path: str) -> dict[str, str]:
-    """Return raw markdown for a KB file (single SQL query)."""
-    content = await kb.sql_read_file(path)
-    if content is None:
+async def kb_file(path: str) -> dict[str, Any]:
+    """Return raw markdown for a KB file, plus its frontmatter (one query).
+
+    `fields` is additive and comes off the row the body was already read from.
+    It is what lets a file opened by deep link draw the header its directory
+    asked for - without it the renderer knows only that it has no value, which
+    is indistinguishable from the value being empty, and it would print the
+    spec's "nobody filled this in" label over data it was never given.
+    """
+    doc = await kb.sql_read_document(path)
+    if doc is None:
         raise HTTPException(404, "not found")
-    return {"path": path, "content": content}
+    return {"path": path, "content": doc["body"] or "", "fields": doc["fields"]}
+
+
+def _spec_payload(
+    raw: object, source: str | None
+) -> tuple[kbview.View, dict[str, Any]]:
+    """Normalise a spec into the shape both view routes return.
+
+    `view` and `page` are always usable objects, never null. A directory with
+    no `VIEW.md` gets the defaults rather than a null the client would have to
+    branch on - the *absence* is reported by `view_source_path`, which is the
+    only thing that actually differs, and is what lets the UI say "this
+    directory has no view yet" without pretending it cannot render one.
+    """
+    view, page, warnings = kbview.normalise(raw)
+    return view, {
+        "view": asdict(view),
+        "page": asdict(page),
+        "view_source_path": source,
+        "view_error": None,
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/kb/dir", dependencies=AUTHENTICATED)
+async def kb_dir(path: str = "") -> dict[str, Any]:
+    """A directory rendered as an index: its guide, its spec, its entries.
+
+    One query. `GUIDE.md` and `VIEW.md` are children of this directory like
+    any other file, so both arrive in the same result set that carries the
+    entries - there is nothing extra to fetch.
+
+    A bad spec never costs the reader the page: `kbview.normalise` degrades to
+    the default view and reports what it could not use, so the failure mode of
+    an agent writing nonsense is a warning above a plain list.
+    """
+    dir_path = path.strip("/")
+    children = await kb.sql_list_children(dir_path)
+    if not children and dir_path and not await kb.sql_dir_exists(dir_path):
+        raise HTTPException(404, "not found")
+
+    files = [c for c in children if c.get("filetype") == "file"]
+    by_name = {c["filename"]: c for c in files}
+
+    spec_row = by_name.get(kbview.SPEC_FILE)
+    view, payload = _spec_payload(
+        spec_row["headers"] if spec_row else None,
+        spec_row["path"] if spec_row else None,
+    )
+
+    guide_row = by_name.get(kbview.GUIDE_FILE)
+    entries = kbview.build_entries(
+        [c for c in files if kbview.is_entry(c["filename"])], view
+    )
+
+    # Subdirectories are listed even though the tree already has them, and the
+    # duplication is the lesser problem. Without them a directory whose only
+    # children are folders renders as "Nothing here yet." over a `recipes/`
+    # that plainly exists - which is the same lie as a filter, arrived at by
+    # omission rather than by design.
+    dirs = [
+        {"path": c["path"], "name": c["filename"]}
+        for c in children
+        if c.get("filetype") == kb.DIRECTORY_FILETYPE
+        and not c["filename"].startswith(".")
+    ]
+
+    return {
+        "path": dir_path,
+        "guide": (
+            {"path": guide_row["path"], "content": guide_row["body"] or ""}
+            if guide_row
+            else None
+        ),
+        **payload,
+        "dirs": sorted(dirs, key=lambda d: d["name"]),
+        "groups": [asdict(g) for g in kbview.build_groups(entries, view)],
+    }
+
+
+@app.get("/api/kb/spec", dependencies=AUTHENTICATED)
+async def kb_spec(path: str = "") -> dict[str, Any]:
+    """Just one directory's spec, for rendering a *file* at that level.
+
+    Deliberately not a `page` key bolted onto `/api/kb/file`: that would put a
+    second lookup on every tree click, which is the per-click cost ADR 0016
+    split `_PATHS_CTE` to remove. This is one row by path, and the client
+    caches it per directory.
+    """
+    dir_path = path.strip("/")
+    source = f"{dir_path}/{kbview.SPEC_FILE}" if dir_path else kbview.SPEC_FILE
+    raw = await kb.sql_read_headers(source)
+    return _spec_payload(raw, source if raw is not None else None)[1]
 
 
 @app.get("/api/uploads/{turn_id}/{name}")

@@ -129,7 +129,12 @@ function scroll() {
 let knownKbFiles = new Set(); // populated by loadFiles, read by linkifyKbPaths
 let dirNodes = new Map(); // dirPath -> {children, toggle}, populated by loadFiles, read by expandAncestors
 
-async function loadFiles(openPath) {
+// Renders the tree, and *only* the tree. It used to also decide what the
+// centre pane showed, which is why opening one file reloaded the whole
+// listing, why the ↻ button navigated you away from what you were reading,
+// and why a directory deep link fell through to whatever files[0] happened to
+// be. Choosing the pane is openKbPath()'s job now.
+async function loadFiles() {
   navFileList.innerHTML = '<div class="empty">Loading…</div>';
   let files;
   try {
@@ -192,8 +197,10 @@ async function loadFiles(openPath) {
       const dirPath = child.path;
 
       const skillPath = dirPath + '/SKILL.md';
-      const guidePath = dirPath + '/GUIDE.md';
-      const openPath = fileSet.has(skillPath) ? skillPath : fileSet.has(guidePath) ? guidePath : null;
+      // A skill directory's index genuinely *is* its SKILL.md - the folder is
+      // one document plus its references, not a collection - so it keeps the
+      // behaviour it has always had. Everything else opens a directory view.
+      const isSkillDir = fileSet.has(skillPath);
 
       // Every directory, top-level sections included, is a collapsible
       // header that starts collapsed - expandAncestors() opens the path to
@@ -201,7 +208,10 @@ async function loadFiles(openPath) {
       const header = document.createElement('div');
       header.className = depth === 0 ? 'section-header' : 'dir-header';
       if (depth > 0) header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
-      if (openPath) header.dataset.path = openPath;
+      // Always set, including for a directory with no guide of its own. It
+      // used to be set only when there was a file to open, which left exactly
+      // the directories that now gain a view unable to ever show as active.
+      header.dataset.path = isSkillDir ? skillPath : dirPath;
       const toggle = document.createElement('span');
       toggle.className = 'dir-toggle collapsed';
       toggle.textContent = '▾';
@@ -216,12 +226,13 @@ async function loadFiles(openPath) {
       header.onclick = () => {
         const collapsed = children.classList.toggle('collapsed');
         toggle.classList.toggle('collapsed', collapsed);
-        // Only open the dir's GUIDE/SKILL file when the click just EXPANDED
-        // it, not when it just collapsed it - openKbFile() re-expands this
+        // Only render into the centre pane when the click just EXPANDED this
+        // header, not when it just collapsed it - openKbFile() re-expands the
         // same header via expandAncestors(), which otherwise undid the
-        // collapse on the same click for any directory with its own guide
-        // (wiki/, skills/, and any wiki/ subdirectory that has one).
-        if (openPath && !collapsed) openKbFile(openPath);
+        // collapse on the very click that made it.
+        if (collapsed) return;
+        if (isSkillDir) openKbFile(skillPath);
+        else openKbDir(dirPath);
       };
 
       dirNodes.set(dirPath, { children, toggle });
@@ -233,7 +244,10 @@ async function loadFiles(openPath) {
 
     node.files.sort().forEach(f => {
       const base = f.split('/').pop();
-      if (base === 'GUIDE.md' || base === 'SKILL.md') return;
+      // Files that describe the directory rather than sit in it. Each is
+      // reachable through its directory's header; none is a sibling of the
+      // pages it governs.
+      if (base === 'GUIDE.md' || base === 'SKILL.md' || base === 'VIEW.md') return;
       if (depth === 0 && base === 'AGENT_GUIDE.md') return;
       const name = base.replace(/\.md$/, '');
       const a = document.createElement('a');
@@ -249,15 +263,13 @@ async function loadFiles(openPath) {
   navFileList.innerHTML = '';
   renderNode(tree, navFileList, 0);
 
-  // An explicit request (a tool_use target, a reply link, a tree click that
-  // forced a refresh) always wins, even for a path the .md-only listing does
-  // not carry - the agent may have written a .txt or .csv, and refusing to
-  // open it because the tree cannot show it defeats the point of following
-  // the write at all.
-  const target = openPath
-    ? openPath
-    : files.includes(initialKbPath) ? initialKbPath : files[0];
-  openKbFile(target);
+  // The tree was just rebuilt, so whatever is on screen lost its highlight.
+  // Specs are cached per directory and an agent write may have changed one,
+  // so the cache goes with it.
+  specCache = new Map();
+  if (currentPane && (currentPane.kind === 'kb' || currentPane.kind === 'kbdir')) {
+    setActiveTreeLink(currentPane.path);
+  }
 }
 
 function expandAncestors(path) {
@@ -316,7 +328,7 @@ function wireRelativeKbLinks(container) {
     const href = a.getAttribute('href');
     if (href && !href.startsWith('http') && href.endsWith('.md')) {
       a.href = '#';
-      a.onclick = (e) => { e.preventDefault(); openKbFile(href); };
+      a.onclick = (e) => { e.preventDefault(); openKbPath(href); };
     }
   });
 }
@@ -337,16 +349,73 @@ function initialKbPathFromUrl() {
 }
 const initialKbPath = initialKbPathFromUrl();
 
-async function openKbFile(path) {
+// Two navigations can be in flight at once - a click while a directory fetch
+// is still running - and the slower one must not paint over the newer one.
+// Every pane render takes a token before its first await and gives up if the
+// token has moved on. The directory fetch is heavier than a file read, so it
+// is the one that loses these races.
+let paneSeq = 0;
+
+// A path with an extension is a file; anything else is a directory. Every
+// entry in the listing ends in `.md` and directories carry no dots, so this
+// decides without consulting the tree - which matters because a deep link is
+// rendered before `loadFiles()` has finished populating `knownKbFiles`.
+function isFilePath(path) {
+  return /\.[a-z0-9]+$/i.test(path);
+}
+
+function parentDirOf(path) {
+  const cut = path.lastIndexOf('/');
+  return cut === -1 ? '' : path.slice(0, cut);
+}
+
+// One entry point for every navigation. `GUIDE.md` and `VIEW.md` describe a
+// directory rather than living in it, so opening either opens the directory
+// itself - which also means an agent write to a spec lands the reader on the
+// thing it changed instead of on the config that changed it.
+function openKbPath(path, opts) {
+  if (path === null || path === undefined) return;
+  const base = path.split('/').pop();
+  if (base === 'GUIDE.md' || base === 'VIEW.md') {
+    return openKbDir(parentDirOf(path), opts);
+  }
+  return isFilePath(path) ? openKbFile(path, opts) : openKbDir(path, opts);
+}
+
+function setPaneUrl(path, opts) {
+  if (opts && opts.push === false) return;
+  history.pushState({}, '', pathToKbUrl(path));
+}
+
+// The directory's own spec, cached per directory. A file at that level needs
+// its parent's `page:` block to draw its header chips, and without a cache
+// every tree click would pay for a second request. Cleared by loadFiles(),
+// which is what runs after an agent write.
+let specCache = new Map();
+
+async function specForDir(dir) {
+  if (specCache.has(dir)) return specCache.get(dir);
+  let spec = null;
+  try {
+    const res = await fetch('/api/kb/spec?path=' + encodeURIComponent(dir), { cache: 'no-store' });
+    if (res.ok) spec = await res.json();
+  } catch { /* a missing spec is the common case, not an error */ }
+  specCache.set(dir, spec);
+  return spec;
+}
+
+async function openKbFile(path, opts) {
   if (!path) return;
+  const seq = ++paneSeq;
   currentPane = { kind: 'kb', path };
   setActiveTreeLink(path);
-  history.pushState({}, '', pathToKbUrl(path));
+  setPaneUrl(path, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
   try {
     const res = await fetch('/api/kb/file?path=' + encodeURIComponent(path), { cache: 'no-store' });
     if (!res.ok) throw new Error(res.status);
-    const { content: body } = await res.json();
+    const { content: body, fields } = await res.json();
+    if (seq !== paneSeq) return;
     const prose = el('div', 'prose');
     if (path.endsWith('.md')) {
       prose.innerHTML = marked.parse(body);
@@ -360,10 +429,56 @@ async function openKbFile(path) {
       prose.appendChild(pre);
     }
     content.innerHTML = '';
+
+    // The field header goes above the prose, and is fetched after it so a
+    // directory with no spec costs the reader nothing in time-to-first-paint.
+    const spec = await specForDir(parentDirOf(path));
+    if (seq !== paneSeq) return;
+    if (spec) renderPageHeader(fields || {}, spec.page, spec.view, content);
     content.appendChild(prose);
   } catch (e) {
+    if (seq !== paneSeq) return;
     content.innerHTML = '<div class="prose"><div class="empty">Failed to load.</div></div>';
   }
+}
+
+async function openKbDir(path, opts) {
+  const dir = (path || '').replace(/^\/+|\/+$/g, '');
+  const seq = ++paneSeq;
+  currentPane = { kind: 'kbdir', path: dir };
+  setActiveTreeLink(dir);
+  setPaneUrl(dir, opts);
+  content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
+
+  let data;
+  try {
+    const res = await fetch('/api/kb/dir?path=' + encodeURIComponent(dir), { cache: 'no-store' });
+    if (res.status === 404) throw new Error('404');
+    if (!res.ok) throw new Error(res.status);
+    data = await res.json();
+  } catch (err) {
+    if (seq !== paneSeq) return;
+    // `/static` is cached independently of the image, so a new app.js can meet
+    // an old server that has no directory route at all. Falling back to the
+    // guide keeps the pane useful instead of blaming the reader for it.
+    const guide = dir ? dir + '/GUIDE.md' : 'AGENT_GUIDE.md';
+    if (knownKbFiles.has(guide)) return openKbFile(guide, { push: false });
+    content.innerHTML = '<div class="prose"><div class="empty">Failed to load.</div></div>';
+    return;
+  }
+  if (seq !== paneSeq) return;
+
+  specCache.set(dir, { view: data.view, page: data.page });
+
+  content.innerHTML = '';
+  if (data.guide && data.guide.content) {
+    const prose = el('div', 'prose');
+    prose.innerHTML = marked.parse(data.guide.content);
+    sanitizeRenderedLinks(prose);
+    wireRelativeKbLinks(prose);
+    content.appendChild(prose);
+  }
+  renderDirView(data, content, (p) => openKbPath(p));
 }
 
 const UPLOAD_IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
@@ -418,13 +533,22 @@ async function openUpload({ url, name }) {
 
 function openInPane(target) {
   if (!target) return;
-  if (target.kind === 'kb') { loadFiles(target.path); return; }
+  if (target.kind === 'kb') {
+    // Open first, refresh the tree second, and only when the tree has never
+    // heard of this path - an agent write that created a file needs a new
+    // listing, but an edit to an existing one does not, and rebuilding the
+    // tree is what used to make following a write feel like a page load.
+    openKbPath(target.path);
+    if (!knownKbFiles.has(target.path)) loadFiles();
+    return;
+  }
   if (target.kind === 'upload') { openUpload(target); return; }
 }
 
 window.addEventListener('popstate', () => {
-  const path = initialKbPathFromUrl();
-  if (path) openKbFile(path);
+  // push:false, or Back would push the entry it just popped and the button
+  // would stop making progress.
+  openKbPath(initialKbPathFromUrl() || '', { push: false });
 });
 
 // --- linking a KB path mentioned in a reply -----------------------------
@@ -1109,7 +1233,11 @@ async function boot() {
     if (warnings.length) hint.textContent = warnings.join(' ');
   } catch {}
 
+  // In parallel, not in sequence: the pane no longer needs the file list to
+  // know what to show, so the reader gets their page without waiting on the
+  // tree. An empty path is the workspace root, which is a directory view.
   loadFiles();
+  openKbPath(initialKbPath || '', { push: false });
 
   let conversationList = await loadConversations();
   let target = initialConversationIdFromUrl() || (conversationList[0] && conversationList[0].id);

@@ -20,7 +20,7 @@ import time
 import httpx
 import pytest
 
-from app import interact
+from app import interact, kb
 
 from .conftest import REPO_ROOT, USER_SLUG, app_exec, bd, bd_json
 
@@ -114,10 +114,12 @@ def test_the_merged_page_and_its_split_assets_are_in_the_image(stack):
     page = httpx.get(f"{stack}/", timeout=10)
     assert page.status_code == 200
     assert "/static/app.js" in page.text
+    assert "/static/view.js" in page.text
     assert "/static/app.css" in page.text
     assert "/static/vendor/marked.min.js" in page.text
 
     assert httpx.get(f"{stack}/static/app.js", timeout=10).status_code == 200
+    assert httpx.get(f"{stack}/static/view.js", timeout=10).status_code == 200
     assert httpx.get(f"{stack}/static/app.css", timeout=10).status_code == 200
     vendor = httpx.get(f"{stack}/static/vendor/marked.min.js", timeout=10)
     assert vendor.status_code == 200
@@ -300,6 +302,381 @@ def test_the_path_the_ui_would_open_is_the_path_the_api_accepts(stack):
         "Write", {"file_path": f"/mnt/kb/memory/{expected_path}"}
     )
     assert target == {"kind": "kb", "path": expected_path}
+
+
+# The measurement that gates directory views (docs/decisions/0018). Writes a
+# VIEW.md through the real mount, rewrites a neighbour, and reports what the
+# backing table actually holds - `headers` as the store re-serialised it, not
+# as we wrote it. Everything the feature does with a spec depends on the answer.
+VIEW_SPEC_PROBE = """
+import asyncio, json
+from pathlib import Path
+import asyncpg
+from app.config import config
+
+SPEC = '''---
+view:
+  v: 1
+  layout: table
+  fields: [cuisine, time, serves]
+  labels: {time: "Cook time"}
+  group_by: cuisine
+  counts: true
+  coercions: {draft: no, ready: yes, duration: 1:30}
+page:
+  header: [cuisine, time]
+---
+How this directory is displayed.
+'''
+
+d = Path('/mnt/kb/memory/view-probe')
+d.mkdir(parents=True, exist_ok=True)
+(d / 'VIEW.md').write_text(SPEC)
+(d / 'GUIDE.md').write_text('# view-probe\\n\\nOriginal prose.\\n')
+
+QUERY = '''
+WITH RECURSIVE paths AS (
+    SELECT id, filetype, filename AS path
+    FROM   tigerfs.memory WHERE parent_id IS NULL
+    UNION ALL
+    SELECT m.id, m.filetype, p.path || '/' || m.filename
+    FROM   tigerfs.memory m JOIN paths p ON m.parent_id = p.id
+)
+SELECT m.title, m.headers, m.body
+FROM   paths JOIN tigerfs.memory m ON m.id = paths.id
+WHERE  paths.path = $1
+'''
+
+async def read(pool, path):
+    row = await pool.fetchrow(QUERY, path)
+    if row is None:
+        return None
+    headers = row['headers']
+    # asyncpg hands jsonb back as text unless a codec is registered - the
+    # production reader has to do this too.
+    if isinstance(headers, (str, bytes)):
+        headers = json.loads(headers)
+    return {'title': row['title'], 'headers': headers, 'body': row['body']}
+
+async def main():
+    pool = await asyncpg.create_pool(config.kb_database_url)
+    before = await read(pool, 'view-probe/VIEW.md')
+    # Rewrite the neighbour the way an agent revising prose would.
+    (d / 'GUIDE.md').write_text('# view-probe\\n\\nRewritten prose.\\n')
+    after = await read(pool, 'view-probe/VIEW.md')
+    print(json.dumps({'before': before, 'after': after}))
+    await pool.close()
+
+asyncio.run(main())
+"""
+
+
+@pytest.fixture(scope="session")
+def view_spec_probe(stack):
+    """Run the VIEW.md round-trip probe once and hand back what it measured."""
+    out = app_exec("python", "-c", VIEW_SPEC_PROBE).stdout
+    last = [line for line in out.splitlines() if line.startswith("{")][-1]
+    return json.loads(last)
+
+
+def test_a_view_spec_survives_the_store(view_spec_probe):
+    """Gates the whole feature: is nested frontmatter readable back intact?
+
+    TigerFS is a markdown workspace - it parses documents and re-serialises
+    them, which is why app/agent.py tracks two hashes per bootstrap file and
+    why tests/test_seed_bootstrap.py deliberately fakes a store that does not
+    round-trip. A view spec is nested and *ordered*: `fields` is a sequence
+    whose order is the column order. If the store reorders or flattens it, the
+    spec has to move to a VIEW.json parsed with stdlib json instead, and this
+    test is what tells us which world we are in.
+    """
+    spec = view_spec_probe["before"]
+    assert spec is not None, "VIEW.md did not read back from the backing table"
+
+    headers = spec["headers"]
+    assert "view" in headers, headers
+    view = headers["view"]
+
+    assert view["layout"] == "table"
+    # The load-bearing assertion. A mapping may be reordered harmlessly; a
+    # sequence may not, because this one *is* the column order.
+    assert view["fields"] == ["cuisine", "time", "serves"], view["fields"]
+    assert view["labels"] == {"time": "Cook time"}
+    assert headers["page"]["header"] == ["cuisine", "time"]
+
+
+def test_rewriting_a_neighbour_does_not_erase_the_spec(view_spec_probe):
+    """Why the spec is its own file rather than a key in GUIDE.md.
+
+    The `headers` JSONB column is full-replace on every write: omitting a key
+    removes it. A `view:` block living in GUIDE.md's frontmatter would
+    therefore be destroyed, silently, by any turn that rewrites that file's
+    prose without repeating the block - the same shape of data loss as
+    test_appending_to_a_kb_file_still_destroys_it. VIEW.md cannot lose the
+    spec that way, because the whole file is the spec.
+    """
+    assert view_spec_probe["after"] == view_spec_probe["before"]
+
+
+def test_the_store_speaks_yaml_1_2_and_does_not_coerce(view_spec_probe):
+    """Measured, because the answer decided what the reference doc must warn about.
+
+    YAML 1.1 reads `no`/`yes` as booleans and `1:30` as sexagesimal 90, and a
+    spec-authoring guide written on that assumption would have told the agent
+    to quote values that need no quoting. The store does not do it: all three
+    come back as the text that was written, which is YAML 1.2 behaviour. So
+    skills/kb-curator/references/directory-views.md documents no coercion
+    footguns - and this test is what stops that claim going stale silently if
+    a TigerFS upgrade changes dialect.
+    """
+    coercions = view_spec_probe["before"]["headers"]["view"]["coercions"]
+
+    assert coercions == {"draft": "no", "ready": "yes", "duration": "1:30"}, coercions
+
+
+DIR_PROBE_SCRIPT = """
+from pathlib import Path
+
+root = Path('/mnt/kb/memory/dir-probe')
+(root / 'nested').mkdir(parents=True, exist_ok=True)
+(root / 'VIEW.md').write_text('''---
+view:
+  layout: table
+  fields: [cuisine]
+  sort: [-cuisine]
+page:
+  header: [cuisine]
+---
+The recipes view.
+''')
+(root / 'GUIDE.md').write_text('# dir-probe\\n\\nHow to write one of these.\\n')
+(root / 'a.md').write_text('---\\ncuisine: italian\\n---\\n# Ragu\\n\\nSlow.\\n')
+(root / 'b.md').write_text('---\\ncuisine: french\\n---\\n# Cassoulet\\n\\nSlower.\\n')
+(root / 'nested' / 'c.md').write_text('# Nested\\n')
+
+# A name carrying both LIKE wildcards. The parent_id join makes this a
+# non-event; a path-prefix query would need them escaped and would quietly
+# match the wrong rows if they were not.
+bad = Path('/mnt/kb/memory/bad-spec')
+bad.mkdir(parents=True, exist_ok=True)
+(bad / 'VIEW.md').write_text('''---
+view:
+  layout: kanban
+  colums: [a]
+  fields: [x]
+page:
+  headers: [x]
+---
+A spec with three mistakes in it.
+''')
+(bad / 'p.md').write_text('# Present\\n')
+
+odd = Path('/mnt/kb/memory/dir_probe%odd')
+odd.mkdir(parents=True, exist_ok=True)
+(odd / 'd.md').write_text('# Only child\\n')
+print('written')
+"""
+
+
+FILETYPE_PROBE = """
+import asyncio, asyncpg
+from app.config import config
+
+async def main():
+    pool = await asyncpg.create_pool(config.kb_database_url)
+    rows = await pool.fetch('SELECT DISTINCT filetype FROM tigerfs.memory')
+    print(sorted(r['filetype'] for r in rows))
+    await pool.close()
+
+asyncio.run(main())
+"""
+
+
+@pytest.fixture(scope="session")
+def dir_probe(stack):
+    app_exec("python", "-c", DIR_PROBE_SCRIPT)
+    return stack
+
+
+def test_the_directory_endpoint_returns_only_direct_children(dir_probe):
+    """Entries are this directory's own files - not its subdirectories' files,
+    and not the two files that describe the directory rather than sit in it."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "dir-probe"}, timeout=10
+    ).json()
+
+    entries = [e for g in body["groups"] for e in g["entries"]]
+    assert [e["name"] for e in entries] == ["Ragu", "Cassoulet"] or [
+        e["title"] for e in entries
+    ] == ["Ragu", "Cassoulet"], entries
+    assert all("nested" not in e["path"] for e in entries), entries
+
+
+def test_the_directory_endpoint_reads_the_spec_and_the_guide(dir_probe):
+    """Both arrive in the same query as the entries - VIEW.md and GUIDE.md are
+    children of the directory like any other file, so neither costs a lookup."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "dir-probe"}, timeout=10
+    ).json()
+
+    assert body["view"]["layout"] == "table"
+    assert body["view"]["fields"] == ["cuisine"]
+    assert body["page"]["header"] == ["cuisine"]
+    assert body["view_source_path"] == "dir-probe/VIEW.md"
+    assert body["warnings"] == []
+    assert "How to write one of these." in body["guide"]["content"]
+
+
+def test_frontmatter_reaches_the_entries_as_structured_fields(dir_probe):
+    """The whole reason there is no YAML parser in this app: TigerFS already
+    parsed it, and `headers` comes back as data rather than as text."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "dir-probe"}, timeout=10
+    ).json()
+
+    cuisines = [
+        e["fields"].get("cuisine") for g in body["groups"] for e in g["entries"]
+    ]
+    assert sorted(cuisines) == ["french", "italian"], cuisines
+
+
+def test_a_directory_name_holding_like_wildcards_returns_only_its_own_children(
+    dir_probe,
+):
+    """`_` and `%` are wildcards to LIKE and nothing at all to a parent_id
+    join. This test is what stops someone reintroducing the prefix query."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "dir_probe%odd"}, timeout=10
+    ).json()
+
+    entries = [e for g in body["groups"] for e in g["entries"]]
+    assert len(entries) == 1, entries
+    assert entries[0]["path"] == "dir_probe%odd/d.md"
+
+
+def test_subdirectories_are_listed_so_a_folder_never_reports_itself_empty(
+    dir_probe,
+):
+    """`wiki/` holds one GUIDE.md and one subdirectory. Without `dirs` its
+    index rendered "Nothing here yet." over a `recipes/` the reader could see
+    in the tree beside it - the same lie as a filter, reached by omission.
+    """
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "wiki"}, timeout=10
+    ).json()
+
+    assert [d["name"] for d in body["dirs"]] == ["recipes"]
+    assert body["dirs"][0]["path"] == "wiki/recipes"
+    assert [e["path"] for g in body["groups"] for e in g["entries"]] == []
+
+
+def test_a_missing_directory_is_a_404_not_an_empty_index(dir_probe):
+    """A typo'd deep link should say so rather than render a convincing,
+    entirely empty page."""
+    res = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "no-such-directory"}, timeout=10
+    )
+
+    assert res.status_code == 404, res.text
+
+
+def test_the_spec_route_answers_without_reading_the_children(dir_probe):
+    """What a *file* view uses for its header chips. Same spec, one row."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/spec", params={"path": "dir-probe"}, timeout=10
+    ).json()
+
+    assert body["page"]["header"] == ["cuisine"]
+    assert body["view_source_path"] == "dir-probe/VIEW.md"
+
+
+def test_a_directory_with_no_spec_still_renders_the_defaults(dir_probe):
+    """`view` is never null: a directory without a VIEW.md gets a usable
+    default view, and the absence is reported by view_source_path alone."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "dir-probe/nested"}, timeout=10
+    ).json()
+
+    assert body["view"]["layout"] == "list"
+    assert body["view_source_path"] is None
+    assert [e["path"] for g in body["groups"] for e in g["entries"]] == [
+        "dir-probe/nested/c.md"
+    ]
+
+
+def test_reading_a_file_returns_its_frontmatter_too(dir_probe):
+    """Regression: `fields` is what lets a file opened by DEEP LINK draw the
+    header its directory asked for.
+
+    Without it the renderer cannot tell "no value" from "not told", so it
+    printed the spec's empty-value labels - "Unfiled", "not timed yet" - over
+    data it had simply never been given. Caught in a browser, not by a unit
+    test, because both halves looked correct on their own.
+    """
+    body = httpx.get(
+        f"{dir_probe}/api/kb/file", params={"path": "dir-probe/a.md"}, timeout=10
+    ).json()
+
+    assert body["fields"]["cuisine"] == "italian"
+    assert body["content"].startswith("# Ragu")
+
+
+def test_a_malformed_spec_warns_and_still_lists_the_entries(dir_probe):
+    """The failure mode that matters: a spec is written by an agent and read by
+    someone who did not write it, so a mistake has to cost a warning and not
+    the page."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "bad-spec"}, timeout=10
+    ).json()
+
+    joined = " ".join(body["warnings"])
+    assert "kanban" in joined, body["warnings"]
+    assert "view.colums" in joined, body["warnings"]
+    assert "page.headers" in joined, body["warnings"]
+    assert body["view"]["layout"] == "list"
+    assert [e["path"] for g in body["groups"] for e in g["entries"]] == [
+        "bad-spec/p.md"
+    ]
+
+
+def test_the_seeded_recipes_view_renders_through_the_real_store(dir_probe):
+    """The bootstrap fixture is the feature's first-boot demo, and it is only
+    a demo if nested frontmatter survives seeding into a live workspace."""
+    body = httpx.get(
+        f"{dir_probe}/api/kb/dir", params={"path": "wiki/recipes"}, timeout=10
+    ).json()
+
+    assert body["view"]["layout"] == "table"
+    assert body["view"]["fields"] == ["cuisine", "time", "serves"]
+    assert [g["key"] for g in body["groups"]] == ["italian", "vegetarian"]
+    assert body["warnings"] == []
+
+
+def test_a_directory_row_is_filetype_directory_not_dir(dir_probe):
+    """Pins a value the TigerFS reference gets wrong.
+
+    That reference documents `filetype` as `'dir'` for directories. The live
+    table says `'directory'`, and the difference is not cosmetic: a children
+    query filtering on the documented value matches nothing, which renders as
+    an empty workspace rather than as an error. Measured here so a change on
+    either side is a test failure and not a blank wiki.
+    """
+    out = app_exec("python", "-c", FILETYPE_PROBE).stdout
+
+    assert "directory" in out, out
+    assert kb.DIRECTORY_FILETYPE in out, out
+
+
+def test_the_existing_listing_and_read_survive_the_cte_rewrite(dir_probe):
+    """`_PATHS_CTE` lost `body` and gained a depth bound in the same change
+    that added the directory queries; these are the two callers it already had."""
+    files = httpx.get(f"{dir_probe}/api/kb/files", timeout=10).json()["files"]
+    assert "dir-probe/a.md" in files
+
+    content = httpx.get(
+        f"{dir_probe}/api/kb/file", params={"path": "dir-probe/nested/c.md"}, timeout=10
+    ).json()["content"]
+    assert content == "# Nested\n"
 
 
 APPEND_PROBE = """

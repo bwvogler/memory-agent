@@ -124,6 +124,13 @@ If no guide exists for a directory and you are creating structured content, ask
 the human how they would like it formatted, then write a `GUIDE.md` recording
 that format so future turns follow the same convention.
 
+A directory may also hold a `VIEW.md`, whose frontmatter decides how the wiki
+renders that directory as an index and what appears above each page in it. It
+is yours to write and revise: when the human describes how they want a folder
+to look — as a table, grouped by something, with certain fields showing — that
+is a view spec, not a page you hand-maintain. Read `references/directory-views.md`
+before writing or changing one.
+
 ## Read what curating has already taught you
 
 This skill ships inside the application image and cannot be edited from a

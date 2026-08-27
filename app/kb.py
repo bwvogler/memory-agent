@@ -503,22 +503,31 @@ def _render_backlog(issues: list[dict]) -> str:
 
 _kb_pool: asyncpg.Pool | None = None
 
-# Shared by the listing and the single-file read below. `body` is deliberately
-# not selected by the listing query built on top of this - the tree only ever
-# needed `path`, and dragging every file's content over the wire on every
-# page load was pure waste that got worse once every tree click, every
-# agent Write, and every deep link started hitting this CTE.
-_PATHS_CTE = """
+# Shared by every query below. It carries only what it takes to *build a path*
+# - the wide columns are joined back at the outer select, because the
+# recursive term drags whatever it selects through every level of the tree.
+# `body` used to live here and no longer does: the tree only ever needed
+# `path`, and hauling every file's content over the wire on every page load
+# was pure waste that got worse once every tree click, every agent Write and
+# every deep link started hitting this CTE.
+#
+# `depth` is a bound, not a feature. A cycle in `parent_id` would otherwise
+# spin this query forever, and a directory endpoint makes that reachable on an
+# ordinary click rather than only at startup.
+MAX_TREE_DEPTH = 32
+
+_PATHS_CTE = f"""
 WITH RECURSIVE paths AS (
-    SELECT id, filetype, body, filename AS path
+    SELECT id, filetype, filename AS path, 1 AS depth
     FROM   tigerfs.memory
     WHERE  parent_id IS NULL
     UNION ALL
-    SELECT m.id, m.filetype, m.body, p.path || '/' || m.filename
+    SELECT m.id, m.filetype, p.path || '/' || m.filename, p.depth + 1
     FROM   tigerfs.memory m
     JOIN   paths p ON m.parent_id = p.id
+    WHERE  p.depth < {MAX_TREE_DEPTH}
 )
-"""
+"""  # noqa: S608 - the only interpolation is MAX_TREE_DEPTH, an int constant
 
 _LIST_SQL = (
     _PATHS_CTE
@@ -536,17 +545,95 @@ ORDER  BY path
 _READ_SQL = (
     _PATHS_CTE
     + """
-SELECT body
+SELECT m.body, m.headers, m.title, m.author
 FROM   paths
-WHERE  filetype = 'file' AND path = $1
+JOIN   tigerfs.memory m ON m.id = paths.id
+WHERE  paths.filetype = 'file' AND paths.path = $1
 """
 )
+
+# The frontmatter of one known file, for a directory's view spec. TigerFS
+# parsed it on the way in, so this is a column read and not a YAML parse.
+_HEADERS_SQL = (
+    _PATHS_CTE
+    + """
+SELECT m.headers
+FROM   paths
+JOIN   tigerfs.memory m ON m.id = paths.id
+WHERE  paths.filetype = 'file' AND paths.path = $1
+"""
+)
+
+# The value `filetype` carries for a directory row. Measured, not read: the
+# TigerFS reference documents it as 'dir' and the live table says 'directory',
+# and a query filtering on the documented value matches nothing at all - which
+# looks exactly like an empty workspace. test_container pins this.
+DIRECTORY_FILETYPE = "directory"
+
+# Direct children of one directory, by `parent_id` rather than a path prefix.
+# A `LIKE $1 || '/%' AND path NOT LIKE $1 || '/%/%'` formulation would work
+# and is worse three ways: `%` and `_` in a directory name are wildcards that
+# have to be escaped correctly every time, it scans the materialised paths
+# twice, and it silently matches nothing at the workspace root, where `path`
+# is '' and the pattern degrades to '/%'. Children are what the table already
+# keys on; asking it that question directly needs no escaping at all.
+_CHILDREN_SQL = (
+    _PATHS_CTE
+    + f"""
+SELECT p.path || '/' || m.filename AS path,
+       m.filename, m.filetype, m.title, m.author, m.headers, m.body
+FROM   paths p
+JOIN   tigerfs.memory m ON m.parent_id = p.id
+WHERE  p.filetype = '{DIRECTORY_FILETYPE}' AND p.path = $1
+ORDER  BY m.filename
+"""  # noqa: S608 - DIRECTORY_FILETYPE is a module constant, not caller input
+)
+
+# The workspace root has no row of its own to join against - it is the set of
+# rows with no parent - so it cannot go through the CTE above.
+_ROOT_CHILDREN_SQL = """
+SELECT m.filename AS path,
+       m.filename, m.filetype, m.title, m.author, m.headers, m.body
+FROM   tigerfs.memory m
+WHERE  m.parent_id IS NULL
+ORDER  BY m.filename
+"""
+
+# Only asked when a directory came back with no children, to tell an empty
+# directory from one that was never there. A typo'd deep link should say "not
+# found" rather than render a convincing, empty index.
+_DIR_EXISTS_SQL = (
+    _PATHS_CTE
+    + f"""
+SELECT 1
+FROM   paths
+WHERE  filetype = '{DIRECTORY_FILETYPE}' AND path = $1
+"""  # noqa: S608 - DIRECTORY_FILETYPE is a module constant, not caller input
+)
+
+
+async def _register_codecs(conn: asyncpg.Connection) -> None:
+    """Hand back `jsonb` as a dict rather than as text.
+
+    asyncpg decodes jsonb to `str` by default, so every reader of `headers`
+    would otherwise carry its own `json.loads` - and the one that forgot would
+    not fail, it would treat a JSON document as a string and quietly find no
+    fields in it.
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
 
 
 async def _pool() -> asyncpg.Pool:
     global _kb_pool  # noqa: PLW0603 - one connection pool per process
     if _kb_pool is None:
-        _kb_pool = await asyncpg.create_pool(config.kb_database_url)
+        _kb_pool = await asyncpg.create_pool(
+            config.kb_database_url, init=_register_codecs
+        )
     return _kb_pool
 
 
@@ -573,6 +660,67 @@ async def sql_read_file(path: str) -> str | None:
     pool = await _pool()
     row = await pool.fetchrow(_READ_SQL, path)
     return row["body"] if row else None
+
+
+async def sql_read_document(path: str) -> dict | None:
+    """Body *and* frontmatter for one file, in the query the body already cost.
+
+    The store parses frontmatter out of the body on the way in, so a reader
+    handed only `body` cannot see the fields at all - which is how a file
+    opened by deep link came to render its directory's "this value is empty"
+    labels over values it simply had not been told. Widening the select on a
+    row already being fetched costs nothing; a second lookup would have cost
+    every tree click, which is the trade ADR 0016 split `_PATHS_CTE` to avoid.
+    """
+    pool = await _pool()
+    row = await pool.fetchrow(_READ_SQL, path)
+    if row is None:
+        return None
+    headers = row["headers"]
+    fields = dict(headers) if isinstance(headers, dict) else {}
+    for column in ("title", "author"):
+        if row[column] not in (None, ""):
+            fields.setdefault(column, row[column])
+    return {"body": row["body"], "fields": fields}
+
+
+async def sql_read_headers(path: str) -> dict | None:
+    """Return one file's parsed frontmatter, or None if it has no row.
+
+    `{}` and `None` are different answers: a `VIEW.md` that exists but carries
+    no frontmatter is a spec that says nothing, while a missing file is a
+    directory that never had one.
+    """
+    pool = await _pool()
+    row = await pool.fetchrow(_HEADERS_SQL, path)
+    if row is None:
+        return None
+    headers = row["headers"]
+    return headers if isinstance(headers, dict) else {}
+
+
+async def sql_list_children(dir_path: str) -> list[dict]:
+    """Direct children of one directory, files and subdirectories alike.
+
+    `dir_path` is workspace-relative with no trailing slash; '' is the
+    workspace root. Nothing is interpolated into SQL - see `_CHILDREN_SQL` for
+    why this is a `parent_id` join and not a path prefix.
+    """
+    pool = await _pool()
+    if dir_path in ("", "/"):
+        rows = await pool.fetch(_ROOT_CHILDREN_SQL)
+    else:
+        rows = await pool.fetch(_CHILDREN_SQL, dir_path.strip("/"))
+    return [dict(r) for r in rows]
+
+
+async def sql_dir_exists(dir_path: str) -> bool:
+    """Whether a directory row exists. The workspace root always does."""
+    path = dir_path.strip("/")
+    if not path:
+        return True
+    pool = await _pool()
+    return await pool.fetchrow(_DIR_EXISTS_SQL, path) is not None
 
 
 # ---------------------------------------------------------------------------

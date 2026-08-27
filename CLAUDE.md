@@ -10,6 +10,8 @@ the TigerFS workspace.
 - `app/agent.py` — agent construction: system prompt, skill loading, session options
 - `app/kb.py` — TigerFS helpers: mount health, SQL queries, scratch dirs, savepoints,
   and the beads task ledger
+- `app/kbview.py` — a directory's `VIEW.md` spec: normalising it, and building
+  the sorted, grouped entries its index renders (`docs/decisions/0018`)
 - `app/signals.py` — records which skills each turn used and files a bead when
   a turn is reverted, errors, or is denied a tool
 - `app/guards.py` — SDK hooks enforcing two rules the prompt could not: no
@@ -28,7 +30,8 @@ the TigerFS workspace.
 - `app/config.py` — all config read from environment variables
 - `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint, reflect); editable in the KB
-- `static/` — web UI (chat at `/`, wiki view at `/kb`)
+- `static/` — web UI (chat at `/`, wiki view at `/kb`); `view.js` is the
+  directory-index renderer, kept pure so a browser check can call it directly
 
 ## Key design decisions
 
@@ -61,6 +64,62 @@ the SDK's CLAUDE.md discovery (which is disabled via `setting_sources=[]` and
 **Hierarchical conventions.** Directory-specific format requirements live in a
 `GUIDE.md` inside each subdirectory (e.g. `memory/recipes/GUIDE.md`). The
 agent reads these before writing. The human creates them by asking the agent.
+
+**A directory decides how it is displayed, and the spec is its own file.** A
+directory may hold a `VIEW.md` whose *frontmatter is* a display spec: it drives
+the generated index the centre pane shows when you click that directory, and
+the labelled chips above each page at that level. `app/kbview.py` normalises it
+and builds the entries; `static/view.js` paints them.
+
+Its own file for one reason, and it is a data-loss reason rather than a
+tidiness one: the store's `headers` JSONB column is **full-replace on every
+write**, so a key omitted is a key deleted. A `view:` block inside `GUIDE.md`
+would be destroyed, silently, by the first turn that rewrote that file's prose
+without repeating it — the same shape as
+`test_appending_to_a_kb_file_still_destroys_it`. Because the whole of `VIEW.md`
+is the spec, rewriting it always rewrites the spec. Keys nest under `view:` and
+`page:` because `title`/`author`/`encoding` are routed to dedicated columns and
+would never reach `headers` at all.
+
+That column is also why **there is no YAML parser and no new dependency here**.
+TigerFS parses frontmatter on the way in, so `holder: [brian, laura]` is read
+back as a JSON list. The listing query never looked at it; now it does.
+
+The spec is **declarative on purpose, and does not flip ADR 0016** — a layout
+from a fixed set plus field names, rendered by fixed JS building DOM nodes with
+`textContent`. `textContent` is not the whole defence: a frontmatter *key* can
+be `__proto__`, so untrusted lookups go through a `Map`; no class or id is
+derived from a group key; one `fmt()` bounds every value at 200 chars and strips
+bidi overrides; and **no field ever becomes an href** — the only link an index
+emits is built from the entry's own path.
+
+**There is no `filter`, and adding one would be a mistake.** A view may reorder
+and group; it may never drop an entry. An index that hides files that exist
+makes a liar of the artifact whose whole value is "the wiki says what is there",
+and it is a hiding primitive an agent could write after ingesting a poisoned
+page. Sorting and grouping run server-side because all three pytest tiers are
+Python and none executes the served JavaScript.
+
+The same rule is why `/api/kb/dir` returns `dirs` even though the tree already
+has them. Omitting them was the plan until a browser check showed `wiki/`
+rendering "Nothing here yet." over a `recipes/` visible in the tree beside it —
+the identical lie, reached by omission instead of by design.
+
+Children come from a **`parent_id` join, never a `LIKE` prefix** — no wildcard
+escaping to get wrong, one scan instead of two, and it works at the workspace
+root, where a prefix pattern degrades to `'/%'` and matches nothing. Two
+measured facts to keep: `filetype` for a directory row is `'directory'`, *not*
+the `'dir'` the TigerFS reference documents (the documented value matches
+nothing and renders as an empty workspace), and the store speaks YAML 1.2 — `no`
+stays `"no"`, `1:30` stays `"1:30"`.
+
+`GET /api/kb/dir` costs no extra queries: `GUIDE.md` and `VIEW.md` are children
+like any other file. `GET /api/kb/spec` is the one-row subset so a *file* open
+does not pay for its directory's children. `/api/kb/file` gained `fields` — a
+wider select on a row it already fetched, and load-bearing: without it a file
+opened by deep link cannot tell "empty" from "not told", and printed the spec's
+`empty_labels` over data it never had. Only a browser caught that.
+See `docs/decisions/0018`.
 
 **Bootstrap skills.** `bootstrap/skills/` contains example skills (ingest, lint,
 reflect) seeded into `memory/skills/` at startup. They live in the KB so the
