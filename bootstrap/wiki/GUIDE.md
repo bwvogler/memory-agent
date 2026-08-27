@@ -27,6 +27,10 @@ has one needs its `GUIDE.md` to say which fields a new page should carry. Only
 add frontmatter where a view is actually reading it: frontmatter when code will
 read it, prose when only people will.
 
+Giving a folder its first view usually means backfilling that frontmatter
+across pages that do not have it yet. Ask for the `views` skill, which is the
+procedure for doing that without leaving the folder half-classified.
+
 When adding content, look for an existing page to extend before creating a new
 one. Correct facts in place — the version history preserves what was there
 before.

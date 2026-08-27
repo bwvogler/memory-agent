@@ -80,6 +80,88 @@ SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 BOOTSTRAP_DIR = Path(__file__).resolve().parent.parent / "bootstrap"
 SEED_STATE_FILE = ".bootstrap-state.json"
 
+# A description is the whole routing signal, so it is injected in full rather
+# than summarised. This bound only stops one pathological file from crowding
+# out the rest; the SKILL.md spec caps a description at 1024 characters anyway.
+MAX_SKILL_DESCRIPTION_CHARS = 1200
+
+
+def _skill_description(path: Path) -> str | None:
+    """Return a SKILL.md's description, bounded, or None if it offers none."""
+    try:
+        text = evolve.description_of(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        log.warning("skill %s unreadable (%s); left out of the listing", path, exc)
+        return None
+    if text and len(text) > MAX_SKILL_DESCRIPTION_CHARS:
+        return text[: MAX_SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _skill_dirs() -> list[Path]:
+    """Both tiers, image first: the ones we ship, then the ones the KB holds."""
+    roots = [SKILLS_DIR]
+    if kb.is_mounted():
+        roots.append(kb.workspace_root() / "skills")
+    found: dict[str, Path] = {}
+    for root in roots:
+        try:
+            children = sorted(p for p in root.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for child in children:
+            # A KB copy of an image skill's directory (kb-curator holds only a
+            # LEARNED.md overlay there) must not displace the real one.
+            if (child / "SKILL.md").is_file() and child.name not in found:
+                found[child.name] = child
+    return [found[name] for name in sorted(found)]
+
+
+def _read_skills() -> str:
+    """List every skill and where to read it, for the system prompt.
+
+    **This is how a skill is reached at all in this deployment, and it has to
+    be, which is not obvious.** `ClaudeAgentOptions.skills` is the SDK's own
+    switch, but it enables *discovered* skills, and nothing here is
+    discoverable: `setting_sources=[]` rules out the CLI's own scan, and
+    `add_dirs` only grants access to a path - it is not searched for skills.
+    Measured, not assumed: with `skills="all"` patched in and no other change,
+    a real turn still recorded zero skills used.
+
+    So this reproduces the part of the skills feature that matters. Level one
+    of progressive disclosure is a name and a description held in the system
+    prompt; level two is the body, read on demand. That is exactly what this
+    block is - the metadata, plus the absolute path to read for the rest. The
+    token cost is what real skills would have cost.
+
+    Read fresh every turn on purpose. A reflection turn's entire permitted
+    change is a skill's `description` (see evolve.py), so caching this would
+    make self-improvement land in a file that nothing ever re-reads.
+    """
+    entries = []
+    for directory in _skill_dirs():
+        description = _skill_description(directory / "SKILL.md")
+        if description:
+            path = directory / "SKILL.md"
+            entries.append(f"- `{directory.name}` ({path})\n  {description}")
+    if not entries:
+        log.warning(
+            "no SKILL.md found under %s or the knowledge base; the agent will "
+            "run with no skills at all",
+            SKILLS_DIR,
+        )
+        return ""
+    log.info("offering %d skill(s) to the agent", len(entries))
+    listing = "\n".join(entries)
+    return (
+        "--- Your skills ---\n\n"
+        "Each of these is a procedure someone wrote down for you. The line "
+        "below a name is a summary for choosing between them, NOT the "
+        "procedure: when one matches what you are about to do, read its "
+        "SKILL.md at the path given and follow it. Read it before you start, "
+        "not after you are stuck.\n\n" + listing
+    )
+
 
 def _read_memory() -> str:
     """Load the agent's memory from the knowledge base.
@@ -490,6 +572,7 @@ first message. Do not assume "you" always means the same person:
 def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
     guide = _read_guide()
     memory = _read_memory()
+    skills = _read_skills()
     parts = [
         f"You have a knowledge base mounted at {config.kb_mount}.",
         f"Your writeable knowledge-base workspace is `{kb.workspace_root()}`. "
@@ -519,6 +602,8 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
         "Never fall back to shell redirection to work around it.",
     ]
     parts.append(_ASKING)
+    if skills:
+        parts.append(skills)
     if shared:
         parts.append(_SHARED_CONVERSATION)
     # Only when a service is actually live. Returns "" otherwise rather than a

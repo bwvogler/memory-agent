@@ -62,6 +62,33 @@ if reason:
 """
 
 
+SEEDED_SKILL_FRONTMATTER_SCRIPT = """
+import sys
+from app import evolve
+
+path = "/mnt/kb/memory/skills/views/SKILL.md"
+current = open(path).read()
+fields = evolve._fields(evolve._split_frontmatter(current)[0] or [])
+keys = sorted(k for k, _ in fields)
+# Sorted, because the store reorders keys on the way in: a skill shipped
+# `name` then `description` is stored `description` then `name`. Only the SET
+# is load-bearing - the order the store picks is stable, which is all
+# bounded_skill_edit's reorder check needs.
+if keys != ["description", "name"]:
+    print(f"stored frontmatter is {keys}")
+    sys.exit(1)
+
+# One word, because the store unfolds the `>` block and a multi-word anchor
+# could be re-wrapped across the join. A no-op replace needs no guard of its
+# own: bounded_skill_edit refuses an unchanged rewrite, so this still fails.
+improved = current.replace("rendering", "layout", 1)
+reason = evolve.bounded_skill_edit(current, improved)
+if reason:
+    print(reason)
+    sys.exit(1)
+"""
+
+
 def wait_until_idle(stack, timeout: float = 60.0) -> None:
     """Block until no turn is in flight, so a POST can expect 202.
 
@@ -191,6 +218,38 @@ def test_bootstrap_skills_are_seeded_into_the_kb(stack):
 
     assert "lint" in listing
     assert "ingest" in listing
+    assert "views" in listing
+
+
+def test_a_skills_reference_subdirectory_survives_the_real_mount(stack):
+    """`views` is the first skill to ship a references/ directory, so it is the
+    first time _seed_tree creates a nested directory ON THE MOUNT rather than in
+    tmp_path. A skill naming two references that do not exist looks like an
+    agent ignoring an instruction, not like a seeding failure.
+    """
+    listing = app_exec("ls", "/mnt/kb/memory/skills/views/references/").stdout
+
+    assert "backfilling.md" in listing
+    assert "choosing-a-layout.md" in listing
+
+
+def test_a_seeded_skill_is_still_evolvable_after_the_store_rewrites_it(stack):
+    """Only the real store can answer this one, and it answered it differently
+    than expected: **the store sorts frontmatter keys.** A skill shipped as
+    `name` then `description` is stored `description` then `name`, which is why
+    `shipped_source` in tests/test_seed_bootstrap.py writes them in that order -
+    a detail that reads as arbitrary until you see this.
+
+    That makes the ORDER in a bootstrap file cosmetic and the key SET the only
+    load-bearing part: a third key is what locks a skill out of reflection
+    forever. `bounded_skill_edit`'s reorder check is satisfied because the store
+    normalises both sides identically, and this asserts that end to end rather
+    than reasoning about it. The fast tier cannot: its double only simulates the
+    folded-block collapse, not the sort.
+    """
+    out = app_exec("python", "-c", SEEDED_SKILL_FRONTMATTER_SCRIPT, check=False)
+
+    assert out.returncode == 0, f"the stored skill cannot be evolved: {out.stdout}"
 
 
 def test_the_image_skill_overlay_is_seeded_and_can_be_appended_to(stack):

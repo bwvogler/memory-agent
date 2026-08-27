@@ -132,9 +132,27 @@ at the page, not at a console.
 `_seed_tree` only replaces a bootstrap file whose *stored* hash still matches,
 so any deployment where `wiki/GUIDE.md` was edited never receives new text, with
 a log warning as the only trace. `skills/kb-curator/SKILL.md` ships in the image
-and loads every turn; it points at a new `references/directory-views.md` holding
-the schema. `bootstrap/wiki/GUIDE.md` and the `AGENT_GUIDE.md` starter are
+and is offered every turn; it points at a new `references/directory-views.md`
+holding the schema.
+
+> **Amendment.** "Loads every turn" was false when this was written, and stayed
+> false until a live probe measured it: no skill had ever loaded, because
+> nothing made one discoverable. It is true now only because
+> `agent._read_skills` names every skill and its path in the system prompt. The
+> reasoning below — that the image skill is the reliable channel and the
+> bootstrap file is not — survives intact, since the image tier still cannot be
+> edited or hash-skipped. But it was resting on a mechanism that did not exist. `bootstrap/wiki/GUIDE.md` and the `AGENT_GUIDE.md` starter are
 updated too, but nothing depends on them arriving.
+
+A third channel was added after the fact, and it is a different kind of thing:
+`bootstrap/skills/views/` is the *procedure*, where the reference is the
+*vocabulary*. The reference is enough to change a view whose fields already
+exist; giving a directory its first view is a survey, a decision made with the
+human, and a backfill that rarely fits in one turn, and none of that was
+written down anywhere. It is a seed rather than an image skill because a
+household should be able to rewrite its own procedure, while the vocabulary
+stays in the image where it cannot drift. `kb-curator` points at it, which is
+what makes it reachable at all — a bootstrap skill is not routed.
 
 ## Consequences
 

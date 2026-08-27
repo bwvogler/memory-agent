@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from app import agent, kb
+from app import agent, evolve, kb
 
 
 @pytest.fixture
@@ -63,10 +63,56 @@ def test_fresh_seed_writes_skills_and_records_hashes(workspace):
     shipped = json.loads(_state(workspace).read_text())["shipped"]
     assert "lint/SKILL.md" in shipped
     assert "ingest/SKILL.md" in shipped
+    assert "views/SKILL.md" in shipped
     # Not every seeded file is a skill: an image skill's LEARNED.md overlay
     # rides the same path, and needs the same "left alone once edited" rule -
     # once reflection appends to it, the shipped stub must never come back.
     assert "kb-curator/LEARNED.md" in shipped
+
+
+def test_a_skills_reference_subdirectory_is_seeded(workspace):
+    """A skill's references/ sits two levels down, which nothing shipped until
+    `views`. The only thing that makes it work is one `mkdir(parents=True)` in
+    `_seed_tree`, and its absence would not look like a bug: the skill would
+    load, name two reference files, and find neither - which reads as the agent
+    ignoring an instruction rather than as a file that was never written.
+    """
+    agent.seed_bootstrap()
+
+    reference = workspace / "skills" / "views" / "references" / "backfilling.md"
+
+    assert reference.exists()
+    shipped = json.loads(_state(workspace).read_text())["shipped"]
+    assert "views/references/backfilling.md" in shipped
+
+
+def test_every_bootstrap_skill_can_still_be_evolved():
+    """The frontmatter key SET is load-bearing and nothing else enforces it.
+
+    `bounded_skill_edit` refuses any frontmatter key added, removed or
+    reordered, so a skill shipped with a third key - `version`, `allowed-tools`,
+    anything - is permanently locked out of the one change reflection is allowed
+    to make to it. Nothing fails at seed time, nothing fails at load time, and
+    the refusal surfaces much later inside a reflection turn, attributed to the
+    reflection rather than to the skill.
+
+    The set, not the order: the store sorts frontmatter keys, so what a skill
+    ships as `name` then `description` is stored the other way round and both
+    sides of the guard's comparison get normalised the same way. Asserting the
+    shipped order here would be pinning a convention, not a guarantee - see
+    test_a_seeded_skill_is_still_evolvable_after_the_store_rewrites_it, which
+    measures the real thing.
+    """
+    for skill in sorted((agent.BOOTSTRAP_DIR / "skills").glob("*/SKILL.md")):
+        current = skill.read_text(encoding="utf-8")
+        fields = evolve._fields(evolve._split_frontmatter(current)[0] or [])
+
+        assert sorted(key for key, _ in fields) == ["description", "name"], skill
+
+        improved = current.replace(
+            "description: >", "description: >\n  Rewritten by reflection.", 1
+        )
+        assert evolve.bounded_skill_edit(current, improved) is None, skill
 
 
 def test_reseed_without_changes_is_a_noop(workspace):

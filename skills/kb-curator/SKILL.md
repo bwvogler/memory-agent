@@ -93,8 +93,14 @@ File those too, but mark them, and never claim one:
 ```bash
 bd create --title="Short, specific title" \
   --description="What should change, and what made you want it." \
-  --type=feature --priority=2 --labels image --status deferred
+  --type=feature --priority=2 --labels image
+bd update <id> --status deferred
 ```
+
+Two commands, and it has to be two: `bd create` has no `--status` flag on the
+version running here, and passing one does not warn — it prints `unknown flag`
+and **creates nothing at all**. Set the status in a second call and check the
+id came back.
 
 `deferred` keeps it out of `bd ready`, which is the frontier of work *you* can
 actually do — the same reason signal beads are deferred. You cannot ship an
@@ -130,6 +136,12 @@ is yours to write and revise: when the human describes how they want a folder
 to look — as a table, grouped by something, with certain fields showing — that
 is a view spec, not a page you hand-maintain. Read `references/directory-views.md`
 before writing or changing one.
+
+That reference specifies the spec's keys, which is enough to *change* a view
+whose fields already exist. Giving a directory a view it has never had is a
+larger job — the pages have to carry the fields first, which is a survey, a
+decision made with the human, and a backfill that rarely fits in one turn. Read
+`memory/skills/views/SKILL.md` in the knowledge base and follow it for that.
 
 ## Read what curating has already taught you
 

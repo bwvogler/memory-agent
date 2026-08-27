@@ -28,7 +28,7 @@ the TigerFS workspace.
 - `app/mcp_catalog.py` — the opposite direction: outbound MCP servers the agent
   may connect to, defined in the image and credentialed from the environment
 - `app/config.py` — all config read from environment variables
-- `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill loaded into every agent session
+- `skills/kb-curator/SKILL.md` — universal wiki-maintenance skill, offered to every agent session by `agent._read_skills`
 - `bootstrap/` — skill files seeded into the KB on first startup (ingest, lint, reflect); editable in the KB
 - `static/` — web UI (chat at `/`, wiki view at `/kb`); `view.js` is the
   directory-index renderer, kept pure so a browser check can call it directly
@@ -121,15 +121,78 @@ opened by deep link cannot tell "empty" from "not told", and printed the spec's
 `empty_labels` over data it never had. Only a browser caught that.
 See `docs/decisions/0018`.
 
+**A skill is reached because the system prompt names it, and nothing else.**
+This is the load-bearing fact about skills here, and it was wrong in this file
+for a long time. `ClaudeAgentOptions.skills` is the SDK's switch, but it enables
+*discovered* skills and nothing in this deployment is discoverable: `add_dirs`
+grants access to a path without making it a skill source, and
+`setting_sources=[]` rules out the CLI's own scan. Measured rather than
+reasoned — three live turns recorded **zero** skills used, and patching
+`skills="all"` in changed nothing.
+
+`agent._read_skills` is the fix and the whole mechanism: it walks both tiers
+(`skills/` in the image, `memory/skills/` in the KB), reads each `SKILL.md`'s
+`description` via `evolve.description_of`, and appends a listing of name,
+absolute path and description to the system prompt. That is deliberately just
+level one of progressive disclosure — the metadata, plus where to read the
+rest — so a skill's body costs nothing on turns that do not use it, exactly as
+a real skill would. It is read fresh every turn because a reflection turn's
+*entire* permitted change is a description, so a cached listing would make
+self-improvement land somewhere nothing re-reads.
+
+Two rules fall out. An image skill wins over a same-named KB directory, because
+`memory/skills/kb-curator/` holds only a `LEARNED.md` overlay and letting it win
+would drop the real skill. And a skill whose description will not parse is left
+out with a warning rather than listed blank — silently unreachable is the defect
+this whole mechanism exists to end, so `tests/test_skill_listing.py` asserts
+every shipped skill actually offers one.
+
 **Bootstrap skills.** `bootstrap/skills/` contains example skills (ingest, lint,
-reflect) seeded into `memory/skills/` at startup. They live in the KB so the
-human can edit and improve them over time. They are NOT auto-loaded into every
-session — the user invokes them explicitly, or `app/mcp_server.py` names them.
+reflect, views) seeded into `memory/skills/` at startup. They live in the KB so
+the human can edit and improve them over time. `app/mcp_server.py` and the
+`kb-lint` subagent also name them by path directly, which is the same mechanism
+applied to one caller rather than to the prompt.
 
 Seeding tracks a hash of what it last shipped (`.bootstrap-state.json`) so an
 improved skill actually reaches existing deployments: an unmodified file is
 replaced, a human-edited one is left alone with a warning. Files predating the
 state file are never touched, since we cannot tell whether they were edited.
+
+Two constraints shape what a skill here may look like, and `bootstrap/skills/GUIDE.md`
+states both because neither is visible in the file that violates it. **Exactly
+two frontmatter keys, `name` and `description`, and nothing else** —
+`evolve.bounded_skill_edit` refuses any key added, removed or reordered, so a
+third key locks the skill out of the one change reflection is allowed to make
+to it, and the refusal surfaces months later inside a reflection turn rather
+than at seed time. `test_every_bootstrap_skill_can_still_be_evolved` pins it
+for every skill, not just today's.
+
+The *set*, not the order — and that was measured rather than assumed, by a
+container test written to assert the wrong thing. **The store sorts frontmatter
+keys**, so a skill shipped `name` then `description` is stored `description`
+then `name`; the guard's reorder check is satisfied because both sides of its
+comparison come from the store and are normalised identically. This is also why
+`shipped_source` in `tests/test_seed_bootstrap.py` writes them description-first,
+a detail that reads as arbitrary until you know. The fast tier cannot see any
+of it: its double simulates the folded-block collapse and not the sort.
+
+And **a skill here cannot ship a script**: `allowed_tools` is
+`Bash(bd:*)` and `acceptEdits` does not cover Bash, so anything else falls
+through to `can_use_tool` — a prompt on an interactive turn, a denial on a
+reflection or `/mcp` one. That inverts the usual "prefer a script for
+deterministic checks" advice; a skill's feedback loop has to be expressible in
+`Read`/`Glob`/`Grep`.
+
+`views` is the one whose work does not fit in a turn, and it is the first skill
+here with a `references/` directory — split by *phase*, so a turn resuming a
+backfill loads the backfill file and not the layout examples. It is a seed
+rather than an image skill because the procedure is a household's to rewrite;
+the *vocabulary* it works with stays in the image at
+`skills/kb-curator/references/directory-views.md`, where it cannot drift. That
+two-level nesting under `skills/` was an unexercised seeding path until now
+(`_seed_tree`'s `mkdir(parents=True)` is the whole of it), and it is covered in
+both the fast and container tiers, because a reference that silently failed to
+seed reads as the agent ignoring an instruction.
 
 **Task state lives in beads.** `bd` (pinned in the Dockerfile) keeps a
 dependency-aware issue graph per user at `$WORK_DIR/{user_slug}/.beads`, on the
@@ -781,6 +844,18 @@ Every signal bead is created `deferred` precisely so evidence stays out of
 an unreachable ledger. `kb.create_bead` now sets status in a second
 `bd update` call, which works on both lines. Anything else reaching for a bd flag
 should assume the 1.1 surface until the container tier says otherwise.
+
+The application code was only half of it, and the other half sat broken for
+longer. `skills/kb-curator/SKILL.md` documented the same dead flag in the
+`bd create ... --labels image --status deferred` command it tells the agent to
+run when it notices something about the *app* rather than the wiki — so every
+image bead the agent tried to file that way printed `unknown flag` and created
+nothing. Found while writing the `views` skill, which was about to copy the
+command; reproduced from scratch on a throwaway ledger before changing it. It
+is now the same two-step `create` then `update --status` that `kb.create_bead`
+uses. Worth taking as a general lesson rather than a fixed bug: a bd invocation
+living in *prose* is not covered by any tier, so the flags in a skill file are
+only as current as the last person who ran them.
 
 The ordering hazard is asymmetric, and it is the part to remember if a rollback
 is ever needed again. Upstream warns that a leftover 1.2.1 silently re-migrates
