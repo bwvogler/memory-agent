@@ -176,6 +176,29 @@ def _learned_count(body: str) -> int:
     return len(_trimmed(_learned_split(body)[1]))
 
 
+def description_of(text: str) -> str | None:
+    """Return a SKILL.md's `description` as one line, or None if it has none.
+
+    Public because the system prompt needs it: a skill is only reachable in
+    this deployment if `agent._read_skills` lists it, and the description is
+    the whole of the routing signal. It lives here rather than in agent.py
+    because this module already owns how a skill file's frontmatter is read -
+    including the two shapes a description arrives in, the folded `>` block a
+    skill ships with and the single line the store rewrites it into.
+    """
+    frontmatter, _ = _split_frontmatter(text)
+    if frontmatter is None:
+        return None
+    for key, block in _fields(frontmatter):
+        if key != MUTABLE_FIELD:
+            continue
+        first, *rest = block
+        parts = [first.split(":", 1)[1], *rest]
+        joined = " ".join(p.strip() for p in parts if p.strip() not in ("", ">", "|"))
+        return " ".join(joined.split()) or None
+    return None
+
+
 def bounded_overlay_edit(current: str, proposed: str) -> str | None:
     """Return why this overlay rewrite exceeds the remit, or None if allowed.
 
