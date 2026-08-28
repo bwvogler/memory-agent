@@ -320,7 +320,6 @@ async function loadFiles() {
         renderRowGuides(header, guides);
         const toggle = document.createElement('span');
         toggle.className = 'dir-toggle collapsed';
-        toggle.textContent = '▾';
         const label = document.createElement('span');
         label.className = 'label';
         label.textContent = entry.name;
