@@ -607,6 +607,40 @@ docs/decisions/0016, including the reload-resume bug that first cut of this
 shipped with (`onerror` clearing the same localStorage marker a page reload
 needs intact) and the fix (clear only on an authoritative `done`/`failed`).
 
+**The three panes now collapse, swipe, and land in true chronological
+order — see the amendments in `docs/decisions/0016`.** The flex-row layout had
+never been tried below its own 772px floor: no width-based media query existed
+anywhere in `app.css`, and `body { height: 100vh }` doesn't shrink for an
+on-screen keyboard. Two header buttons (`#toggle-tree`/`#toggle-chat`) collapse
+a sidebar on desktop, persisted in `localStorage` beside the existing width
+keys. Below 820px the layout becomes a CSS scroll-snap carousel — one pane per
+screen, a tab strip in the header, no touch-gesture code — landing on chat at
+boot; the auto-navigate-on-write behavior above gets a dot on the Article tab
+when its target pane is off-screen, since silently not-navigating would be the
+same lie by omission ADR 0018 names for `dirs`. `visualViewport` (not `dvh`
+alone, which tracks browser chrome but not a keyboard) drives an `--app-h`
+custom property so the composer never ends up hidden behind the keyboard.
+Enter sends only where `matchMedia('(pointer: fine)')` matches, checked live
+at each keydown rather than cached at boot.
+
+Separately, the chat transcript is chronological now, which it never actually
+was: the client had always rendered every stretch of a turn's prose into one
+fixed `div.body`, with every tool call, thought and subagent box appended as a
+*later sibling* of it — so a turn's final answer sat at the top, above
+whatever tool activity followed it, regardless of when anything actually
+happened. (The server side was already correct: one monotonic seq counter in
+`Conversation.append`, and `_render_stream` emits a `tool_use` at
+`content_block_start` specifically so it interleaves with the surrounding text
+deltas.) `app.js` now tracks which block — a prose `div.body` or a collapsed
+`details.activity` run — is currently open, and opening one closes the other,
+so blocks land in the DOM in the order they actually happened, with
+consecutive tool/thinking/subagent/todo activity folded into one
+click-to-expand run rather than left as bare siblings. `ask`/`permission`
+still bypass the run entirely (a question buried behind a disclosure could
+strand a turn nobody notices needs an answer), and a failed step forces its
+whole run open rather than requiring anyone to expand it to find out why the
+turn stalled.
+
 **The conversation is the unit, not the turn.** `app/conversations.py`'s
 `Conversation` is a durable, household-shared, seq-numbered event log —
 `conversation_events`/`conversation_turns`/`conversations` in

@@ -20,6 +20,12 @@ const filepicker = document.getElementById('filepicker');
 const conversationPicker = document.getElementById('conversation-picker');
 const newChatBtn = document.getElementById('new-chat');
 const stopBtn = document.getElementById('stop');
+const navPane = document.getElementById('nav');
+const mainPane = document.querySelector('main');
+const chatPane = document.getElementById('chat');
+const toggleTreeBtn = document.getElementById('toggle-tree');
+const toggleChatBtn = document.getElementById('toggle-chat');
+const paneTabs = document.querySelectorAll('.pane-tabs button');
 
 let pendingImages = []; // [{dataUrl, mediaType, base64}]
 let pendingFiles = [];  // [{name, size, base64}]
@@ -37,6 +43,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 let myEmail = null;
 let activeConversationId = null;
 let es = null;
+let turnUI = null; // the in-progress (or most recently finished) turn's UI state
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -107,6 +114,77 @@ makeResizable(
   () => chatWidth, (v) => { chatWidth = v; },
   CHAT_MIN, CHAT_MAX, 'memory-agent:chat-width', 'right',
 );
+
+// --- collapsing a sidebar from the header (desktop only - the mobile
+// carousel below replaces these with the tab strip, and CSS keeps a pane
+// that was left collapsed on desktop visible once the breakpoint hides the
+// tree/chat toggles) --------------------------------------------------------
+
+function loadFlag(key) { return localStorage.getItem(key) === '1'; }
+
+let hideTree = loadFlag('memory-agent:hide-tree');
+let hideChat = loadFlag('memory-agent:hide-chat');
+
+function applyPaneToggles() {
+  layout.classList.toggle('no-tree', hideTree);
+  layout.classList.toggle('no-chat', hideChat);
+  toggleTreeBtn.setAttribute('aria-pressed', String(!hideTree));
+  toggleChatBtn.setAttribute('aria-pressed', String(!hideChat));
+}
+applyPaneToggles();
+
+toggleTreeBtn.addEventListener('click', () => {
+  hideTree = !hideTree;
+  localStorage.setItem('memory-agent:hide-tree', hideTree ? '1' : '0');
+  applyPaneToggles();
+});
+toggleChatBtn.addEventListener('click', () => {
+  hideChat = !hideChat;
+  localStorage.setItem('memory-agent:hide-chat', hideChat ? '1' : '0');
+  applyPaneToggles();
+});
+
+// --- mobile: swiping between the three panes ------------------------------
+//
+// Native CSS scroll-snap (app.css's 820px breakpoint) rather than a touch
+// gesture handler - momentum, rubber-banding and accessibility come for
+// free, and there is nothing to conflict with the tree's own scrolling.
+
+const MOBILE_QUERY = matchMedia('(max-width: 820px)');
+const PANE_ELS = { nav: navPane, main: mainPane, chat: chatPane };
+const PANE_ORDER = ['nav', 'main', 'chat'];
+
+function goToPane(name) {
+  const target = PANE_ELS[name];
+  if (target) target.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+}
+
+function activePaneName() {
+  const idx = Math.round(layout.scrollLeft / Math.max(1, layout.clientWidth));
+  return PANE_ORDER[Math.min(PANE_ORDER.length - 1, Math.max(0, idx))];
+}
+
+function updateActiveTab() {
+  const active = activePaneName();
+  paneTabs.forEach((btn) => btn.classList.toggle('active', btn.dataset.pane === active));
+  if (active === 'main') clearArticleDot();
+}
+
+paneTabs.forEach((btn) => btn.addEventListener('click', () => goToPane(btn.dataset.pane)));
+layout.addEventListener('scroll', updateActiveTab);
+updateActiveTab();
+
+// A dot on the Article tab when the centre pane changed while some other
+// pane was on screen - without it, the auto-navigate-on-write behavior
+// (docs/decisions/0016) silently does nothing once that pane is off-screen.
+function markArticleDot() {
+  if (!MOBILE_QUERY.matches || activePaneName() === 'main') return;
+  const btn = document.querySelector('.pane-tabs button[data-pane="main"]');
+  if (btn && !btn.querySelector('.pane-dot')) btn.appendChild(el('span', 'pane-dot'));
+}
+function clearArticleDot() {
+  document.querySelector('.pane-tabs .pane-dot')?.remove();
+}
 
 // Auto-scroll only while already at the bottom, so dragging a gutter or
 // scrolling up to reread something does not get yanked back down by the next
@@ -533,6 +611,9 @@ async function openUpload({ url, name }) {
 
 function openInPane(target) {
   if (!target) return;
+  // On mobile the centre pane is a swipe away rather than always visible, so
+  // a write that navigates it needs a signal that survives being off-screen.
+  markArticleDot();
   if (target.kind === 'kb') {
     // Open first, refresh the tree second, and only when the tree has never
     // heard of this path - an agent write that created a file needs a new
@@ -742,12 +823,19 @@ function freshTurnUI(turnId) {
   return {
     turnId, finished: false,
     msg: null, working: null, tick: null, startedAt: null,
-    toolLines: new Map(),   // tool_use id -> its .tool div
+    toolLines: new Map(),   // tool_use id -> its .tool div - turn-scoped: a
+                             // tool_result can land long after its run closed
     toolTargets: new Map(), // tool_use id -> its {kind, path}, if any
     forms: new Map(),       // request_id -> the ask/permission element
     agents: new Map(),      // agent key -> its <details> container
     lastAgentType: '',
-    thought: null, todos: null,
+    // currentBody/currentActivity: which of the turn's several blocks is
+    // receiving new content right now. Exactly one is non-null at a time;
+    // opening one closes the other, which is what keeps prose and activity
+    // in true chronological order instead of two segregated columns.
+    currentBody: null,      // the <div class="body"> currently receiving prose
+    currentActivity: null,  // the <details class="activity"> currently open
+    thought: null, todos: null, // reset on every new activity run - see below
     currentPara: null,      // the <p> currently receiving streamed tokens
     newParaNext: true,      // start a fresh <p> on the next text chunk
     hasTextDelta: false,    // true once the CLI streams at least one token
@@ -791,6 +879,11 @@ function startAgentBubble() {
   working.appendChild(elapsed);
   msg.wrap.appendChild(working);
   turnUI.working = working;
+  // The bubble addMessage() just built already has one <div class="body"> at
+  // index 1 - reuse it for the turn's first stretch of prose rather than
+  // creating a second one. A turn that never produces text before its first
+  // tool call leaves it empty, which app.css hides (`.msg .body:empty`).
+  turnUI.currentBody = msg.body;
   turnUI.startedAt = Date.now();
   turnUI.tick = setInterval(() => {
     const s = Math.round((Date.now() - turnUI.startedAt) / 1000);
@@ -801,9 +894,19 @@ function startAgentBubble() {
 
 function appendText(raw) {
   if (!turnUI || !turnUI.msg) return;
+  if (!turnUI.currentBody) {
+    // Prose resuming after a run of tool activity: open a fresh bubble BELOW
+    // it rather than back-filling the one the run interrupted. This is the
+    // whole point - the answer ends up at the bottom, where the reader
+    // already is, instead of above everything the turn did to produce it.
+    turnUI.currentBody = el('div', 'body', '');
+    turnUI.msg.wrap.insertBefore(turnUI.currentBody, turnUI.working);
+    turnUI.currentActivity = null;
+    turnUI.newParaNext = true;
+  }
   if (turnUI.newParaNext) {
     turnUI.currentPara = el('p', '');
-    turnUI.msg.body.appendChild(turnUI.currentPara);
+    turnUI.currentBody.appendChild(turnUI.currentPara);
     turnUI.newParaNext = false;
   }
   turnUI.currentPara.textContent += raw.replace(/\\n/g, '\n');
@@ -813,12 +916,55 @@ function appendText(raw) {
 // Structured events carry a JSON payload; text ones stay raw strings.
 const parse = (e) => { try { return JSON.parse(e.data); } catch { return null; } };
 
+// The run of steps currently receiving tool/thinking/subagent/todo activity.
+// Opening one ends the current prose bubble (see appendText) and resets
+// thought/todos, which are per-run rather than per-turn: thinking or a plan
+// update that resumes after a stretch of prose belongs to a NEW collapsed
+// run, not a backfill of one already closed.
+function activitySteps() {
+  if (!turnUI.currentActivity) {
+    const d = el('details', 'activity');
+    d.appendChild(el('summary', '', ''));
+    d.appendChild(el('div', 'steps'));
+    turnUI.msg.wrap.insertBefore(d, turnUI.working);
+    turnUI.currentActivity = d;
+    turnUI.currentBody = null;
+    turnUI.thought = null;
+    turnUI.todos = null;
+  }
+  return turnUI.currentActivity.querySelector('.steps');
+}
+
+function summariseActivity(label) {
+  const d = turnUI.currentActivity;
+  if (!d) return;
+  const n = d.querySelector('.steps').children.length;
+  d.querySelector('summary').textContent =
+    n + (n === 1 ? ' step' : ' steps') + (label ? ' — ' + label : '');
+}
+
 // Insert into the current turn's message, keeping the working indicator last
 // so it always sits below the newest thing that happened rather than above.
-function insert(node, into) {
+// `into` bypasses the activity run entirely - used only to nest a tool call
+// or thought INSIDE a subagent's own box, which stays flat internally rather
+// than growing its own collapsed sub-runs.
+function insert(node, into, label) {
   if (!turnUI || !turnUI.msg) return;
-  if (into) { into.appendChild(node); }
-  else { turnUI.msg.wrap.insertBefore(node, turnUI.working); }
+  if (into) { into.appendChild(node); scroll(); return; }
+  activitySteps().appendChild(node);
+  summariseActivity(label);
+  scroll();
+}
+
+// Some things must stay visible without anyone expanding a run: a question
+// or permission request needs a click, and burying it behind a disclosure
+// could strand the turn waiting on an answer nobody sees. These are appended
+// as top-level siblings and close whatever activity run was open, so the
+// next tool call (or piece of prose) starts fresh below them.
+function insertTop(node) {
+  if (!turnUI || !turnUI.msg) return;
+  turnUI.currentActivity = null;
+  turnUI.msg.wrap.insertBefore(node, turnUI.working);
   scroll();
 }
 
@@ -827,13 +973,16 @@ function insert(node, into) {
 // reports the SDK's agent id while message events report the Task call's
 // tool_use id, and those are different identifiers, so with several subagents
 // running at once attribution between blocks can be wrong. What cannot go
-// wrong is subagent text reaching the main paragraph.
+// wrong is subagent text reaching the main paragraph. Turn-scoped like
+// toolLines, not per-run: a subagent's box must stay findable by key across
+// however many activity runs the turn ends up split into.
 function agentBox(key) {
   if (!turnUI || !key) return null;
   if (!turnUI.agents.has(key)) {
+    const label = 'subagent' + (turnUI.lastAgentType ? ': ' + turnUI.lastAgentType : '');
     const d = el('details', 'subagent');
-    d.appendChild(el('summary', '', 'subagent' + (turnUI.lastAgentType ? ': ' + turnUI.lastAgentType : '') + ' — working'));
-    insert(d);
+    d.appendChild(el('summary', '', label + ' — working'));
+    insert(d, null, label);
     turnUI.agents.set(key, d);
   }
   return turnUI.agents.get(key);
@@ -939,7 +1088,7 @@ function wireStreamHandlers(stream) {
       turnUI.thought = el('details', 'thought');
       turnUI.thought.appendChild(el('summary', '', 'thinking'));
       turnUI.thought.appendChild(el('div', 'text', ''));
-      insert(turnUI.thought);
+      insert(turnUI.thought, null, 'thinking');
     }
     return turnUI.thought.querySelector('.text');
   }
@@ -965,7 +1114,7 @@ function wireStreamHandlers(stream) {
       const label = LABELS[d.name] || String(d.name || '').toLowerCase();
       t = el('div', 'tool', '→ ' + label + ' ');
       if (d.id) turnUI.toolLines.set(d.id, t);
-      insert(t, agentBox(d.agent));
+      insert(t, agentBox(d.agent), label);
     }
     if (d.detail) {
       // .args, not .detail: tool_result appends its own .detail span for a
@@ -986,6 +1135,10 @@ function wireStreamHandlers(stream) {
     if (line && !d.ok) {   // successes stay quiet; only failures speak up
       line.classList.add('failed');
       line.appendChild(el('span', 'detail', ' — failed' + (d.detail ? ': ' + d.detail : '')));
+      // A failure must stay visible without anyone expanding the collapsed
+      // run it happened inside - same reason .tool.failed exists on the line.
+      const run = line.closest('details.activity');
+      if (run) { run.classList.add('failed'); run.open = true; }
       scroll();
     }
     if (d.ok) {
@@ -1008,7 +1161,7 @@ function wireStreamHandlers(stream) {
 
   stream.addEventListener('todo', (e) => {
     const d = parse(e); if (!d || !turnUI || !Array.isArray(d.todos)) return;
-    if (!turnUI.todos) { turnUI.todos = el('div', 'todos'); insert(turnUI.todos); }
+    if (!turnUI.todos) { turnUI.todos = el('div', 'todos'); insert(turnUI.todos, null, 'plan'); }
     turnUI.todos.innerHTML = '';
     for (const t of d.todos) {
       const mark = t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '·';
@@ -1087,7 +1240,9 @@ function wireStreamHandlers(stream) {
     actions.appendChild(submit);
     box.appendChild(actions);
     turnUI.forms.set(d.request_id, box);
-    insert(box);
+    // Never collapsed - this needs a click, and burying it behind a
+    // disclosure could strand the turn waiting on an answer nobody sees.
+    insertTop(box);
   });
 
   stream.addEventListener('permission', (e) => {
@@ -1108,7 +1263,7 @@ function wireStreamHandlers(stream) {
     actions.appendChild(deny);
     box.appendChild(actions);
     turnUI.forms.set(d.request_id, box);
-    insert(box);
+    insertTop(box);
   });
 
   stream.addEventListener('answered', (e) =>
@@ -1253,7 +1408,55 @@ async function boot() {
     }
   }
   if (target) openConversation(target);
+
+  // Chat is the pane you came for; land there rather than on the tree, which
+  // is what an unscrolled carousel would otherwise show. No smooth-scroll -
+  // this is the initial position, not a navigation.
+  if (MOBILE_QUERY.matches) layout.scrollLeft = layout.scrollWidth;
+  updateActiveTab();
 }
+
+// --- composer: auto-grow, Enter-to-send, keyboard-safe viewport -----------
+
+function resizeTextarea() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+}
+input.addEventListener('input', resizeTextarea);
+
+// Enter sends on a device with a real keyboard; on touch it stays a newline
+// and Send is the only way to send, since an on-screen keyboard has no easy
+// Shift+Enter. Read live rather than cached, so a tablet that gains a
+// keyboard mid-session starts working immediately.
+const ENTER_SENDS = matchMedia('(pointer: fine)');
+input.addEventListener('keydown', (e) => {
+  // isComposing / keyCode 229: an IME commits its candidate with Enter, and
+  // swallowing that would send half a sentence.
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  if (!ENTER_SENDS.matches) return;
+  e.preventDefault();
+  form.requestSubmit(); // not .submit() - that bypasses the submit handler
+});
+send.title = ENTER_SENDS.matches ? 'Enter to send · Shift+Enter for a new line' : 'Send';
+
+// iOS does not shrink 100dvh for an on-screen keyboard, so the composer ends
+// up hidden behind it without this. visualViewport is the one API that
+// actually reports the keyboard.
+if (window.visualViewport) {
+  const fitToKeyboard = () => {
+    document.documentElement.style.setProperty('--app-h', window.visualViewport.height + 'px');
+    // iOS scrolls the outer (layout) viewport to reveal the focused field,
+    // but the app is already sized to the visual viewport - that scroll is
+    // pure damage on top of a fixed-height flex column.
+    window.scrollTo(0, 0);
+  };
+  window.visualViewport.addEventListener('resize', fitToKeyboard);
+  window.visualViewport.addEventListener('scroll', fitToKeyboard);
+  fitToKeyboard();
+}
+// The keyboard opening can leave the log stranded mid-scroll; nudge it back
+// to the bottom on focus, same as any other reason to autoscroll.
+input.addEventListener('focus', scroll);
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1262,6 +1465,7 @@ form.addEventListener('submit', async (e) => {
   const files = pendingFiles.slice();
   if ((!text && !images.length && !files.length) || !activeConversationId) return;
   input.value = '';
+  resizeTextarea();
   pendingImages = [];
   pendingFiles = [];
   previews.innerHTML = '';
@@ -1295,6 +1499,7 @@ form.addEventListener('submit', async (e) => {
     // only restored if the box is still empty - recovering the old message
     // must not destroy a newer one typed while the request was in flight.
     if (!input.value) input.value = text;
+    resizeTextarea();
     for (const i of images) addImagePreview(i.dataUrl, i.mediaType, i.base64);
     for (const f of files) addFilePreview(f.name, f.size, f.base64);
     addMessage('error', '').body.classList.add('err');
