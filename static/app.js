@@ -356,12 +356,14 @@ async function loadFiles() {
         const name = base.replace(/\.md$/, '');
         const a = document.createElement('a');
         renderRowGuides(a, guides);
-        const spacer = document.createElement('span');
-        spacer.className = 'toggle-spacer';
+        // No chevron-width spacer here, deliberately - a file has nothing to
+        // toggle, so its label starts right where a same-depth directory's
+        // chevron does, not where that directory's label does. Giving it the
+        // same spacer used to push files a whole column deeper than their
+        // sibling directories, reading as though they nested one level in.
         const label = document.createElement('span');
         label.className = 'label';
         label.textContent = name;
-        a.appendChild(spacer);
         a.appendChild(label);
         a.href = '#';
         a.dataset.path = f;
