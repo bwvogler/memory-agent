@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import agent, interact, kb, kbview, mcp_catalog, mcp_server, signals
@@ -32,6 +32,9 @@ from .turns import Turn, TurnInProgressError, TurnState, registry, spawn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from starlette.staticfiles import PathLike
+    from starlette.types import Scope
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -878,11 +881,41 @@ async def index() -> FileResponse:
     means a copied URL is the URL you land on. `/c/{conversation_id}` is the
     same trick for the conversation the chat pane opens - see
     docs/decisions/0017.
+
+    `Cache-Control: no-cache` forces revalidation on every load rather than
+    disabling caching outright - `ETag`/`Last-Modified` still short-circuit to
+    a cheap 304. Neither `FileResponse` nor `StaticFiles` (below) sets this by
+    default, so a browser falls back to a heuristic freshness window and can
+    keep serving a pre-deploy copy of this page indefinitely.
     """
-    return FileResponse(STATIC_DIR / "index.html")
+    response = FileResponse(STATIC_DIR / "index.html")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _RevalidatingStaticFiles(StaticFiles):
+    """Same gap as `index()` above, for every file under `/static/*`.
+
+    Nothing here is content-hashed (ADR 0016), so a plain URL like
+    `/static/app.js` never changes across a deploy - only `no-cache`
+    (revalidate every time) guarantees a new deploy is what the next load
+    actually sees, rather than whatever a browser's heuristic cache already
+    decided was still fresh.
+    """
+
+    def file_response(
+        self,
+        full_path: PathLike,
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
 
 # The MCP surface, for a machine caller rather than a browser. Mounted rather
 # than routed, because it is a whole ASGI app - which is also why it carries its

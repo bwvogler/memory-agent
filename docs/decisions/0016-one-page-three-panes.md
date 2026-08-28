@@ -169,3 +169,133 @@ already has to name the file for the reload case regardless.
 already know what you attached; only a file the *agent* wrote is news. The
 chip is a link, not a push, for exactly one caller: a successful
 `tool_use`/`tool_result` pair.
+
+## Amendment: the three panes had never been tried below 772px
+
+The layout above has always been a flex row with per-pane `min-width`s and no
+width-based media query anywhere in `app.css`. Summed, the floors are 772px
+(`nav` 160 + gutter 6 + `main` 280 + gutter 6 + `aside#chat` 320) — below that
+the row simply overflows, and `.layout { overflow: hidden }` clips it rather
+than scrolling. A phone cannot show this layout at all, there was no way to
+collapse a pane at any width, and `body { height: 100vh }` does not shrink
+when a virtual keyboard opens, so the composer ends up behind it.
+
+**Desktop: two header buttons, not a third control per gutter.** `#toggle-tree`
+and `#toggle-chat` flip a `.no-tree`/`.no-chat` class on `.layout`, persisted in
+`localStorage` beside the existing width keys — collapsing preserves the
+dragged width, so restoring returns the pane to exactly where it was. A
+per-gutter chevron was the other option considered; a header button is
+reachable without first finding the 6px gutter, and doubles as the mobile tab
+strip's visual idiom.
+
+**Mobile: CSS scroll-snap, not a touch gesture handler.** Below 820px (chosen
+because it clears the 772px floor with margin), `.layout` becomes a
+horizontally-snapping track with each pane at `100%` width, and the desktop
+gutters are hidden — dragging a 6px target with a finger was never going to
+work anyway. This gets momentum, rubber-banding and accessibility for free,
+and there is nothing to conflict with the tree's own vertical scrolling. A
+tab strip (`.pane-tabs`) drives the same `scrollIntoView`, and boot() lands on
+the chat pane rather than the tree, since chat is what you opened the app for.
+
+**The auto-navigate-on-write behavior needed a signal once its target pane
+could be off-screen.** A successful KB write moves the centre pane
+(`interact.describe_tool_target`, above). On the mobile carousel that pane is
+one swipe away, so silently not-navigating would be the identical failure ADR
+0018 later named for `dirs`: a lie by omission rather than by design. A dot on
+the Article tab (cleared when that pane becomes active) says "this changed"
+without the disruptive jump — the same tradeoff `openInPane` already made for
+uploads at 0016's "What was rejected."
+
+**`visualViewport`, on top of `100dvh`, because `dvh` alone doesn't move for a
+keyboard on iOS.** `dvh` tracks the *browser chrome* (address bar
+showing/hiding); it does not shrink for a virtual keyboard, which is a
+different visual-viewport event entirely. `app.js` writes the measured
+`visualViewport.height` into `--app-h`, which `body`'s height cascade prefers
+over `dvh` once set. The companion fix — `window.scrollTo(0, 0)` on every
+`resize`/`scroll` of the visual viewport — undoes an iOS quirk where focusing
+the field scrolls the *outer* (layout) viewport to reveal it, which is pure
+damage on top of an app that is already sized to the visual one.
+
+**Enter sends only where `pointer: fine` matches, read live rather than
+cached.** A touch keyboard has no easy Shift+Enter, so Enter has to stay a
+plain newline there or composing more than one line becomes a fight with the
+Send button. The media query is checked at keydown time, not memoized at
+boot, so a tablet that gains a keyboard mid-session starts behaving like a
+desktop immediately, and a device that loses one falls back just as fast.
+
+### Note on verification
+
+The 772px floor was computed from the CSS constants, not observed — nothing
+in this deployment had run below 1280×900 before. The behaviors above were
+each confirmed live against the isolated `browser-test` stack: a Playwright
+context toggling `#toggle-tree` and reloading, to prove the collapsed state
+and the restored width both survive a reload; a 390×844 context confirming
+`boot()` lands on the chat pane and the composer's bounding box stays fully
+inside the viewport; a `pointer: fine` versus `has_touch`/`is_mobile` context
+pair confirming Enter submits on one and inserts a newline on the other,
+routed through the real submit handler (a stubbed `409` on the messages route
+proved the request was — or wasn't — actually sent, rather than trusting the
+textarea's contents alone).
+
+## Amendment: the transcript was never actually chronological
+
+Every event kind shared one monotonic seq counter server-side
+(`Conversation.append`), and `_render_stream` was already emitting a `tool_use`
+at `content_block_start` — before the tool ran — specifically so it would
+interleave correctly with the surrounding text deltas
+(`app/agent.py`'s `_render_stream`). None of that mattered: the client
+flattened it into two segregated columns. `addMessage` built one
+`div.body` at a fixed position in the turn's wrapper, and every stretch of
+assistant prose for the *entire* turn appended into that same node; every
+tool call, thought, subagent box and todo list was inserted as a later
+sibling of it. The shape was always "all prose, then all activity, then the
+spinner" — so a turn's actual final answer sat at the *top*, above however
+much tool activity followed it, and reading it meant scrolling up past a
+transcript that had already finished.
+
+**The fix reifies "which block is currently receiving content" as state,
+instead of assuming it's always the one div `addMessage` built.**
+`turnUI.currentBody` and `turnUI.currentActivity` are mutually exclusive:
+opening one closes the other. `appendText` opens a fresh `div.body` — inserted
+immediately before the turn's spinner, i.e. after everything that has
+happened so far — whenever `currentBody` is null; `activitySteps()` opens a
+fresh `details.activity` the same way whenever `currentActivity` is null.
+Tool lines, thinking, subagent boxes and todo updates all route into whichever
+run is currently open (`insert`); prose always lands in whichever body is
+currently open (`appendText`). The result is a true chronological sequence of
+blocks, with consecutive activity folded into one collapsed, click-to-expand
+run rather than left as bare siblings — a middle ground between "everything
+interleaved and noisy" and "everything at the end and wrong."
+
+**Two things stay turn-scoped rather than per-run, deliberately.**
+`toolLines`/`toolTargets` (a `tool_result` can arrive long after the run that
+started it closed, and still has to find its line) and `agents` (a subagent's
+box must stay reachable by key across however many runs the turn ends up
+split into, since its own events don't line up with run boundaries).
+`thought` and `todos`, by contrast, reset to null on every new run — thinking
+or a plan update that resumes after a stretch of prose is a new visible run,
+not a silent backfill of one already closed and gone from view.
+
+**`ask` and `permission` are the two kinds that bypass the run entirely.**
+Both need a click to resolve, and collapsing either behind a `<details>`
+risked a turn silently stalled on a question nobody saw. `insertTop` places
+them as top-level siblings and closes whatever run was open, so the tool call
+that follows starts a visibly new one rather than reopening the old.
+
+**A failed step forces its whole run open.** `.tool.failed` already existed
+so a failure wouldn't look like success on the line itself; folding lines into
+a collapsed run made that insufficient on its own; `tool_result` now also
+marks the enclosing `details.activity` `.failed` and sets `.open = true` when
+`ok` is false, so a failure is visible without anyone expanding anything.
+
+### Note on verification
+
+Confirmed live, not just read from the diff: a Playwright page drove the
+real, unmodified `wireStreamHandlers` (a classic, non-module script, so its
+top-level `function`/`let` bindings are reachable from `page.evaluate` without
+any export) with a synthetic event sequence — prose, a successful tool call,
+a failing one, more prose — and asserted the resulting DOM order directly:
+`body → details.activity.failed[open] → body`, the final answer last. A
+second sequence confirmed a `permission` event lands as a top-level sibling
+and that the tool call following it opens a new, separate run rather than
+reappending to the one the permission request interrupted.

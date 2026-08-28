@@ -20,7 +20,10 @@ nav, nav * { margin: 0; padding: 0; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
   font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
-  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  display: flex; flex-direction: column; overflow: hidden;
+  /* dvh alone doesn't move when iOS opens a keyboard - app.js measures
+     visualViewport and writes --app-h on top of it for that case. */
+  height: 100vh; height: 100dvh; height: var(--app-h, 100dvh);
 }
 header {
   padding: 10px 16px; border-bottom: 1px solid var(--line); flex-shrink: 0;
@@ -30,6 +33,21 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em;
 .who { color: var(--muted); font-size: 13px; margin-left: auto; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: #4a8f5b; } .dot.bad { background: var(--err); }
+
+/* --- pane chrome: desktop collapse buttons, mobile tab strip ----------- */
+
+.pane-toggles, .pane-tabs { display: flex; gap: 4px; }
+.pane-tabs { display: none; } /* shown only under the mobile breakpoint below */
+.pane-toggles button, .pane-tabs button {
+  font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px;
+  cursor: pointer; border: 1px solid var(--line); background: var(--panel);
+  color: var(--muted);
+}
+.pane-toggles button[aria-pressed="true"], .pane-tabs button.active {
+  color: var(--accent); border-color: var(--accent);
+}
+.layout.no-tree > nav, .layout.no-tree > #gutter-tree { display: none; }
+.layout.no-chat > aside#chat, .layout.no-chat > #gutter-chat { display: none; }
 
 /* --- three panes ---------------------------------------------------- */
 
@@ -316,6 +334,7 @@ form { display: flex; flex-direction: column; gap: 6px; }
 textarea {
   flex: 1; resize: none; font: inherit; padding: 9px 11px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  max-height: 160px; overflow-y: auto;
 }
 button.send {
   font: inherit; padding: 0 18px; border: 0; border-radius: 8px;
@@ -372,3 +391,56 @@ button.attach {
 }
 button.attach:hover { color: var(--ink); }
 form.dragover textarea { border-color: var(--accent); }
+
+/* --- transcript: chronological blocks, collapsed activity runs --------- */
+
+/* A turn can produce several prose bodies (one per stretch of text between
+   tool runs). Each is its own bubble in DOM order; an empty one (a turn that
+   never produced text before its first tool call) collapses to nothing. */
+.msg .body:empty { display: none; }
+.msg .body + .body { margin-top: 6px; }
+
+details.activity {
+  border: 1px dashed var(--line); border-radius: 6px;
+  padding: 4px 10px; margin: 6px 0;
+}
+details.activity > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+/* A failed step must stay visible without anyone opening the run - the same
+   reason `.tool.failed` exists on the line itself. */
+details.activity.failed { border-color: var(--err); }
+details.activity.failed > summary { color: var(--err); }
+
+/* --- mobile: one pane per screen, swiped with native scroll-snap -------- */
+
+@media (max-width: 820px) {
+  .layout {
+    overflow-x: auto; overflow-y: hidden;
+    scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch;
+  }
+  .layout > nav, .layout > main, .layout > aside#chat {
+    flex: 0 0 100%; width: 100%; min-width: 100%; max-width: none;
+    scroll-snap-align: start;
+  }
+  .layout > .gutter { display: none; }
+  /* The desktop collapse toggles are meaningless here - a hidden pane is
+     just off-screen, one swipe away - so the tab strip replaces them and a
+     stored "collapsed" preference from desktop must not hide a pane here. */
+  .layout.no-tree > nav, .layout.no-chat > aside#chat { display: flex; }
+  .pane-toggles { display: none; }
+  .pane-tabs { display: flex; }
+  main { padding: 20px 16px; }
+  /* dot + "memory-agent" + three tabs + a real signed-in email do not fit
+     one header row on a 393-412px phone, so header's flex-wrap wraps it to
+     two lines. The email isn't worth the fight for space here - who's
+     talking is already visible in the conversation itself. */
+  .who { display: none; }
+}
+
+/* A dot on the Article tab: the centre pane changed while you were looking
+   at another one. Without this, the auto-navigate-on-write feature (ADR
+   0016) silently does nothing on a phone, since that pane is off-screen. */
+.pane-tabs button[data-pane="main"] { position: relative; }
+.pane-tabs .pane-dot {
+  position: absolute; top: 2px; right: 2px;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+}
