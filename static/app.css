@@ -76,8 +76,8 @@ nav {
   font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
 .refresh:hover { color: var(--accent); background: var(--line); }
 nav .section-header {
-  display: flex; align-items: center; gap: 4px;
-  padding: 3px 12px; font-size: 12px; font-weight: 600;
+  display: flex; align-items: stretch; gap: 4px;
+  padding: 3px 12px 3px 8px; font-size: 12px; font-weight: 600;
   text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
   margin-top: 14px; cursor: pointer; border-left: 2px solid transparent;
   user-select: none;
@@ -85,24 +85,42 @@ nav .section-header {
 nav .section-header:first-child { margin-top: 4px; }
 nav .section-header:hover { color: var(--accent); }
 nav .section-header.active { color: var(--accent); border-left-color: var(--accent); }
+/* A nested folder is styled apart from a top-level section (above): normal
+   case and weight, like an ordinary tree row, so a section reads as a
+   category label and a folder reads as a folder - see nav .tree-guide below
+   for how the nesting itself is shown. */
 nav .dir-header {
-  display: flex; align-items: center; gap: 4px;
-  padding: 4px 12px; font-size: 12px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
-  margin-top: 10px; cursor: pointer; border-left: 2px solid transparent;
+  display: flex; align-items: stretch; gap: 4px;
+  padding: 4px 12px 4px 8px; font-size: 13px; font-weight: 500;
+  color: var(--ink); cursor: pointer; border-left: 2px solid transparent;
   user-select: none;
 }
-nav .dir-header:first-child { margin-top: 0; }
 nav .dir-header:hover { color: var(--ink); background: var(--line); }
 nav .dir-header.active { color: var(--accent); border-left-color: var(--accent); }
-nav .dir-toggle { font-size: 10px; transition: transform .15s; flex-shrink: 0; }
+nav .dir-toggle, nav .toggle-spacer { width: 14px; flex-shrink: 0; align-self: center; }
+nav .dir-toggle {
+  font-size: 13px; text-align: center; color: var(--muted);
+  transition: transform .15s;
+}
 nav .dir-toggle.collapsed { transform: rotate(-90deg); }
 nav .dir-children { overflow: hidden; }
 nav .dir-children.collapsed { display: none; }
-nav a {
-  display: block; padding: 4px 16px; font-size: 13px; color: var(--ink);
-  text-decoration: none; border-left: 2px solid transparent;
+/* One of these per ancestor level, ahead of a row's toggle/label - a
+   continuous line down through a folder's descendants, left blank
+   (tree-guide-empty) once an ancestor's own last child has been reached.
+   This is what makes nesting depth readable at a glance instead of resting
+   on a small padding difference. */
+nav .tree-guide { width: 18px; flex-shrink: 0; display: flex; justify-content: center; }
+nav .tree-guide::before { content: ""; width: 1px; align-self: stretch; background: var(--line); }
+nav .tree-guide.tree-guide-empty::before { background: transparent; }
+nav .label {
+  flex: 1; min-width: 0; align-self: center;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+nav a {
+  display: flex; align-items: stretch; gap: 4px;
+  padding: 4px 16px 4px 8px; font-size: 13px; color: var(--ink);
+  text-decoration: none; border-left: 2px solid transparent;
 }
 nav a:hover { background: var(--line); }
 nav a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 500; }

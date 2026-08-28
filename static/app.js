@@ -269,77 +269,111 @@ async function loadFiles() {
   }
   hoistReferences(tree);
 
-  function renderNode(node, container, depth) {
-    Object.keys(node.dirs).sort().forEach(name => {
-      const child = node.dirs[name];
-      const dirPath = child.path;
-
-      const skillPath = dirPath + '/SKILL.md';
-      // A skill directory's index genuinely *is* its SKILL.md - the folder is
-      // one document plus its references, not a collection - so it keeps the
-      // behaviour it has always had. Everything else opens a directory view.
-      const isSkillDir = fileSet.has(skillPath);
-
-      // Every directory, top-level sections included, is a collapsible
-      // header that starts collapsed - expandAncestors() opens the path to
-      // whichever file ends up active instead.
-      const header = document.createElement('div');
-      header.className = depth === 0 ? 'section-header' : 'dir-header';
-      if (depth > 0) header.style.paddingLeft = (12 + (depth - 1) * 12) + 'px';
-      // Always set, including for a directory with no guide of its own. It
-      // used to be set only when there was a file to open, which left exactly
-      // the directories that now gain a view unable to ever show as active.
-      header.dataset.path = isSkillDir ? skillPath : dirPath;
-      const toggle = document.createElement('span');
-      toggle.className = 'dir-toggle collapsed';
-      toggle.textContent = '▾';
-      const label = document.createElement('span');
-      label.textContent = name;
-      header.appendChild(toggle);
-      header.appendChild(label);
-
-      const children = document.createElement('div');
-      children.className = 'dir-children collapsed';
-
-      header.onclick = () => {
-        const collapsed = children.classList.toggle('collapsed');
-        toggle.classList.toggle('collapsed', collapsed);
-        // Only render into the centre pane when the click just EXPANDED this
-        // header, not when it just collapsed it - openKbFile() re-expands the
-        // same header via expandAncestors(), which otherwise undid the
-        // collapse on the very click that made it.
-        if (collapsed) return;
-        if (isSkillDir) openKbFile(skillPath);
-        else openKbDir(dirPath);
-      };
-
-      dirNodes.set(dirPath, { children, toggle });
-
-      container.appendChild(header);
-      renderNode(child, children, depth + 1);
-      container.appendChild(children);
+  // One guide span per ancestor level, before the toggle/label of every row -
+  // a folder that has more siblings below it (guides entry `true`) draws a
+  // connecting line through all of its descendants' rows; a last child
+  // (`false`) leaves that column blank once its own subtree starts, the same
+  // way a file explorer's tree stops a branch's line where the branch ends.
+  function renderRowGuides(el, guides) {
+    guides.forEach(hasLine => {
+      const g = document.createElement('span');
+      g.className = hasLine ? 'tree-guide' : 'tree-guide tree-guide-empty';
+      el.appendChild(g);
     });
+  }
 
-    node.files.sort().forEach(f => {
+  function renderNode(node, container, depth, guides) {
+    const dirEntries = Object.keys(node.dirs).sort().map(name => ({ name, dir: node.dirs[name] }));
+    const fileEntries = node.files.sort().filter(f => {
       const base = f.split('/').pop();
       // Files that describe the directory rather than sit in it. Each is
       // reachable through its directory's header; none is a sibling of the
       // pages it governs.
-      if (base === 'GUIDE.md' || base === 'SKILL.md' || base === 'VIEW.md') return;
-      if (depth === 0 && base === 'AGENT_GUIDE.md') return;
-      const name = base.replace(/\.md$/, '');
-      const a = document.createElement('a');
-      a.textContent = name;
-      a.href = '#';
-      a.dataset.path = f;
-      a.style.paddingLeft = (16 + Math.max(0, depth - 1) * 12) + 'px';
-      a.onclick = (e) => { e.preventDefault(); openKbFile(f); };
-      container.appendChild(a);
+      if (base === 'GUIDE.md' || base === 'SKILL.md' || base === 'VIEW.md') return false;
+      if (depth === 0 && base === 'AGENT_GUIDE.md') return false;
+      return true;
+    }).map(f => ({ file: f }));
+    // One combined, ordered list: "is this the last row in this container"
+    // has to account for files coming after dirs, not just siblings within
+    // one or the other, since that's what decides whether this row's guide
+    // column keeps a line running past its own descendants.
+    const entries = dirEntries.concat(fileEntries);
+
+    entries.forEach((entry, i) => {
+      const isLast = i === entries.length - 1;
+
+      if (entry.dir) {
+        const child = entry.dir;
+        const dirPath = child.path;
+
+        const skillPath = dirPath + '/SKILL.md';
+        // A skill directory's index genuinely *is* its SKILL.md - the folder is
+        // one document plus its references, not a collection - so it keeps the
+        // behaviour it has always had. Everything else opens a directory view.
+        const isSkillDir = fileSet.has(skillPath);
+
+        // Every directory, top-level sections included, is a collapsible
+        // header that starts collapsed - expandAncestors() opens the path to
+        // whichever file ends up active instead.
+        const header = document.createElement('div');
+        header.className = depth === 0 ? 'section-header' : 'dir-header';
+        renderRowGuides(header, guides);
+        const toggle = document.createElement('span');
+        toggle.className = 'dir-toggle collapsed';
+        toggle.textContent = '▾';
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = entry.name;
+        header.appendChild(toggle);
+        header.appendChild(label);
+        // Always set, including for a directory with no guide of its own. It
+        // used to be set only when there was a file to open, which left exactly
+        // the directories that now gain a view unable to ever show as active.
+        header.dataset.path = isSkillDir ? skillPath : dirPath;
+
+        const children = document.createElement('div');
+        children.className = 'dir-children collapsed';
+
+        header.onclick = () => {
+          const collapsed = children.classList.toggle('collapsed');
+          toggle.classList.toggle('collapsed', collapsed);
+          // Only render into the centre pane when the click just EXPANDED this
+          // header, not when it just collapsed it - openKbFile() re-expands the
+          // same header via expandAncestors(), which otherwise undid the
+          // collapse on the very click that made it.
+          if (collapsed) return;
+          if (isSkillDir) openKbFile(skillPath);
+          else openKbDir(dirPath);
+        };
+
+        dirNodes.set(dirPath, { children, toggle });
+
+        container.appendChild(header);
+        renderNode(child, children, depth + 1, guides.concat(!isLast));
+        container.appendChild(children);
+      } else {
+        const f = entry.file;
+        const base = f.split('/').pop();
+        const name = base.replace(/\.md$/, '');
+        const a = document.createElement('a');
+        renderRowGuides(a, guides);
+        const spacer = document.createElement('span');
+        spacer.className = 'toggle-spacer';
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = name;
+        a.appendChild(spacer);
+        a.appendChild(label);
+        a.href = '#';
+        a.dataset.path = f;
+        a.onclick = (e) => { e.preventDefault(); openKbFile(f); };
+        container.appendChild(a);
+      }
     });
   }
 
   navFileList.innerHTML = '';
-  renderNode(tree, navFileList, 0);
+  renderNode(tree, navFileList, 0, []);
 
   // The tree was just rebuilt, so whatever is on screen lost its highlight.
   // Specs are cached per directory and an agent write may have changed one,
