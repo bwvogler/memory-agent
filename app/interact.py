@@ -190,6 +190,34 @@ def describe_tool_target(
     return {"kind": "kb", "path": raw[len(workspace_prefix) :]}
 
 
+def denial_detail(name: str, tool_input: Mapping[str, Any] | None) -> str:
+    """Where a DENIED call was aimed, for a signals.py bead body. Pure.
+
+    Reuses describe_tool_target rather than re-deriving a path, because the
+    distinction it already draws is exactly the one a denial needs: a KB
+    write it can name is a documented-invariant violation (acceptEdits was
+    supposed to admit this without a prompt), and one it can't name is either
+    correctly-scoped acceptEdits behaviour (a write outside the workspace) or
+    a tool this function has no opinion about at all (Bash, WebFetch, ...).
+    Those two empty-target cases are told apart by KB_WRITE_TOOLS membership
+    so a bead never implies "this Write left the KB" about a Bash call.
+    """
+    target = describe_tool_target(name, tool_input)
+    if target:
+        return f"kb:{target['path']}"
+    detail = describe_tool_input(name, tool_input)
+    if name in KB_WRITE_TOOLS:
+        if detail:
+            return f"{detail} (outside the KB workspace)"
+        return "outside the KB workspace, no path recorded"
+    return detail or "no target recorded"
+
+
+def _record_denial(turn: Turn, name: str, tool_input: Mapping[str, Any] | None) -> None:
+    """File this denial's target on the turn, for signals.py to render."""
+    turn.denial_details.setdefault(name, []).append(denial_detail(name, tool_input))
+
+
 # ---------------------------------------------------------------------------
 # Asking a question
 # ---------------------------------------------------------------------------
@@ -340,6 +368,7 @@ def can_use_tool_for(turn: Turn):
             # block legitimate work, but a *permission* callback that breaks
             # must not hand out an approval nobody granted.
             log.exception("permission callback failed for %s; denying", tool_name)
+            _record_denial(turn, tool_name, tool_input)
             return PermissionResultDeny(
                 message=(
                     "Refused: the approval prompt could not be delivered. "
@@ -382,6 +411,7 @@ async def _request_permission(
     except TimeoutError:
         turn.pending.pop(request_id, None)
         turn.human_denials.append(tool_name)
+        _record_denial(turn, tool_name, tool_input)
         turn.append(
             "permission_resolved",
             _json({"request_id": request_id, "decision": "deny", "timeout": True}),
@@ -409,6 +439,7 @@ async def _request_permission(
     # Recorded so signals does not file a P1 "check allowed_tools in _options"
     # bead against a person who simply said no. See app/signals.py.
     turn.human_denials.append(tool_name)
+    _record_denial(turn, tool_name, tool_input)
     return PermissionResultDeny(
         message=f"{who} refused this tool." + (f" They said: {note}" if note else "")
     )

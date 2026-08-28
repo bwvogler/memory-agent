@@ -192,6 +192,19 @@ def _skill_list(turn: Turn) -> str:
     return ", ".join(sorted(turn.skills)) if turn.skills else "none recorded"
 
 
+def _denial_targets(turn: Turn, tool: str) -> str:
+    """Where this tool's denied call(s) were aimed, for a bead body.
+
+    Not present for a denial recorded before this field existed, or for one
+    the CLI refused before our callback ever saw it - both read the same:
+    there is nothing to name.
+    """
+    details = turn.denial_details.get(tool) or []
+    if not details:
+        return "not recorded (refused before the permission callback saw it)"
+    return "; ".join(sorted(set(details)))
+
+
 def _clip(text: str, limit: int) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
@@ -318,6 +331,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     f"The human refused a tool: {tool}",
                     f"The agent asked to use `{tool}` and the person watching "
                     f"said no (or let the request time out).\n\n"
+                    f"Target: {_denial_targets(turn, tool)}\n\n"
                     f"Skills that turn used: {_skill_list(turn)}\n\n"
                     f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
                     "Worth reading as guidance, not as breakage: a skill that "
@@ -351,6 +365,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     f"headless context where nobody can grant it. This is almost "
                     f"always a deployment defect rather than anything the model "
                     f"did: check `allowed_tools` in `_options` in app/agent.py.\n\n"
+                    f"Target: {_denial_targets(turn, tool)}\n\n"
                     f"This exact failure once made the agent silently unable to "
                     f"run `bd` at all while looking completely healthy, which is "
                     f"why it is worth a bead rather than a log line.\n\n"

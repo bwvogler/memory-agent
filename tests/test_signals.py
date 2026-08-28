@@ -215,3 +215,71 @@ def test_repeated_refusals_are_each_recorded(monkeypatch):
     filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
 
     assert filed == ["kb-1"], "an open bead with the same title must not suppress this"
+
+
+# --- img-b7u: a denied call's target is named, not guessed at later ---------
+
+
+def test_a_denied_kb_write_names_its_path_in_the_bead(monkeypatch):
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("description", "")))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(
+        state=TurnState.DONE,
+        permission_denials=["Write"],
+        human_denials=["Write"],
+        denial_details={"Write": ["kb:people/x.md"]},
+    )
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert len(created) == 1
+    _, body = created[0]
+    assert "Target: kb:people/x.md" in body
+
+
+def test_a_denied_scratch_write_says_it_left_the_workspace(monkeypatch):
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("description", "")))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(
+        state=TurnState.DONE,
+        permission_denials=["Write"],
+        human_denials=["Write"],
+        denial_details={"Write": ["/work/dev/x.md (outside the KB workspace)"]},
+    )
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    _, body = created[0]
+    assert "Target: /work/dev/x.md (outside the KB workspace)" in body
+
+
+def test_a_denial_with_no_recorded_target_still_says_so(monkeypatch):
+    """Pre-img-b7u denials, or ones the CLI refused before our callback saw
+    them, must not silently omit the line - that reads as "nothing to see"
+    rather than "this predates the fix"."""
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("description", "")))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(state=TurnState.DONE, permission_denials=["WebFetch"])
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    _, body = created[0]
+    assert "Target: not recorded" in body
