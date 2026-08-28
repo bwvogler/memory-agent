@@ -411,6 +411,19 @@ function wireRelativeKbLinks(container) {
   });
 }
 
+// Full re-parse of the whole raw markdown source into `container`, through
+// the same sanitizer as the KB pane. Used for chat text too, where `raw` is
+// the accumulated buffer so far rather than a complete message - re-running
+// this on every streamed chunk is what lets `**`/`` ` ``/lists render instead
+// of showing up literally, at the cost of a moment's flicker on an
+// unterminated construct (an open code fence, a half-typed `**`) that
+// self-corrects on the next chunk.
+function renderMarkdownInto(container, raw) {
+  container.innerHTML = marked.parse(raw);
+  sanitizeRenderedLinks(container);
+  wireRelativeKbLinks(container);
+}
+
 // --- the centre pane: KB articles, agent writes, uploads ----------------
 
 let currentPane = null; // {kind: 'kb', path} | {kind: 'upload', url, name}
@@ -635,42 +648,65 @@ window.addEventListener('popstate', () => {
 // --- linking a KB path mentioned in a reply -----------------------------
 //
 // Heuristic and deliberately simple: a reply is linkified against whatever
-// the tree already knows about, once the turn finishes. Built with DOM
+// the tree already knows about, once the turn finishes. Walks text nodes
+// rather than rewriting a paragraph's full content, because a `.body` now
+// holds real markdown-rendered HTML (bold, code, links, lists) that a
+// textContent rebuild would silently discard - only the matched text node
+// itself is replaced, everything around it is untouched. Built with DOM
 // nodes rather than string-and-innerHTML, so this cannot itself become an
 // injection vector no matter what text the agent wrote.
 function linkifyKbPaths(container) {
   if (!knownKbFiles.size) return;
-  container.querySelectorAll('.body > p').forEach((p) => {
-    const text = p.textContent;
-    const matches = [];
-    for (const path of knownKbFiles) {
-      let idx = text.indexOf(path);
-      while (idx !== -1) {
-        matches.push({ idx, len: path.length, path });
-        idx = text.indexOf(path, idx + path.length);
+  container.querySelectorAll('.body').forEach((body) => {
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        // Never relink an existing link, and never touch code - a path
+        // mentioned inside a code span/block is source text, not prose.
+        for (let a = node.parentNode; a && a !== body; a = a.parentNode) {
+          if (a.nodeName === 'A' || a.nodeName === 'CODE' || a.nodeName === 'PRE') {
+            return NodeFilter.FILTER_REJECT;
+          }
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+
+    for (const textNode of nodes) {
+      const text = textNode.nodeValue;
+      const matches = [];
+      for (const path of knownKbFiles) {
+        let idx = text.indexOf(path);
+        while (idx !== -1) {
+          matches.push({ idx, len: path.length, path });
+          idx = text.indexOf(path, idx + path.length);
+        }
       }
+      if (!matches.length) continue;
+      matches.sort((a, b) => a.idx - b.idx || b.len - a.len);
+      const kept = [];
+      let cursor = -1;
+      for (const m of matches) {
+        if (m.idx < cursor) continue;
+        kept.push(m);
+        cursor = m.idx + m.len;
+      }
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      for (const m of kept) {
+        if (m.idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, m.idx)));
+        const a = document.createElement('a');
+        a.href = '#';
+        a.textContent = text.slice(m.idx, m.idx + m.len);
+        a.onclick = (e) => { e.preventDefault(); openInPane({ kind: 'kb', path: m.path }); };
+        frag.appendChild(a);
+        pos = m.idx + m.len;
+      }
+      if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+      textNode.replaceWith(frag);
     }
-    if (!matches.length) return;
-    matches.sort((a, b) => a.idx - b.idx || b.len - a.len);
-    const kept = [];
-    let cursor = -1;
-    for (const m of matches) {
-      if (m.idx < cursor) continue;
-      kept.push(m);
-      cursor = m.idx + m.len;
-    }
-    p.textContent = '';
-    let pos = 0;
-    for (const m of kept) {
-      if (m.idx > pos) p.appendChild(document.createTextNode(text.slice(pos, m.idx)));
-      const a = document.createElement('a');
-      a.href = '#';
-      a.textContent = text.slice(m.idx, m.idx + m.len);
-      a.onclick = (e) => { e.preventDefault(); openInPane({ kind: 'kb', path: m.path }); };
-      p.appendChild(a);
-      pos = m.idx + m.len;
-    }
-    if (pos < text.length) p.appendChild(document.createTextNode(text.slice(pos)));
   });
 }
 
@@ -836,8 +872,8 @@ function freshTurnUI(turnId) {
     currentBody: null,      // the <div class="body"> currently receiving prose
     currentActivity: null,  // the <details class="activity"> currently open
     thought: null, todos: null, // reset on every new activity run - see below
-    currentPara: null,      // the <p> currently receiving streamed tokens
-    newParaNext: true,      // start a fresh <p> on the next text chunk
+    currentRaw: '',          // raw markdown source accumulated for currentBody
+    newParaNext: true,      // insert a paragraph break before the next chunk
     hasTextDelta: false,    // true once the CLI streams at least one token
   };
 }
@@ -884,6 +920,7 @@ function startAgentBubble() {
   // creating a second one. A turn that never produces text before its first
   // tool call leaves it empty, which app.css hides (`.msg .body:empty`).
   turnUI.currentBody = msg.body;
+  turnUI.currentRaw = '';
   turnUI.startedAt = Date.now();
   turnUI.tick = setInterval(() => {
     const s = Math.round((Date.now() - turnUI.startedAt) / 1000);
@@ -902,14 +939,20 @@ function appendText(raw) {
     turnUI.currentBody = el('div', 'body', '');
     turnUI.msg.wrap.insertBefore(turnUI.currentBody, turnUI.working);
     turnUI.currentActivity = null;
-    turnUI.newParaNext = true;
-  }
-  if (turnUI.newParaNext) {
-    turnUI.currentPara = el('p', '');
-    turnUI.currentBody.appendChild(turnUI.currentPara);
+    turnUI.currentRaw = '';
     turnUI.newParaNext = false;
   }
-  turnUI.currentPara.textContent += raw.replace(/\\n/g, '\n');
+  const text = raw.replace(/\\n/g, '\n');
+  if (turnUI.newParaNext) {
+    if (turnUI.currentRaw) turnUI.currentRaw += '\n\n';
+    turnUI.newParaNext = false;
+  }
+  turnUI.currentRaw += text;
+  // Full re-parse on every chunk, not an append: marked needs the whole
+  // markdown source to get block structure (lists, code fences, bold) right,
+  // not just the newest fragment. sanitizeRenderedLinks/wireRelativeKbLinks
+  // must re-run here too - each innerHTML replace wipes their prior work.
+  renderMarkdownInto(turnUI.currentBody, turnUI.currentRaw);
   scroll();
 }
 
@@ -1078,8 +1121,9 @@ function wireStreamHandlers(stream) {
     const d = parse(e); if (!d) return;
     const box = agentBox(d.agent); if (!box) return;
     let p = box.querySelector('.agent-text');
-    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); }
-    p.textContent += (d.text || '').replace(/\\n/g, '\n');
+    if (!p) { p = el('div', 'agent-text', ''); box.appendChild(p); box._raw = ''; }
+    box._raw += (d.text || '').replace(/\\n/g, '\n');
+    renderMarkdownInto(p, box._raw);
   });
 
   function thinkingInto() {

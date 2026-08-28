@@ -244,9 +244,40 @@ button.stop:hover { background: var(--err); color: #fff; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px;
 }
-.msg .body p { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
-.msg .body p + p { margin-top: 0.6em; }
-.msg .body p a { color: var(--accent); }
+/* Streamed prose is rendered through `marked` (see renderMarkdownInto in
+   app.js), so this mirrors .prose (line ~113) at a size that fits the
+   narrower chat column, rather than faking line breaks with pre-wrap. */
+.msg .body p, details.subagent .agent-text p { margin: 0; word-wrap: break-word; }
+.msg .body p + p, details.subagent .agent-text p + p { margin-top: 0.6em; }
+.msg .body h1, .msg .body h2, .msg .body h3,
+details.subagent .agent-text h1, details.subagent .agent-text h2, details.subagent .agent-text h3 {
+  font-size: 1em; font-weight: 600; margin: 0.8em 0 .3em;
+}
+.msg .body h1:first-child, .msg .body h2:first-child, .msg .body h3:first-child,
+details.subagent .agent-text h1:first-child, details.subagent .agent-text h2:first-child,
+details.subagent .agent-text h3:first-child { margin-top: 0; }
+.msg .body ul, .msg .body ol, details.subagent .agent-text ul, details.subagent .agent-text ol {
+  padding-left: 1.3em; margin: 0 0 0.6em;
+}
+.msg .body li, details.subagent .agent-text li { margin-bottom: .2em; }
+.msg .body code, details.subagent .agent-text code {
+  background: var(--sidebar); border: 1px solid var(--line);
+  border-radius: 3px; padding: .1em .3em; font-size: .88em;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.msg .body pre, details.subagent .agent-text pre {
+  background: var(--sidebar); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 0 0 .6em;
+}
+.msg .body pre code, details.subagent .agent-text pre code {
+  background: none; border: none; padding: 0; font-size: .85em;
+}
+.msg .body blockquote, details.subagent .agent-text blockquote {
+  border-left: 3px solid var(--line); padding-left: .8em;
+  color: var(--muted); margin: 0 0 .6em;
+}
+.msg .body a, details.subagent .agent-text a { color: var(--accent); }
+.msg .body img, details.subagent .agent-text img { max-width: 100%; }
 .msg.me .body { background: transparent; border-style: dashed; }
 /* A message from someone else in a household-shared conversation - same
    shape as .me, distinguished by the .who name label rather than a second
@@ -273,7 +304,7 @@ details.thought .text {
   color: var(--muted); font-size: 13px; margin-top: 4px;
 }
 details.subagent .agent-text {
-  white-space: pre-wrap; word-wrap: break-word; font-size: 13px; margin-top: 4px;
+  word-wrap: break-word; font-size: 13px; margin-top: 4px;
 }
 /* Progress only. The bead ledger is the only place work survives the turn,
    so this list is never persisted and never replaces filing something. */
