@@ -97,12 +97,27 @@ nav .dir-header {
 }
 nav .dir-header:hover { color: var(--ink); background: var(--line); }
 nav .dir-header.active { color: var(--accent); border-left-color: var(--accent); }
-nav .dir-toggle, nav .toggle-spacer { width: 14px; flex-shrink: 0; align-self: center; }
-nav .dir-toggle {
-  font-size: 13px; text-align: center; color: var(--muted);
+/* Same width as .tree-guide below, and for the same reason: a directory's
+   own toggle sits directly above the guide column its children will draw
+   once expanded, so the two need matching centers or the line reads as
+   offset from the arrow that opens it - which is exactly what a 14px toggle
+   next to an 18px guide looked like. */
+nav .dir-toggle, nav .toggle-spacer {
+  width: 18px; height: 18px; flex-shrink: 0; align-self: center; position: relative;
+}
+/* A CSS-drawn chevron rather than a Unicode triangle glyph - a font's own
+   glyph metrics rarely center a triangle exactly in its box (part of why the
+   old arrow never quite lined up with the guide line below it), and this
+   scales cleanly to a bigger, crisper mark. */
+nav .dir-toggle::before {
+  content: "";
+  position: absolute; top: 50%; left: 50%;
+  width: 9px; height: 9px;
+  border-right: 2.5px solid var(--muted); border-bottom: 2.5px solid var(--muted);
+  transform: translate(-50%, -50%) rotate(45deg);
   transition: transform .15s;
 }
-nav .dir-toggle.collapsed { transform: rotate(-90deg); }
+nav .dir-toggle.collapsed::before { transform: translate(-50%, -50%) rotate(-45deg); }
 nav .dir-children { overflow: hidden; }
 nav .dir-children.collapsed { display: none; }
 /* One of these per ancestor level, ahead of a row's toggle/label - a
