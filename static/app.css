@@ -109,9 +109,16 @@ nav .dir-children.collapsed { display: none; }
    continuous line down through a folder's descendants, left blank
    (tree-guide-empty) once an ancestor's own last child has been reached.
    This is what makes nesting depth readable at a glance instead of resting
-   on a small padding difference. */
-nav .tree-guide { width: 18px; flex-shrink: 0; display: flex; justify-content: center; }
-nav .tree-guide::before { content: ""; width: 1px; align-self: stretch; background: var(--line); }
+   on a small padding difference. The -4px vertical margin cancels out
+   .dir-header/nav a's own 4px top/bottom padding, which align-items:stretch
+   does not reach (a flex item stretches to the container's content box, not
+   its padding box) - without it, consecutive rows' segments fall 8px short
+   of touching and the line reads as dashes instead of one continuous run. */
+nav .tree-guide {
+  width: 18px; flex-shrink: 0; display: flex; justify-content: center;
+  margin: -4px 0;
+}
+nav .tree-guide::before { content: ""; width: 1px; align-self: stretch; background: var(--muted); }
 nav .tree-guide.tree-guide-empty::before { background: transparent; }
 nav .label {
   flex: 1; min-width: 0; align-self: center;
