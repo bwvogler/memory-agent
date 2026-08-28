@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive headless Chromium against a running page and report what happened.
+"""Drive a headless browser against a running page and report what happened.
 
 A small, generic CLI rather than a bespoke script per check: navigate, wait
 for something to appear, click things (by CSS selector or visible text),
@@ -16,6 +16,20 @@ Examples:
     python3 browser_check.py http://localhost:18080/kb \\
         --click-text wiki \\
         --eval "document.querySelector('.section-header.active')?.textContent"
+
+    python3 browser_check.py http://localhost:18080/ \\
+        --device "Pixel 6 Pro" \\
+        --eval "getComputedStyle(document.querySelector('.pane-tabs')).display"
+
+Real-device emulation: --device NAME looks NAME up in Playwright's own device
+catalog (`playwright.sync_api.sync_playwright().devices`) and uses its exact
+viewport/scale/touch flags instead of --width/--height, and launches whichever
+engine that device's own `default_browser_type` names - `chromium` for
+Android entries (e.g. "Pixel 6 Pro"), `webkit` for iOS ones (e.g. "iPhone 15"),
+since real iPhone Safari runs WebKit, not Blink, and spoofing the user agent
+under Chromium would not exercise the same rendering/compositor path. WebKit
+is a separate download - if it is missing this fails with a clear message
+naming the install command, rather than silently falling back to Chromium.
 """
 
 from __future__ import annotations
@@ -30,8 +44,14 @@ from playwright.sync_api import sync_playwright
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--width", type=int, help="default 1280, ignored with --device")
+    parser.add_argument("--height", type=int, help="default 900, ignored with --device")
+    parser.add_argument(
+        "--device", metavar="NAME",
+        help='a Playwright device name, e.g. "Pixel 6 Pro" or "iPhone 15" - '
+             "sets viewport/scale/touch and picks the engine for you; "
+             "mutually exclusive with --width/--height",
+    )
     parser.add_argument("--timeout", type=int, default=10_000, help="ms")
     parser.add_argument(
         "--wait-for", action="append", default=[], metavar="SELECTOR",
@@ -58,6 +78,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.device and (args.width or args.height):
+        parser.error("--device already sets viewport/scale/touch: no --width/--height")
+
     # Actions interleave in command-line order: --wait-for, --click and
     # --click-text are collected into one ordered queue by re-parsing sys.argv,
     # because argparse's separate lists lose the relative order between flags.
@@ -71,8 +94,36 @@ def main() -> int:
     }
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        page = browser.new_page(viewport={"width": args.width, "height": args.height})
+        if args.device:
+            try:
+                descriptor = pw.devices[args.device]
+            except KeyError:
+                parser.error(
+                    f"no such device {args.device!r} - see playwright.sync_api"
+                    f".sync_playwright().devices for the full catalog"
+                )
+            # The descriptor names its own engine - real iPhone Safari is
+            # WebKit, not Blink, and spoofing the user agent under Chromium
+            # would silently skip the engine this profile exists to exercise.
+            # default_browser_type itself isn't a new_page() kwarg, so it's
+            # popped out rather than spread along with the rest.
+            new_page_kwargs = dict(descriptor)
+            engine_name = new_page_kwargs.pop("default_browser_type")
+            engine = getattr(pw, engine_name)
+            try:
+                browser = engine.launch()
+            except Exception as exc:  # re-raised as a clearer, actionable message
+                raise SystemExit(
+                    f"{engine_name} is not installed - run "
+                    f"'.venv/bin/python -m playwright install {engine_name}' "
+                    f"once, then retry"
+                ) from exc
+            page = browser.new_page(**new_page_kwargs)
+        else:
+            browser = pw.chromium.launch()
+            page = browser.new_page(
+                viewport={"width": args.width or 1280, "height": args.height or 900}
+            )
         if args.console:
             # Attached before goto, or messages logged during the initial
             # load would never reach these handlers.

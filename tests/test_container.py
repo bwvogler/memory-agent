@@ -144,8 +144,15 @@ def test_the_merged_page_and_its_split_assets_are_in_the_image(stack):
     assert "/static/view.js" in page.text
     assert "/static/app.css" in page.text
     assert "/static/vendor/marked.min.js" in page.text
+    # Neither FileResponse nor StaticFiles sets this by default, and without
+    # it a browser's own heuristic freshness window can keep serving a
+    # pre-deploy copy of the page indefinitely - the failure mode a real
+    # phone hit on a real deploy of this app.
+    assert page.headers["cache-control"] == "no-cache"
 
-    assert httpx.get(f"{stack}/static/app.js", timeout=10).status_code == 200
+    app_js = httpx.get(f"{stack}/static/app.js", timeout=10)
+    assert app_js.status_code == 200
+    assert app_js.headers["cache-control"] == "no-cache"
     assert httpx.get(f"{stack}/static/view.js", timeout=10).status_code == 200
     assert httpx.get(f"{stack}/static/app.css", timeout=10).status_code == 200
     vendor = httpx.get(f"{stack}/static/vendor/marked.min.js", timeout=10)

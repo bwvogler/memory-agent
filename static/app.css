@@ -429,6 +429,11 @@ details.activity.failed > summary { color: var(--err); }
   .pane-toggles { display: none; }
   .pane-tabs { display: flex; }
   main { padding: 20px 16px; }
+  /* dot + "memory-agent" + three tabs + a real signed-in email do not fit
+     one header row on a 393-412px phone, so header's flex-wrap wraps it to
+     two lines. The email isn't worth the fight for space here - who's
+     talking is already visible in the conversation itself. */
+  .who { display: none; }
 }
 
 /* A dot on the Article tab: the centre pane changed while you were looking
