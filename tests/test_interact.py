@@ -207,6 +207,32 @@ def test_a_tool_with_no_input_has_no_target():
     assert interact.describe_tool_target("Write", None) == {}
 
 
+# --- denial_detail: img-b7u, what a denied call was aimed at ---------------
+
+
+def test_a_denied_kb_write_names_the_workspace_path():
+    detail = interact.denial_detail(
+        "Write", {"file_path": "/mnt/kb/memory/people/x.md"}
+    )
+    assert detail == "kb:people/x.md"
+
+
+def test_a_denied_scratch_write_says_it_left_the_workspace():
+    detail = interact.denial_detail("Write", {"file_path": "/work/dev/x.md"})
+    assert detail == "/work/dev/x.md (outside the KB workspace)"
+
+
+def test_a_denied_non_write_tool_has_no_workspace_claim():
+    """Bash has no notion of 'the KB workspace' - it must not say so."""
+    detail = interact.denial_detail("Bash", {"command": "bd ready"})
+    assert detail == "bd ready"
+    assert "workspace" not in detail
+
+
+def test_a_denial_with_nothing_to_show_still_says_something():
+    assert interact.denial_detail("WebFetch", {}) == "no target recorded"
+
+
 # --- payloads have to survive the wire -------------------------------------
 
 
@@ -342,6 +368,7 @@ def test_an_unapproved_tool_times_out_denied(monkeypatch):
 
     assert result.behavior == "deny"
     assert turn.human_denials == ["Bash"]
+    assert turn.denial_details == {"Bash": ["rm -rf /"]}
     assert [e.kind for e in turn.events] == ["permission", "permission_resolved"]
 
 
@@ -378,6 +405,7 @@ def test_a_refusal_is_recorded_as_the_humans_and_not_a_defect():
     assert result.behavior == "deny"
     assert "not that one" in result.message
     assert turn.human_denials == ["Bash"]
+    assert turn.denial_details == {"Bash": ["curl x"]}
 
 
 def test_the_prompt_prefers_what_the_sdk_composed():
@@ -415,11 +443,16 @@ def test_a_broken_permission_callback_denies_rather_than_allows(monkeypatch):
 
     monkeypatch.setattr(interact, "_request_permission", explode)
 
-    async def scenario():
-        return await interact.can_use_tool_for(_turn())("Bash", {}, _Context())
+    async def scenario() -> tuple[PermissionResult, Turn]:
+        turn = _turn()
+        return await interact.can_use_tool_for(turn)("Bash", {}, _Context()), turn
 
-    result = asyncio.run(scenario())
+    result, turn = asyncio.run(scenario())
     assert result.behavior == "deny"
+    # Never appended to human_denials (the human was never asked), so this
+    # denial would otherwise be `unexpected` in signals.py with no target at
+    # all - worth being able to name even here.
+    assert turn.denial_details == {"Bash": ["no target recorded"]}
 
 
 # --- the observer hooks ----------------------------------------------------

@@ -139,6 +139,13 @@ class Turn:
     # "check allowed_tools" bead for an unexplained denial, and a person
     # clicking Deny is not a deployment defect.
     human_denials: list[str] = field(default_factory=list)
+    # Where each denied call was aimed, keyed by tool name - a list because a
+    # bead is filed once per tool name even if it was denied on several
+    # distinct targets in one turn. A dict rather than folding this into
+    # human_denials/permission_denials themselves: those are compared as SETS
+    # OF NAMES to compute signals.py's `unexpected`, and giving their elements
+    # a richer shape would silently break that arithmetic.
+    denial_details: dict[str, list[str]] = field(default_factory=dict)
 
     # Observability captured from hooks rather than from the message stream:
     # which subagents ran, and which tool calls failed. Both are things the UI
