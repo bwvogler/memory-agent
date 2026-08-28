@@ -102,7 +102,7 @@ nav .dir-header.active { color: var(--accent); border-left-color: var(--accent);
    once expanded, so the two need matching centers or the line reads as
    offset from the arrow that opens it - which is exactly what a 14px toggle
    next to an 18px guide looked like. */
-nav .dir-toggle, nav .toggle-spacer {
+nav .dir-toggle {
   width: 18px; height: 18px; flex-shrink: 0; align-self: center; position: relative;
 }
 /* A CSS-drawn chevron rather than a Unicode triangle glyph - a font's own
