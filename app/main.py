@@ -143,6 +143,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await kb.close_pool()
 
 
+# A bare POST /mcp (no trailing slash - the URL published everywhere,
+# including to Claude's connector config) only matches this Mount via
+# Starlette's default redirect_slashes 307 to /mcp/ - disabling it (tried and
+# reverted) 404s the exact published URL instead, since the sub-app's own
+# route only matches the post-redirect remainder. The 307 itself was never the
+# bug: measured directly against the .fly.dev origin, bypassing Access
+# entirely, its Location header was http://, not https://, because
+# entrypoint.sh ran uvicorn without --proxy-headers and it never learned TLS
+# was terminated at Fly's edge. Claude's OAuth-bearing POST understandably
+# refused to follow a same-origin scheme downgrade. Fixed in entrypoint.sh;
+# this Mount's default redirect behavior is correct and should stay.
 app = FastAPI(title="memory-agent", lifespan=lifespan)
 
 

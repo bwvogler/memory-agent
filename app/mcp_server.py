@@ -274,7 +274,33 @@ async def _authenticate(request: Request) -> Identity:
             "this endpoint requires the Cf-Access-Jwt-Assertion header; a "
             "browser cookie is deliberately not accepted here",
         )
-    return await auth.verify(token)
+    identity = await auth.verify(token)
+
+    # A second, real-per-person OAuth path onto this same surface (ADR 0014
+    # amendment): Cloudflare Access's "Managed OAuth" toggle on THIS SAME Access
+    # Application lets Claude/ChatGPT drive a real OAuth 2.1 + PKCE login for a
+    # household member, and the token that reaches us is - measured directly,
+    # not assumed - the identical Cf-Access-Jwt-Assertion header and `aud` the
+    # browser already uses, so auth.verify() needed no changes at all. What it
+    # does NOT do is collapse: a real per-person email comes back as itself, and
+    # deliberately is NOT folded onto MCP_IDENTITY_EMAIL the way a service
+    # token's common_name is - the household chose their own real identity for
+    # this path over the shared placeholder one. MCP_OAUTH_EMAILS is therefore
+    # its own allowlist, independent of ADR 0005's browser list, for the same
+    # reason MCP_CLIENT_IDS already is one: being allowed to open the browser UI
+    # is a materially smaller grant than being allowed to drive an unattended,
+    # non-interactive turn (Turn.interactive=False) from a phone with nobody
+    # watching. A service-token caller already collapsed onto MCP_IDENTITY_EMAIL
+    # by auth.verify() skips this check; anyone else needs their real email on
+    # this list. Empty by default, so an untouched deployment refuses every real
+    # identity here exactly as before.
+    if identity.email != config.mcp_identity_email.lower() and (
+        identity.email not in config.mcp_oauth_emails
+    ):
+        raise HTTPException(
+            403, f"{identity.email!r} is not enabled for the /mcp OAuth path"
+        )
+    return identity
 
 
 @contextlib.asynccontextmanager
@@ -347,5 +373,7 @@ def enabled() -> bool:
     from the outside.
     """
     return bool(
-        config.dev_bypass_auth or (config.mcp_client_ids and config.mcp_identity_email)
+        config.dev_bypass_auth
+        or (config.mcp_client_ids and config.mcp_identity_email)
+        or config.mcp_oauth_emails
     )

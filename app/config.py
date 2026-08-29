@@ -100,6 +100,17 @@ class Config:
     mcp_client_ids: list[str] = field(default_factory=lambda: _csv("MCP_CLIENT_IDS"))
     mcp_identity_email: str = os.environ.get("MCP_IDENTITY_EMAIL", "")
 
+    # A second, real-per-person path onto /mcp (ADR 0014 amendment): a household
+    # member's own OAuth-authenticated email, permitted to drive the surface as
+    # THEMSELVES rather than collapsed onto MCP_IDENTITY_EMAIL. Deliberately its
+    # own list rather than a reuse of ALLOWED_EMAIL_DOMAINS/ALLOWED_EMAILS - the
+    # same reasoning MCP_CLIENT_IDS already rests on: browsing and driving an
+    # unattended, non-interactive turn are different grants. Empty by default,
+    # so an untouched deployment refuses every real identity here.
+    mcp_oauth_emails: list[str] = field(
+        default_factory=lambda: _csv("MCP_OAUTH_EMAILS")
+    )
+
     # Attachments arrive base64-encoded inside a JSON body, which has no
     # natural size limit: without a cap, one large file is decoded into memory
     # and written to the volume before anything can object. The per-request cap

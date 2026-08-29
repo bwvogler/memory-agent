@@ -137,4 +137,12 @@ if [[ -n "${TUNNEL_TOKEN:-}" ]]; then
 fi
 
 log "starting API on :$PORT"
-exec uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --timeout-keep-alive 75
+# --proxy-headers/--forwarded-allow-ips: Fly's edge terminates TLS and forwards
+# plain HTTP to this machine, so without this uvicorn believes every request
+# arrived as http and builds any absolute URL (redirects, OAuth callbacks) with
+# that scheme - observed directly as a Location: http://... on a 307 that broke
+# the /mcp OAuth connector. '*' rather than a fixed IP because only Fly's proxy
+# can reach this machine at all (see "Why there is no tunnel here" above), so
+# there is no untrusted peer for a forwarded header to lie to.
+exec uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --timeout-keep-alive 75 \
+  --proxy-headers --forwarded-allow-ips='*'
