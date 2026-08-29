@@ -436,12 +436,33 @@ function sanitizeRenderedLinks(container) {
   });
 }
 
-function wireRelativeKbLinks(container) {
+// True only for a scheme-less reference ("people/brian.md", "../x.md") - an
+// absolute URI with any scheme (http:, mailto:, tel:, ...) is left for the
+// browser, not treated as a KB path. Without this, a mailto: link (which
+// does not start with "http") was wired as if it were a workspace path.
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+// Resolves a relative link the way a browser resolves a relative <a href>
+// against its own page - "../x" and "y/z.md" mean what a normal markdown
+// reader expects, relative to the directory the linking content lives in.
+// `baseDir` is '' for chat, which has no directory of its own: the agent is
+// told (see app/agent.py) to write the full workspace-relative path there
+// instead. The synthetic https: origin is just a resolver; only the
+// resulting path is used.
+function resolveKbHref(href, baseDir) {
+  const base = 'https://kb.invalid/' + (baseDir ? baseDir + '/' : '');
+  let url;
+  try { url = new URL(href, base); } catch { return href; }
+  return decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+}
+
+function wireRelativeKbLinks(container, baseDir) {
   container.querySelectorAll('a').forEach(a => {
     const href = a.getAttribute('href');
-    if (href && !href.startsWith('http')) {
+    if (href && !HAS_SCHEME.test(href)) {
+      const target = resolveKbHref(href, baseDir || '');
       a.href = '#';
-      a.onclick = (e) => { e.preventDefault(); openKbPath(href); };
+      a.onclick = (e) => { e.preventDefault(); openKbPath(target); };
     }
   });
 }
@@ -452,11 +473,12 @@ function wireRelativeKbLinks(container) {
 // this on every streamed chunk is what lets `**`/`` ` ``/lists render instead
 // of showing up literally, at the cost of a moment's flicker on an
 // unterminated construct (an open code fence, a half-typed `**`) that
-// self-corrects on the next chunk.
+// self-corrects on the next chunk. Chat has no directory of its own, so
+// links resolve against the workspace root.
 function renderMarkdownInto(container, raw) {
   container.innerHTML = marked.parse(raw);
   sanitizeRenderedLinks(container);
-  wireRelativeKbLinks(container);
+  wireRelativeKbLinks(container, '');
 }
 
 // --- the centre pane: KB articles, agent writes, uploads ----------------
@@ -546,7 +568,7 @@ async function openKbFile(path, opts) {
     if (path.endsWith('.md')) {
       prose.innerHTML = marked.parse(body);
       sanitizeRenderedLinks(prose);
-      wireRelativeKbLinks(prose);
+      wireRelativeKbLinks(prose, parentDirOf(path));
     } else {
       // Never markdown, never innerHTML: a non-.md KB file (the agent wrote
       // a .txt or .csv) is shown as literal text.
@@ -601,7 +623,7 @@ async function openKbDir(path, opts) {
     const prose = el('div', 'prose');
     prose.innerHTML = marked.parse(data.guide.content);
     sanitizeRenderedLinks(prose);
-    wireRelativeKbLinks(prose);
+    wireRelativeKbLinks(prose, dir);
     content.appendChild(prose);
   }
   renderDirView(data, content, (p) => openKbPath(p));
