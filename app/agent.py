@@ -51,6 +51,8 @@ import logging
 import os
 from pathlib import Path
 
+from anthropic import AsyncAnthropic
+from anthropic.types import TextBlock as AnthropicTextBlock
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
     AgentDefinition,
@@ -957,6 +959,74 @@ def _attachment_note(files: list[Path], actor_email: str | None = None) -> str:
     )
 
 
+# Haiku rather than AGENT_MODEL: titling is one cheap, non-agentic
+# classification call, unrelated to the model quality bar the main turn
+# needs, and the two should not move together when AGENT_MODEL changes.
+_TITLE_MODEL = "claude-haiku-4-5-20251001"
+_TITLE_MAX_CHARS = 80
+_TITLE_PROMPT_CHARS = 2000
+
+
+async def _maybe_title_conversation(conversation_id: str, prompt: str) -> None:
+    """Give a titleless conversation a short name from a turn's own prompt.
+
+    Called from _run_turn's finally block via spawn(), never awaited inline:
+    the client is told a turn is `done` as soon as its own work has landed,
+    and Registry.begin must free up for the next turn immediately, so nothing
+    here may add latency to either. A real Anthropic Messages call rather than
+    the claude-agent-sdk `query()` every other turn uses - this is one
+    non-agentic call with no tools, no system prompt and no CLI subprocess to
+    pay for. Self-healing rather than "first turn only": it is offered after
+    every DONE turn and is a no-op once a title exists (needs_title), so a
+    conversation whose opening turn errored still gets titled from whichever
+    turn first succeeds. Silently skipped on any failure - static/app.js
+    already renders a timestamp fallback, a fine outcome for something this
+    low-stakes.
+    """
+    if not prompt.strip():
+        return
+    if not await conversations.needs_title(conversation_id):
+        return
+    try:
+        client = AsyncAnthropic(api_key=config.anthropic_api_key)
+        response = await client.messages.create(
+            model=_TITLE_MODEL,
+            max_tokens=20,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Reply with ONLY a short chat title (3-6 words, no "
+                        "quotes, no trailing punctuation) for a conversation "
+                        f"that opens with this message:\n\n"
+                        f"{prompt[:_TITLE_PROMPT_CHARS]}"
+                    ),
+                }
+            ],
+        )
+        block = response.content[0]
+        title = (
+            block.text.strip().strip('"')
+            if isinstance(block, AnthropicTextBlock)
+            else ""
+        )
+    except Exception:
+        log.exception("could not generate a title for conversation %s", conversation_id)
+        return
+    if not title:
+        return
+    title = title[:_TITLE_MAX_CHARS]
+    if not await conversations.set_title_if_unset(conversation_id, title):
+        return
+    # Push a live update: this runs seconds after `turn_done` already streamed,
+    # so a client with the conversation open needs telling, not just a row in
+    # Postgres it will only see on its next reload.
+    conv = conversations.get(conversation_id)
+    if conv is not None:
+        conv.append("title", interact.json_event(title=title))
+        await conversations.flush_one(conversation_id)
+
+
 async def run_turn(
     turn: Turn,
     prompt: str,
@@ -1111,6 +1181,14 @@ async def _run_turn(
             # turn is done must be able to trust every event already landed
             # in Postgres - see app/conversations.py's module docstring.
             await conversations.flush_one(turn.conversation_id)
+            if turn.state is TurnState.DONE:
+                # spawn(), not awaited: the client is already told this turn
+                # is done, and Registry.begin must free up for the next turn
+                # now, not after a second model call.
+                spawn(
+                    _maybe_title_conversation(turn.conversation_id, turn.prompt),
+                    name=f"title-{turn.id}",
+                )
         # After finish() on every path: a turn that failed or was stopped is
         # precisely the one worth recording, and the client is no longer
         # waiting on us.

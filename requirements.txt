@@ -23,6 +23,13 @@
 
 claude-agent-sdk>=0.2.0,<0.3.0
 
+# Declared explicitly, not leaned on as a transitive dependency of the agent
+# SDK - claude-agent-sdk wraps the CLI subprocess and does not pull this in.
+# Used for exactly one thing: app/agent.py's conversation-title generation,
+# a plain one-shot Messages call with no tools, no system prompt and no CLI
+# subprocess, which has nothing to do with the agent loop `query()` runs.
+anthropic>=1.0.0,<2.0.0
+
 # The MCP server surface in app/mcp_server.py. Declared explicitly rather than
 # leaned on as a transitive dependency of the agent SDK: nothing in the lock
 # requires it, so the image would not have it.

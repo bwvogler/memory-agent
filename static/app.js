@@ -1353,6 +1353,16 @@ function wireStreamHandlers(stream) {
   stream.addEventListener('turn_done', (e) => finishTurn(parse(e), false));
   stream.addEventListener('turn_failed', (e) => finishTurn(parse(e), true));
 
+  // Auto-titling lands seconds after `turn_done`, from a background task -
+  // see app/agent.py's _maybe_title_conversation. Only the picker option
+  // needs updating; a full loadConversations() would reorder/flicker the
+  // whole list for a change that touched exactly one row.
+  stream.addEventListener('title', (e) => {
+    const d = parse(e); if (!d || !d.title) return;
+    const opt = conversationPicker.querySelector(`option[value="${CSS.escape(activeConversationId)}"]`);
+    if (opt) opt.textContent = d.title;
+  });
+
   stream.onerror = () => {
     // EventSource reconnects on its own and the server replays from
     // Last-Event-ID, so a transient drop needs no handling here. CLOSED

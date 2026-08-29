@@ -694,9 +694,28 @@ person twice.
 
 Not done in this pass, each for a stated reason in `docs/decisions/0017`:
 presence/typing indicators, the `SessionStore` SDK-protocol rewrite that
-would close `img-2jj`, and the Phase-5 backlog (`@agent` addressing,
-auto-titling, search, KB provenance links, revert-to-a-message, a context
-budget warning).
+would close `img-2jj`, and most of the Phase-5 backlog (`@agent` addressing,
+search, KB provenance links, revert-to-a-message, a context budget warning).
+
+**Auto-titling landed separately from that backlog, as its own small piece.**
+A titleless conversation gets a name from `agent._maybe_title_conversation`,
+fired via `spawn()` from `_run_turn`'s `finally` block after every `DONE` turn
+- never awaited inline, since the client is already told the turn is `done`
+and `Registry.begin` must free up for the next turn immediately. It is a
+plain `anthropic.AsyncAnthropic` Messages call, deliberately not the
+claude-agent-sdk `query()` every other turn uses: one non-agentic
+classification call needs no tools, no system prompt, and no CLI subprocess,
+and `anthropic` is declared explicitly in `requirements.txt` because
+claude-agent-sdk does not pull it in. `_TITLE_MODEL` is hardcoded to Haiku
+rather than reading `AGENT_MODEL`, on purpose - the two concerns should not
+move together. `needs_title`/`set_conversation_title_if_unset` (an atomic
+`WHERE title IS NULL OR title = ''`) make this self-healing and idempotent:
+offered after every successful turn, a no-op once a title exists, so a
+conversation whose opening turn errored still gets titled from whichever
+turn first succeeds, and two racing attempts can never both win. The winner
+also appends a `title` conversation event and flushes it, since this lands
+seconds after `turn_done` already streamed - a client with the conversation
+open needs telling, not just a row in Postgres it would only see on reload.
 
 ## Local dev
 
