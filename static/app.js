@@ -439,7 +439,7 @@ function sanitizeRenderedLinks(container) {
 function wireRelativeKbLinks(container) {
   container.querySelectorAll('a').forEach(a => {
     const href = a.getAttribute('href');
-    if (href && !href.startsWith('http') && href.endsWith('.md')) {
+    if (href && !href.startsWith('http')) {
       a.href = '#';
       a.onclick = (e) => { e.preventDefault(); openKbPath(href); };
     }
@@ -668,7 +668,10 @@ function openInPane(target) {
     // listing, but an edit to an existing one does not, and rebuilding the
     // tree is what used to make following a write feel like a page load.
     openKbPath(target.path);
-    if (!knownKbFiles.has(target.path)) loadFiles();
+    if (!knownKbFiles.has(target.path)) {
+      knownKbFiles.add(target.path);
+      loadFiles();
+    }
     return;
   }
   if (target.kind === 'upload') { openUpload(target); return; }
