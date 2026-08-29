@@ -163,3 +163,104 @@ something else can call them.
 **Queueing concurrent calls.** A queue turns "the instance is busy" into "your
 call is mysteriously slow", and the savepoint interference it would be hiding is
 real. Refusing says the true thing.
+
+## Amendment: a real per-person path, alongside the collapsed one (`img-bbb`)
+
+The collapsed identity above was never actually put into use. What the
+household wanted instead, once `/mcp` needed to be reachable from the Claude
+app on two people's phones, was to authenticate as *themselves* — the same
+identity they already use to browse — not a synthetic shared placeholder.
+Claude's connector UI forces the question anyway: it will not accept a static
+bearer token, only a real OAuth 2.1 + PKCE authorization-code flow.
+
+**Cloudflare Access has a purpose-built feature for exactly this, and it is a
+toggle, not a new Application.** Zero Trust → Access → Applications → the
+*same* self-hosted Application this ADR already gates `/mcp` with → Edit →
+Advanced settings → **Managed OAuth**. A separate SaaS/OIDC Application was
+tried first, on the assumption that "Access acting as an OIDC provider" meant
+building one the way an external SaaS product would — that assumption was
+wrong for this case and the Application was abandoned. Managed OAuth is the
+mechanism Cloudflare actually built for protecting an MCP server, and it
+attaches to the Application already in place, so there is no second
+Application for a caller to fall through or coexist awkwardly with.
+
+Enabling it changes one thing: an unauthenticated non-browser request now gets
+a `401` carrying a `WWW-Authenticate` header pointing at Access's OAuth
+discovery metadata, instead of a `302` to the hosted login page. That is not
+cosmetic — Claude's connector-discovery flow will not act on a
+`WWW-Authenticate` header on anything but a `401`, so the `302` silently
+stopped the whole flow before Access's own MCP-awareness (already present, and
+already advertising valid protected-resource metadata) mattered at all.
+Claude's fixed callback for every hosted surface — web, desktop, mobile,
+Cowork — is `https://claude.ai/api/mcp/auth_callback`, registered as an
+Allowed redirect URI in that same Advanced settings screen. Dynamic Client
+Registration against it worked with no further configuration; Claude detected
+and used it without a manually pre-registered OAuth client.
+
+**The token that reaches this app is the identical `Cf-Access-Jwt-Assertion`
+header and `aud` the browser already sends — measured, not assumed.** A
+temporary diagnostic log line in `_authenticate` (added, read from `fly logs`
+against real traffic, then reverted — it never shipped) confirmed this before
+any verification code was written, in keeping with how every other "what does
+the token actually look like" question in this file was settled. Because it is
+the same shape, `auth.verify()` needed **zero changes**: it already returns a
+real `email` claim's identity unchanged, checked against ADR 0005's allowlist,
+with no collapse. Real per-person auth over `/mcp` was already correct code
+that had simply never been reachable before.
+
+**What's new is a second, dedicated gate — not a mapping.** `_authenticate`
+now requires that a caller who is *not* already the collapsed identity above
+have their real email on `MCP_OAUTH_EMAILS` (`config.mcp_oauth_emails`,
+CSV-parsed like `MCP_CLIENT_IDS`), or it refuses them, even if that same email
+already passes ADR 0005's browser allowlist. This mirrors why `MCP_CLIENT_IDS`
+is already its own list rather than a reuse of ADR 0005's: opening the browser
+UI is a materially smaller grant than driving a non-interactive turn
+(`Turn.interactive=False`, ADR 0013) from a phone with nobody watching, and the
+household should have to grant that specifically rather than inherit it.
+`MCP_IDENTITY_EMAIL` is not required for this path at all — it never collapses
+to one — so `enabled()` now also reports true when `MCP_OAUTH_EMAILS` alone is
+set. Empty by default, same closed-by-default posture as everything else here.
+
+**Consequence, stated plainly and accepted rather than fixed.** A real
+per-person identity over MCP reopens this file's own Consequences section
+through a new door: `Identity.slug` now varies by which household member
+authenticated, so each person's MCP turn uses their own bead ledger and
+scratch dir, and `memory/backlog.md` — a single shared projection — is
+overwritten by whichever person's turn ran most recently. That collision was
+previously reachable only through the browser (ADR 0012, still open, still
+proposed); it is now reachable through MCP too. The household chose to accept
+this as-is rather than fold ADR 0012's fix (one shared bead graph at
+`$WORK_DIR`) into this change.
+
+**An unrelated, pre-existing bug surfaced along the way.** `app.mount("/mcp",
+...)` in `app/main.py` relies on Starlette's default `redirect_slashes` to
+match a bare `POST /mcp` — the URL published everywhere, including to Claude's
+connector config — by 307-redirecting it to `/mcp/`. Disabling
+`redirect_slashes` was tried first and reverted: it broke the match entirely,
+404ing the exact published URL, because the sub-app's own route only matches
+the *post-redirect* remainder. The actual bug was one layer down:
+`entrypoint.sh` ran `uvicorn` with no `--proxy-headers` flag, so it never
+learned TLS was terminated at Fly's edge, and built that redirect's `Location`
+as `http://`, not `https://` — measured directly against the `.fly.dev` origin,
+bypassing Access entirely. Claude reasonably refused to follow a same-origin
+scheme downgrade on a request carrying its OAuth token, surfacing only as "no
+MCP server was found" / "returned an error when connecting", with nothing
+closer to the real cause. Fixed with `--proxy-headers --forwarded-allow-ips='*'`
+on the `uvicorn` invocation — `*` rather than a fixed IP because only Fly's own
+proxy can reach this machine at all (see "Why there is no tunnel here" in the
+README), so there is no untrusted peer for a forwarded header to lie to. No
+test tier caught this because all of them exercise `mcp_server.asgi_app()`
+in-process (`ASGITransport`), never through this `Mount` over a real network
+hop.
+
+## Note on verification
+
+Both central facts here were measured against the live deployment, not
+reasoned from documentation: the token shape (same header, same `aud` as the
+browser) from a temporary diagnostic log line read against real Claude-web
+traffic, and the scheme bug from curling the bare `.fly.dev` origin directly
+and reading the `Location` header on the resulting `307`. That a separate
+SaaS/OIDC Application was the wrong mechanism, and Managed OAuth on the
+existing Application the right one, was likewise discovered by trying the
+former against the real dashboard and reading Cloudflare's own docs for the
+latter — not planned in advance.

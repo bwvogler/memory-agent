@@ -169,6 +169,24 @@ fly secrets set \
   CF_ACCESS_AUD=<aud-tag>
 ```
 
+**Real per-person OAuth login for `/mcp`** (so Claude's own connector UI can
+reach it from a phone) is a toggle on this *same* Application, not a second
+one: Edit → Advanced settings → **Managed OAuth**. This is what makes an
+unauthenticated non-browser request get a `401` (with a `WWW-Authenticate`
+header) instead of a `302` to the hosted login page — Claude's connector
+discovery requires the `401` specifically. Add
+`https://claude.ai/api/mcp/auth_callback` under **Allowed redirect URIs** in
+that same screen — Anthropic's fixed callback for every hosted Claude surface.
+`CF_ACCESS_AUD` above does not change; it is still the same Application.
+Then:
+
+```bash
+fly secrets set MCP_OAUTH_EMAILS=alice@example.com,bob@example.com
+```
+
+See `docs/decisions/0014`'s amendment for what this does and does not change
+about identity.
+
 **Why there is no tunnel here.** Cloudflare's own advice is to enforce Access at
 a tunnel ingress as well as at the application. That advice does not survive
 this `fly.toml`: the tunnel would run *inside* the machine,
@@ -184,6 +202,16 @@ like a tunnel that is running. If you want one anyway, set
 `min_machines_running = 1`, accept the bill, and put `cloudflared` back — but
 the app-layer JWT check in `app/auth.py` is what actually protects this, which
 is why it verifies signatures rather than trusting a header.
+
+The same edge-termination fact bit a different way once: Fly terminates TLS
+and forwards plain HTTP to this machine, and `entrypoint.sh` used to run
+`uvicorn` with no `--proxy-headers` flag, so it never learned that and built
+an absolute redirect URL as `http://`, not `https://` — silently breaking any
+client that refuses a same-origin scheme downgrade (which is exactly how
+Claude's OAuth-bearing connector traffic behaved). Fixed with `--proxy-headers
+--forwarded-allow-ips='*'` — `*` rather than a fixed IP because only Fly's own
+proxy can reach this machine at all, so there is no untrusted peer for a
+forwarded header to lie to.
 
 The consequence to know: `<your-app>.fly.dev` stays publicly routable and Access
 cannot cover it. That is safe — it returns 403 without a valid token — but it

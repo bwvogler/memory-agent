@@ -433,7 +433,12 @@ def test_an_access_cookie_alone_is_refused(monkeypatch):
 
 def test_the_header_is_verified_rather_than_trusted(monkeypatch):
     """Present is not the same as valid; the token still goes through verify()."""
-    _config(monkeypatch, mcp_server, dev_bypass_auth=False)
+    _config(
+        monkeypatch,
+        mcp_server,
+        dev_bypass_auth=False,
+        mcp_oauth_emails=["person@example.com"],
+    )
     seen = {}
 
     async def fake_verify(token):
@@ -448,3 +453,65 @@ def test_the_header_is_verified_rather_than_trusted(monkeypatch):
 
     assert seen["presented"] == "tok"
     assert identity.email == "person@example.com"
+
+
+# --- the real-per-person OAuth path, and its own allowlist ------------------
+
+
+def test_a_real_identity_not_on_the_oauth_allowlist_is_refused(monkeypatch):
+    """Passing ADR 0005's browser allowlist is not enough for this surface.
+
+    Real per-person OAuth (Cloudflare Access's Managed OAuth toggle on the same
+    Access Application the browser uses) reaches auth.verify() with a real
+    `email` claim - verify() itself never collapses that. Whether it may drive
+    this NON-INTERACTIVE surface is a second, separate decision.
+    """
+    _config(monkeypatch, mcp_server, dev_bypass_auth=False, mcp_oauth_emails=[])
+
+    async def fake_verify(token):
+        return auth.Identity(email="person@example.com", subject="abc")
+
+    monkeypatch.setattr(mcp_server.auth, "verify", fake_verify)
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            mcp_server._authenticate(_request({"Cf-Access-Jwt-Assertion": "tok"}))
+        )
+
+    assert caught.value.status_code == 403
+    assert "person@example.com" in str(caught.value.detail)
+
+
+def test_a_service_token_caller_is_unaffected_by_the_oauth_allowlist(monkeypatch):
+    """The pre-existing collapsed identity needs no entry on the new list."""
+    _config(
+        monkeypatch,
+        mcp_server,
+        dev_bypass_auth=False,
+        mcp_identity_email="person@example.com",
+        mcp_oauth_emails=[],
+    )
+
+    async def fake_verify(token):
+        return auth.Identity(email="person@example.com", subject="laptop.access")
+
+    monkeypatch.setattr(mcp_server.auth, "verify", fake_verify)
+
+    identity = asyncio.run(
+        mcp_server._authenticate(_request({"Cf-Access-Jwt-Assertion": "tok"}))
+    )
+
+    assert identity.email == "person@example.com"
+
+
+def test_mcp_reports_on_when_only_oauth_emails_are_configured(monkeypatch):
+    """The OAuth path needs no MCP_IDENTITY_EMAIL - it never collapses to one."""
+    _config(
+        monkeypatch,
+        mcp_server,
+        dev_bypass_auth=False,
+        mcp_client_ids=[],
+        mcp_identity_email="",
+        mcp_oauth_emails=["person@example.com"],
+    )
+    assert mcp_server.enabled() is True

@@ -400,6 +400,18 @@ household member's address — a synthetic one puts every bead `lint` files into
 graph nobody's `bd ready` shows, which is ADR 0012's defect through a third door.
 See `docs/decisions/0014`.
 
+**A second, real-per-person path reaches the same surface, and does not
+collapse.** Cloudflare Access's Managed OAuth toggle — on the *same*
+self-hosted Application, not a second one — turns real OAuth 2.1 + PKCE login
+into the identical `Cf-Access-Jwt-Assertion` header the browser already sends,
+so `auth.verify()` needed no changes at all; measured from live traffic, not
+assumed. `MCP_OAUTH_EMAILS` is a second, dedicated allowlist checked in
+`_authenticate` — separate from ADR 0005's browser list, for the same reason
+`MCP_CLIENT_IDS` already is — and a caller on it keeps their own real identity
+rather than being mapped onto `MCP_IDENTITY_EMAIL`. That reopens ADR 0012's
+backlog/ledger collision through a new surface, accepted rather than fixed. See
+the amendment in `docs/decisions/0014`.
+
 **And this app can call other MCP servers, which is the opposite direction and
 easy to confuse.** `/mcp` is this app *as a server*; `app/mcp_catalog.py` is
 this app *as a client*. Nothing had been able to fill the second role at all:
@@ -804,6 +816,13 @@ tokens allowed in, and the household member every machine call acts as. Leaving
 `MCP_CLIENT_IDS` empty (the default) refuses every machine caller exactly as
 before. `/healthz` reports `mcp` so "off" is distinguishable from "on and
 refusing everything".
+
+`MCP_OAUTH_EMAILS` enables the same surface for a second, non-collapsing path:
+real per-person OAuth login via Cloudflare Access's Managed OAuth, gated
+independently of `MCP_CLIENT_IDS`/`MCP_IDENTITY_EMAIL` — this path needs
+neither. A caller on this list keeps their own real email rather than being
+mapped onto `MCP_IDENTITY_EMAIL`. Empty (the default) refuses every real
+identity here exactly as before.
 
 ## Deploying
 
