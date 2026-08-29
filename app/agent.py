@@ -602,6 +602,10 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
         "is a FALSE ALARM and your write succeeded. If any file tool reports a "
         "failure, re-read the file: if the content is right, you are done. "
         "Never fall back to shell redirection to work around it.",
+        "When mentioning a KB file or directory you just wrote, or one you want "
+        "the user to open, link to it with `[label](workspace/relative/path)` — "
+        "the exact path you used in your tool call, no leading slash and no "
+        "`/kb/` prefix. That opens it directly in the wiki viewer.",
     ]
     parts.append(_ASKING)
     if skills:
