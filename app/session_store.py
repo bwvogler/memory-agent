@@ -343,6 +343,24 @@ class PostgresSessionStore:
                 title,
             )
 
+    async def set_conversation_title_if_unset(
+        self, conversation_id: str, title: str
+    ) -> bool:
+        """Auto-titling's write: never overwrites a title a person set (by
+        hand, via set_conversation_title) or one an earlier turn already
+        generated. Returns whether this call was the one that set it - the
+        caller uses that to decide whether to push a live update, since two
+        titling attempts racing (two turns finishing close together) must
+        not both announce a change."""
+        async with self._ready().acquire() as conn:
+            result = await conn.execute(
+                "UPDATE conversations SET title = $2 "
+                "WHERE id = $1 AND (title IS NULL OR title = '')",
+                conversation_id,
+                title,
+            )
+        return result == "UPDATE 1"
+
     async def set_conversation_archived(
         self, conversation_id: str, *, archived: bool
     ) -> None:

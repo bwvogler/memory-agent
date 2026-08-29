@@ -248,6 +248,34 @@ class ConversationRegistry:
         except Exception:
             log.exception("could not record the end of turn %s", turn_id)
 
+    async def needs_title(self, conversation_id: str) -> bool:
+        """Whether this conversation has no title yet - the gate agent.py
+        checks before spending a model call on generating one. False (not
+        True) if the store is unreachable or the row is missing, since a
+        turn that cannot even confirm a title is needed should not guess."""
+        if self._store is None:
+            return False
+        try:
+            row = await self._store.get_conversation(conversation_id)
+        except Exception:
+            log.exception(
+                "could not check whether conversation %s needs a title",
+                conversation_id,
+            )
+            return False
+        return bool(row) and not row.get("title")
+
+    async def set_title_if_unset(self, conversation_id: str, title: str) -> bool:
+        if self._store is None:
+            return False
+        try:
+            return await self._store.set_conversation_title_if_unset(
+                conversation_id, title
+            )
+        except Exception:
+            log.exception("could not set title for conversation %s", conversation_id)
+            return False
+
     async def record_session(self, conversation_id: str, session_id: str) -> None:
         """Remember the SDK session to `resume=` next time - see run_turn."""
         if self._store is None:
