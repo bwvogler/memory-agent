@@ -178,6 +178,9 @@ main { flex: 1; overflow-y: auto; padding: 32px 48px; min-width: 280px; }
 .prose th, .prose td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
 .prose th { background: var(--sidebar); font-weight: 600; }
 .prose img { max-width: 100%; }
+.prose li:has(> input.checklist-box) { list-style: none; }
+.checklist-box { cursor: pointer; margin-right: .4em; }
+.checklist-box:disabled { cursor: default; opacity: .6; }
 .empty { color: var(--muted); font-size: 14px; padding: 32px 0; text-align: center; }
 
 /* --- centre: a directory's generated index (docs/decisions/0018) ------- */

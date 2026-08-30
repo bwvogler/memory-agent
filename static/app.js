@@ -456,6 +456,39 @@ function resolveKbHref(href, baseDir) {
   return decodeURIComponent(url.pathname.replace(/^\/+/, ''));
 }
 
+async function toggleChecklistItem(path, index, checked) {
+  const res = await fetch('/api/kb/checkbox', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, index, checked }),
+  });
+  if (!res.ok) throw new Error(String(res.status));
+}
+
+// Task-list checkboxes in a KB article write straight back to the file they
+// came from - marked renders them disabled, this makes them live. `index` is
+// each box's position among ALL checkboxes in the rendered document, which is
+// the same order kb.toggle_checkbox scans the raw file in: fenced code is
+// never rendered as a real <input> either, so the two counts agree without
+// either side having to know about the other's skip logic.
+function wireChecklistCheckboxes(prose, path) {
+  prose.querySelectorAll('input[type=checkbox]').forEach((box, index) => {
+    box.disabled = false;
+    box.classList.add('checklist-box');
+    box.addEventListener('change', async () => {
+      const checked = box.checked;
+      box.disabled = true;
+      try {
+        await toggleChecklistItem(path, index, checked);
+      } catch {
+        box.checked = !checked;
+      } finally {
+        box.disabled = false;
+      }
+    });
+  });
+}
+
 function wireRelativeKbLinks(container, baseDir) {
   container.querySelectorAll('a').forEach(a => {
     const href = a.getAttribute('href');
@@ -569,6 +602,7 @@ async function openKbFile(path, opts) {
       prose.innerHTML = marked.parse(body);
       sanitizeRenderedLinks(prose);
       wireRelativeKbLinks(prose, parentDirOf(path));
+      wireChecklistCheckboxes(prose, path);
     } else {
       // Never markdown, never innerHTML: a non-.md KB file (the agent wrote
       // a .txt or .csv) is shown as literal text.

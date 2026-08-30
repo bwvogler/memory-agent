@@ -34,3 +34,7 @@ def test_the_merged_page_requires_auth():
 def test_kb_deep_links_still_require_auth():
     assert current_identity in _dependency_callables("/kb", "GET")
     assert current_identity in _dependency_callables("/kb/{path:path}", "GET")
+
+
+def test_the_checkbox_write_requires_auth():
+    assert current_identity in _dependency_callables("/api/kb/checkbox", "PATCH")

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 import asyncpg
@@ -275,6 +276,72 @@ def assert_scratch_outside_kb() -> None:
             "Agent scratch files would be written into the knowledge base as "
             "versioned rows. Point WORK_DIR at local disk."
         )
+
+
+def resolve_kb_path(rel_path: str) -> Path | None:
+    """Resolve a client-supplied, workspace-relative path, or None if unsafe.
+
+    Same containment posture as `resolve_upload_path`: an absolute path or a
+    `../` would otherwise let a request reach outside `memory/`.
+    """
+    if not rel_path or rel_path.startswith("/"):
+        return None
+    root = workspace_root().resolve()
+    candidate = (root / rel_path).resolve()
+    if not candidate.is_relative_to(root):
+        log.warning("rejected kb path escaping workspace: %r", rel_path)
+        return None
+    return candidate
+
+
+# 0-3 leading spaces, same as CommonMark's fence rule.
+_FENCE_RE = re.compile(r"^ {0,3}(```+|~~~+)")
+_CHECKBOX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s\[(?P<mark>[ xX])\]")
+
+
+def toggle_checkbox(rel_path: str, index: int, *, checked: bool) -> str | None:
+    """Flip the Nth GFM task-list checkbox in a KB file, in document order.
+
+    A full read-modify-write of the whole file - the mount has no
+    read-modify-write for a shell *append* (see `app/guards.py`), but a full
+    rewrite is exactly how every other KB write already happens. This one
+    deliberately skips the turn/savepoint machinery: a tick is a mechanical
+    one-line edit, not something worth a savepoint, a bead, or a busy-turn
+    refusal, so it is also not revertable from the UI and never shows up in
+    `kb log`.
+
+    A line inside a fenced code block is skipped, so a literal "- [ ]" in an
+    example snippet cannot shift the count out from under the index the
+    browser computed by counting rendered `<input type=checkbox>` elements -
+    marked never turns fenced content into a real checkbox either, so the two
+    counts agree.
+
+    Returns the new file content, or None if the path is unsafe, the file
+    does not exist, or `index` names a checkbox that is not there.
+    """
+    target = resolve_kb_path(rel_path)
+    if target is None or not target.is_file():
+        return None
+    lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
+    in_fence = False
+    seen = 0
+    for i, line in enumerate(lines):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _CHECKBOX_RE.match(line)
+        if not match:
+            continue
+        if seen == index:
+            start, end = match.span("mark")
+            lines[i] = line[:start] + ("x" if checked else " ") + line[end:]
+            new_content = "".join(lines)
+            target.write_text(new_content, encoding="utf-8")
+            return new_content
+        seen += 1
+    return None
 
 
 # ---------------------------------------------------------------------------
