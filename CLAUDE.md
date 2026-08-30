@@ -121,6 +121,28 @@ opened by deep link cannot tell "empty" from "not told", and printed the spec's
 `empty_labels` over data it never had. Only a browser caught that.
 See `docs/decisions/0018`.
 
+**A rendered checklist writes back to its own file, and is the one KB write
+that skips every other write's machinery on purpose.** `PATCH /api/kb/checkbox`
+(`kb.toggle_checkbox`) flips one `- [ ]`/`- [x]` line and rewrites the whole
+file - a full read-modify-write, same as the agent's own Edit tool, never an
+append (see the guards.py note above on why an append would corrupt the file).
+It does not open a turn: no savepoint, no bead, no busy-turn refusal, which
+also means a tick is not revertable from the UI and never appears in `kb log`.
+That is a deliberate, narrower posture than every other write in this file,
+chosen because a checkbox toggle is mechanical rather than something an agent
+authored.
+
+`index` is the checkbox's 0-based position among every rendered
+`<input type=checkbox>` in the article, counted client-side in
+`wireChecklistCheckboxes` (`static/app.js`) after `marked.parse`. The server
+scan in `kb.toggle_checkbox` counts the same way without either side reading
+the other's logic: a line inside a fenced code block is skipped, because
+marked never turns fenced content into a real checkbox either, so a literal
+`- [ ] example` in a snippet cannot shift the two counts apart. `path` goes
+through `kb.resolve_kb_path`, the same containment posture as
+`resolve_upload_path` - a client-controlled string, checked against
+`workspace_root()` rather than trusted.
+
 **A skill is reached because the system prompt names it, and nothing else.**
 This is the load-bearing fact about skills here, and it was wrong in this file
 for a long time. `ClaudeAgentOptions.skills` is the SDK's switch, but it enables

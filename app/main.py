@@ -739,6 +739,26 @@ async def kb_file(path: str) -> dict[str, Any]:
     return {"path": path, "content": doc["body"] or "", "fields": doc["fields"]}
 
 
+@app.patch("/api/kb/checkbox", dependencies=AUTHENTICATED)
+async def kb_checkbox(request: Request) -> dict[str, Any]:
+    """Flip one GFM task-list checkbox in place, ticked from the rendered page.
+
+    Deliberately outside the turn/savepoint system - see `kb.toggle_checkbox`.
+    `index` is the checkbox's 0-based position in document order, the same
+    order the browser counted its rendered `<input>` elements in.
+    """
+    body = await request.json()
+    path = str(body.get("path") or "")
+    try:
+        index = int(body["index"])
+    except (KeyError, TypeError, ValueError) as err:
+        raise HTTPException(400, "index must be an integer") from err
+    content = kb.toggle_checkbox(path, index, checked=bool(body.get("checked")))
+    if content is None:
+        raise HTTPException(404, "checkbox not found")
+    return {"path": path, "content": content}
+
+
 def _spec_payload(
     raw: object, source: str | None
 ) -> tuple[kbview.View, dict[str, Any]]:
