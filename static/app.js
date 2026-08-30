@@ -95,8 +95,10 @@ function applyPaneToggles() {
   layout.classList.toggle('no-chat', hideChat);
   gutterTree.classList.toggle('collapsed', hideTree);
   gutterTree.setAttribute('aria-expanded', String(!hideTree));
+  gutterTree.title = hideTree ? 'Show file tree' : 'Hide file tree';
   gutterChat.classList.toggle('collapsed', hideChat);
   gutterChat.setAttribute('aria-expanded', String(!hideChat));
+  gutterChat.title = hideChat ? 'Show chat' : 'Hide chat';
 }
 applyPaneToggles();
 
