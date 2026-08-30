@@ -60,10 +60,19 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em;
    thought there'd be a wider bar"). A permanent, wider bar in the same
    --line tone already used for borders elsewhere fixes discoverability
    without introducing a new color. */
-.gutter { width: 10px; flex-shrink: 0; cursor: col-resize; background: var(--line); touch-action: none; }
+.gutter {
+  width: 10px; flex-shrink: 0; cursor: col-resize; background: var(--line); touch-action: none;
+  display: flex; align-items: center; justify-content: center;
+}
 .gutter.collapsed { cursor: pointer; }
 .gutter:hover, .gutter.dragging { background: var(--accent); opacity: .6; }
 .gutter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A chevron pointing toward the edge it collapses to (expanded) or toward
+   the pane it reveals (collapsed) - the direction itself is the affordance,
+   so tree and chat mirror each other rather than sharing one glyph. */
+.gutter::after { content: '\2039'; font-size: 12px; line-height: 1; color: var(--muted); pointer-events: none; }
+#gutter-tree.collapsed::after,
+#gutter-chat:not(.collapsed)::after { content: '\203a'; }
 
 /* --- left: the KB tree (from the former /kb page) -------------------- */
 
