@@ -924,6 +924,23 @@ async def index() -> FileResponse:
     return response
 
 
+@app.get("/sw.js")
+async def service_worker() -> FileResponse:
+    """Served at the origin root rather than /static/sw.js.
+
+    A service worker's default scope is the directory it's served from - a
+    file under /static/ would only ever control /static/*, not / or /kb/*,
+    without a `Service-Worker-Allowed` header. Serving it here instead lets
+    it cover every route this app has for free. No `dependencies=AUTHENTICATED`,
+    matching the `/static` mount below: registration must work before, or
+    without, a Cloudflare Access session.
+    """
+    response = FileResponse(STATIC_DIR / "sw.js")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Content-Type"] = "application/javascript"
+    return response
+
+
 class _RevalidatingStaticFiles(StaticFiles):
     """Same gap as `index()` above, for every file under `/static/*`.
 
