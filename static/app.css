@@ -34,20 +34,19 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em;
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: #4a8f5b; } .dot.bad { background: var(--err); }
 
-/* --- pane chrome: desktop collapse buttons, mobile tab strip ----------- */
+/* --- pane chrome: mobile tab strip -------------------------------------- */
 
-.pane-toggles, .pane-tabs { display: flex; gap: 4px; }
-.pane-tabs { display: none; } /* shown only under the mobile breakpoint below */
-.pane-toggles button, .pane-tabs button {
+.pane-tabs { display: none; gap: 4px; } /* shown only under the mobile breakpoint below */
+.pane-tabs button {
   font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px;
   cursor: pointer; border: 1px solid var(--line); background: var(--panel);
   color: var(--muted);
 }
-.pane-toggles button[aria-pressed="true"], .pane-tabs button.active {
+.pane-tabs button.active {
   color: var(--accent); border-color: var(--accent);
 }
-.layout.no-tree > nav, .layout.no-tree > #gutter-tree { display: none; }
-.layout.no-chat > aside#chat, .layout.no-chat > #gutter-chat { display: none; }
+.layout.no-tree > nav { display: none; }
+.layout.no-chat > aside#chat { display: none; }
 
 /* --- three panes ---------------------------------------------------- */
 
@@ -57,6 +56,16 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em;
 }
 .gutter { width: 6px; flex-shrink: 0; cursor: col-resize; background: transparent; touch-action: none; }
 .gutter:hover, .gutter.dragging { background: var(--line); }
+.gutter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A collapsed pane's gutter stays on screen instead of display:none-ing with
+   its pane (docs on desktop collapsing above), so it reads as a persistent
+   drawer handle - click it to bring the pane back - rather than a header
+   button being the only way in. */
+.gutter.collapsed {
+  width: 10px; cursor: pointer; background: var(--line);
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+}
+.gutter.collapsed:hover { background: var(--accent); opacity: .5; }
 
 /* --- left: the KB tree (from the former /kb page) -------------------- */
 
@@ -496,11 +505,10 @@ details.activity.failed > summary { color: var(--err); }
     scroll-snap-align: start;
   }
   .layout > .gutter { display: none; }
-  /* The desktop collapse toggles are meaningless here - a hidden pane is
+  /* The desktop collapse gutters are meaningless here - a hidden pane is
      just off-screen, one swipe away - so the tab strip replaces them and a
      stored "collapsed" preference from desktop must not hide a pane here. */
   .layout.no-tree > nav, .layout.no-chat > aside#chat { display: flex; }
-  .pane-toggles { display: none; }
   .pane-tabs { display: flex; }
   main { padding: 20px 16px; }
   /* dot + "memory-agent" + three tabs + a real signed-in email do not fit
