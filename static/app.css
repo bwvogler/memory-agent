@@ -54,18 +54,16 @@ header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em;
   display: flex; flex: 1; overflow: hidden;
   --tree-w: 240px; --chat-w: 420px;
 }
-.gutter { width: 6px; flex-shrink: 0; cursor: col-resize; background: transparent; touch-action: none; }
-.gutter:hover, .gutter.dragging { background: var(--line); }
+/* Visible at rest, not just on hover - a purely hover-revealed 6px sliver
+   turned out to be effectively invisible until you already knew it was
+   there (reported after shipping it: "no way to instantly collapse... I
+   thought there'd be a wider bar"). A permanent, wider bar in the same
+   --line tone already used for borders elsewhere fixes discoverability
+   without introducing a new color. */
+.gutter { width: 10px; flex-shrink: 0; cursor: col-resize; background: var(--line); touch-action: none; }
+.gutter.collapsed { cursor: pointer; }
+.gutter:hover, .gutter.dragging { background: var(--accent); opacity: .6; }
 .gutter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* A collapsed pane's gutter stays on screen instead of display:none-ing with
-   its pane (docs on desktop collapsing above), so it reads as a persistent
-   drawer handle - click it to bring the pane back - rather than a header
-   button being the only way in. */
-.gutter.collapsed {
-  width: 10px; cursor: pointer; background: var(--line);
-  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
-}
-.gutter.collapsed:hover { background: var(--accent); opacity: .5; }
 
 /* --- left: the KB tree (from the former /kb page) -------------------- */
 
