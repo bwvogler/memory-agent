@@ -10,10 +10,6 @@
 <header>
   <span class="dot" id="health" title="knowledge base mount"></span>
   <h1>memory-agent</h1>
-  <div class="pane-toggles">
-    <button id="toggle-tree" type="button" aria-pressed="true">Files</button>
-    <button id="toggle-chat" type="button" aria-pressed="true">Chat</button>
-  </div>
   <div class="pane-tabs">
     <button data-pane="nav" type="button">Files</button>
     <button data-pane="main" type="button">Article</button>
@@ -30,10 +26,10 @@
     </div>
     <div id="file-list"><div class="empty">Loading…</div></div>
   </nav>
-  <div class="gutter" id="gutter-tree" role="separator" aria-orientation="vertical" aria-label="Resize the file tree"></div>
+  <div class="gutter" id="gutter-tree" role="separator" aria-orientation="vertical" aria-label="Resize or collapse the file tree" tabindex="0"></div>
 
   <main><div class="prose" id="content"><div class="empty">Select a file.</div></div></main>
-  <div class="gutter" id="gutter-chat" role="separator" aria-orientation="vertical" aria-label="Resize the chat panel"></div>
+  <div class="gutter" id="gutter-chat" role="separator" aria-orientation="vertical" aria-label="Resize or collapse the chat panel" tabindex="0"></div>
 
   <aside id="chat">
     <div class="chat-header">

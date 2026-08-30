@@ -23,8 +23,6 @@ const stopBtn = document.getElementById('stop');
 const navPane = document.getElementById('nav');
 const mainPane = document.querySelector('main');
 const chatPane = document.getElementById('chat');
-const toggleTreeBtn = document.getElementById('toggle-tree');
-const toggleChatBtn = document.getElementById('toggle-chat');
 const paneTabs = document.querySelectorAll('.pane-tabs button');
 
 let pendingImages = []; // [{dataUrl, mediaType, base64}]
@@ -77,48 +75,15 @@ function applyPaneWidths() {
 }
 applyPaneWidths();
 
-// `side: 'right'` is the chat gutter: chat sits to the RIGHT of it, so
-// dragging right must shrink it rather than grow it, which is the opposite
-// sign from the tree gutter's own drag.
-function makeResizable(gutter, get, set, min, max, storageKey, side) {
-  gutter.addEventListener('pointerdown', (e) => {
-    gutter.setPointerCapture(e.pointerId);
-    gutter.classList.add('dragging');
-    const startX = e.clientX;
-    const startWidth = get();
+const gutterTree = document.getElementById('gutter-tree');
+const gutterChat = document.getElementById('gutter-chat');
 
-    function onMove(ev) {
-      const raw = ev.clientX - startX;
-      const delta = side === 'right' ? -raw : raw;
-      set(Math.min(max, Math.max(min, startWidth + delta)));
-      applyPaneWidths();
-    }
-    function onUp() {
-      gutter.classList.remove('dragging');
-      gutter.removeEventListener('pointermove', onMove);
-      gutter.removeEventListener('pointerup', onUp);
-      localStorage.setItem(storageKey, String(get()));
-    }
-    gutter.addEventListener('pointermove', onMove);
-    gutter.addEventListener('pointerup', onUp);
-  });
-}
-
-makeResizable(
-  document.getElementById('gutter-tree'),
-  () => treeWidth, (v) => { treeWidth = v; },
-  TREE_MIN, TREE_MAX, 'memory-agent:tree-width',
-);
-makeResizable(
-  document.getElementById('gutter-chat'),
-  () => chatWidth, (v) => { chatWidth = v; },
-  CHAT_MIN, CHAT_MAX, 'memory-agent:chat-width', 'right',
-);
-
-// --- collapsing a sidebar from the header (desktop only - the mobile
-// carousel below replaces these with the tab strip, and CSS keeps a pane
+// --- collapsing a sidebar into its own gutter (desktop only - the mobile
+// carousel below replaces this with the tab strip, and CSS keeps a pane
 // that was left collapsed on desktop visible once the breakpoint hides the
-// tree/chat toggles) --------------------------------------------------------
+// gutters). A collapsed pane's gutter stays on screen as a thin drawer
+// handle rather than disappearing with it, which is what makes it
+// discoverable again without a separate header button. -------------------
 
 function loadFlag(key) { return localStorage.getItem(key) === '1'; }
 
@@ -128,21 +93,76 @@ let hideChat = loadFlag('memory-agent:hide-chat');
 function applyPaneToggles() {
   layout.classList.toggle('no-tree', hideTree);
   layout.classList.toggle('no-chat', hideChat);
-  toggleTreeBtn.setAttribute('aria-pressed', String(!hideTree));
-  toggleChatBtn.setAttribute('aria-pressed', String(!hideChat));
+  gutterTree.classList.toggle('collapsed', hideTree);
+  gutterTree.setAttribute('aria-expanded', String(!hideTree));
+  gutterChat.classList.toggle('collapsed', hideChat);
+  gutterChat.setAttribute('aria-expanded', String(!hideChat));
 }
 applyPaneToggles();
 
-toggleTreeBtn.addEventListener('click', () => {
+function toggleTree() {
   hideTree = !hideTree;
   localStorage.setItem('memory-agent:hide-tree', hideTree ? '1' : '0');
   applyPaneToggles();
-});
-toggleChatBtn.addEventListener('click', () => {
+}
+function toggleChat() {
   hideChat = !hideChat;
   localStorage.setItem('memory-agent:hide-chat', hideChat ? '1' : '0');
   applyPaneToggles();
-});
+}
+
+// `side: 'right'` is the chat gutter: chat sits to the RIGHT of it, so
+// dragging right must shrink it rather than grow it, which is the opposite
+// sign from the tree gutter's own drag. The same handle now also collapses
+// its pane - a plain click (no meaningful pointer movement) toggles it,
+// while an actual drag still resizes exactly as before; a keyboard user gets
+// the same toggle via Enter/Space, since a <div role="separator"> has no
+// built-in activation the way the header button it replaced did.
+const CLICK_SLOP = 4;
+function makeResizable(gutter, get, set, min, max, storageKey, side, toggleCollapse) {
+  gutter.addEventListener('pointerdown', (e) => {
+    gutter.setPointerCapture(e.pointerId);
+    gutter.classList.add('dragging');
+    const startX = e.clientX;
+    const startWidth = get();
+    let moved = false;
+
+    function onMove(ev) {
+      const raw = ev.clientX - startX;
+      if (Math.abs(raw) > CLICK_SLOP) moved = true;
+      const delta = side === 'right' ? -raw : raw;
+      set(Math.min(max, Math.max(min, startWidth + delta)));
+      applyPaneWidths();
+    }
+    function onUp() {
+      gutter.classList.remove('dragging');
+      gutter.removeEventListener('pointermove', onMove);
+      gutter.removeEventListener('pointerup', onUp);
+      if (moved) localStorage.setItem(storageKey, String(get()));
+      else toggleCollapse();
+    }
+    gutter.addEventListener('pointermove', onMove);
+    gutter.addEventListener('pointerup', onUp);
+  });
+  gutter.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    toggleCollapse();
+  });
+}
+
+makeResizable(
+  gutterTree,
+  () => treeWidth, (v) => { treeWidth = v; },
+  TREE_MIN, TREE_MAX, 'memory-agent:tree-width',
+  undefined, toggleTree,
+);
+makeResizable(
+  gutterChat,
+  () => chatWidth, (v) => { chatWidth = v; },
+  CHAT_MIN, CHAT_MAX, 'memory-agent:chat-width', 'right',
+  toggleChat,
+);
 
 // --- mobile: swiping between the three panes ------------------------------
 //
@@ -184,6 +204,13 @@ function markArticleDot() {
 }
 function clearArticleDot() {
   document.querySelector('.pane-tabs .pane-dot')?.remove();
+}
+
+// A human clicking a link is an explicit request to view its target, unlike
+// openInPane's agent-write case above (docs/decisions/0016) - so this always
+// jumps the mobile carousel to the Article pane, no dot-only fallback.
+function goToArticleOnMobile() {
+  if (MOBILE_QUERY.matches) goToPane('main');
 }
 
 // Auto-scroll only while already at the bottom, so dragging a gutter or
@@ -343,6 +370,7 @@ async function loadFiles() {
           if (collapsed) return;
           if (isSkillDir) openKbFile(skillPath);
           else openKbDir(dirPath);
+          goToArticleOnMobile();
         };
 
         dirNodes.set(dirPath, { children, toggle });
@@ -367,7 +395,7 @@ async function loadFiles() {
         a.appendChild(label);
         a.href = '#';
         a.dataset.path = f;
-        a.onclick = (e) => { e.preventDefault(); openKbFile(f); };
+        a.onclick = (e) => { e.preventDefault(); openKbFile(f); goToArticleOnMobile(); };
         container.appendChild(a);
       }
     });
@@ -495,7 +523,7 @@ function wireRelativeKbLinks(container, baseDir) {
     if (href && !HAS_SCHEME.test(href)) {
       const target = resolveKbHref(href, baseDir || '');
       a.href = '#';
-      a.onclick = (e) => { e.preventDefault(); openKbPath(target); };
+      a.onclick = (e) => { e.preventDefault(); openKbPath(target); goToArticleOnMobile(); };
     }
   });
 }
@@ -660,7 +688,7 @@ async function openKbDir(path, opts) {
     wireRelativeKbLinks(prose, dir);
     content.appendChild(prose);
   }
-  renderDirView(data, content, (p) => openKbPath(p));
+  renderDirView(data, content, (p) => { openKbPath(p); goToArticleOnMobile(); });
 }
 
 const UPLOAD_IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
@@ -794,7 +822,7 @@ function linkifyKbPaths(container) {
         const a = document.createElement('a');
         a.href = '#';
         a.textContent = text.slice(m.idx, m.idx + m.len);
-        a.onclick = (e) => { e.preventDefault(); openInPane({ kind: 'kb', path: m.path }); };
+        a.onclick = (e) => { e.preventDefault(); openInPane({ kind: 'kb', path: m.path }); goToArticleOnMobile(); };
         frag.appendChild(a);
         pos = m.idx + m.len;
       }
