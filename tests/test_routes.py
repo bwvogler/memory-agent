@@ -38,3 +38,8 @@ def test_kb_deep_links_still_require_auth():
 
 def test_the_checkbox_write_requires_auth():
     assert current_identity in _dependency_callables("/api/kb/checkbox", "PATCH")
+
+
+def test_sw_is_reachable_without_auth():
+    """Registration must work before, or without, a Cloudflare Access session."""
+    assert current_identity not in _dependency_callables("/sw.js", "GET")
