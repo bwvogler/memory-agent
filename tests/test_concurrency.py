@@ -172,6 +172,27 @@ def test_a_message_for_the_same_conversation_is_injected_not_refused(clean_regis
     assert running.inbox.qsize() == 1
 
 
+def test_an_injected_message_carries_viewer_context(clean_registry):
+    """The 4th element of the inbox tuple - added alongside (text, images,
+    actor) so a follow-up sent while a turn is already running still tells
+    the agent what's currently open, the same as the first message would."""
+    running = clean_registry.begin(
+        user_email="someone@e.com", conversation_id="conv1", actor_email="someone@e.com"
+    )
+    identity = auth.Identity(email="brian@e.com", subject="s")
+    body = {"message": "hello", "context": {"selection": "some highlighted text"}}
+
+    asyncio.run(main.post_message("conv1", _request(body), identity))
+
+    item = running.inbox.get_nowait()
+    assert item == (
+        "hello",
+        None,
+        "brian@e.com",
+        {"selection": "some highlighted text"},
+    )
+
+
 def test_the_reflect_route_answers_409(clean_registry):
     clean_registry.begin(user_email="someone@e.com")
     identity = auth.Identity(email="brian@e.com", subject="s")

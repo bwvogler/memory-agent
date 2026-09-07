@@ -297,3 +297,93 @@ def test_the_attachment_note_gives_paths_not_contents(tmp_path):
     assert "Read" in note
     # Says what it cannot do, rather than letting the agent find out mid-turn.
     assert ".xlsx" in note
+
+
+# --- viewer context: what's currently open in the wiki pane -----------------
+#
+# The browser's idea of "what's open" can be seconds stale (the file could
+# have been deleted, or a hostile client could send a made-up path) - so
+# _resolve_viewer_context degrades to "no file context" for anything that
+# doesn't check out, rather than failing the whole message.
+
+
+@pytest.fixture
+def kb_workspace(tmp_path, monkeypatch):
+    """Point kb at a temp KB_MOUNT - same shape as test_checklist.py's
+    `workspace` fixture, needed because _resolve_viewer_context validates a
+    path through kb.resolve_kb_path."""
+    monkeypatch.setattr(
+        kb, "config", types.SimpleNamespace(work_dir="/work", kb_mount=str(tmp_path))
+    )
+    root = tmp_path / "memory"
+    root.mkdir()
+    return root
+
+
+def test_no_context_resolves_to_none():
+    assert main._resolve_viewer_context(None) is None
+    assert main._resolve_viewer_context({}) is None
+
+
+def test_a_selection_alone_is_kept_without_a_path():
+    context = main._resolve_viewer_context({"selection": "  hello there  "})
+
+    assert context == {"selection": "hello there"}
+
+
+def test_an_open_file_that_exists_is_attached(kb_workspace):
+    (kb_workspace / "recipes").mkdir()
+    (kb_workspace / "recipes" / "pasta.md").write_text("# Pasta\n", encoding="utf-8")
+
+    context = main._resolve_viewer_context({"path": "recipes/pasta.md"})
+
+    assert context == {"path": "recipes/pasta.md"}
+
+
+def test_a_path_escaping_the_workspace_is_dropped_not_refused(kb_workspace):
+    context = main._resolve_viewer_context({"path": "../../etc/passwd"})
+
+    assert context is None
+
+
+def test_a_path_to_a_nonexistent_file_is_dropped(kb_workspace):
+    context = main._resolve_viewer_context({"path": "ghost.md"})
+
+    assert context is None
+
+
+def test_a_selection_over_the_cap_is_truncated():
+    context = main._resolve_viewer_context({"selection": "x" * 5000})
+
+    assert context is not None
+    assert len(context["selection"]) == main._MAX_SELECTION_CHARS
+
+
+def test_path_and_selection_arrive_together(kb_workspace):
+    (kb_workspace / "recipes").mkdir()
+    (kb_workspace / "recipes" / "pasta.md").write_text("# Pasta\n", encoding="utf-8")
+
+    context = main._resolve_viewer_context(
+        {"path": "recipes/pasta.md", "selection": "boil water"}
+    )
+
+    assert context == {"path": "recipes/pasta.md", "selection": "boil water"}
+
+
+def test_the_viewer_context_note_points_at_the_path_not_its_contents():
+    note = agent._viewer_context_note({"path": "recipes/pasta.md"}, "brian@e.com")
+
+    assert "recipes/pasta.md" in note
+    assert "Brian" in note
+
+
+def test_the_viewer_context_note_inlines_a_selection_verbatim():
+    """Unlike the file path, a selection is not something the agent could
+    Read back - it's an excerpt of already-rendered markdown."""
+    note = agent._viewer_context_note({"selection": "boil water first"}, "brian@e.com")
+
+    assert "boil water first" in note
+
+
+def test_the_viewer_context_note_is_empty_for_an_empty_context():
+    assert agent._viewer_context_note({}, "brian@e.com") == ""

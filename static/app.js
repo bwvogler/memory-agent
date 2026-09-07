@@ -16,6 +16,7 @@ const input = document.getElementById('input');
 const send = document.getElementById('send');
 const hint = document.getElementById('hint');
 const previews = document.getElementById('previews');
+const viewerContextBox = document.getElementById('viewer-context');
 const filepicker = document.getElementById('filepicker');
 const conversationPicker = document.getElementById('conversation-picker');
 const newChatBtn = document.getElementById('new-chat');
@@ -31,6 +32,10 @@ let pendingFiles = [];  // [{name, size, base64}]
 // Mirrors MAX_UPLOAD_BYTES in app/config.py. The server is the authority and
 // answers 413; this only exists so the user learns before a 10 MB upload.
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+// Mirrors _MAX_SELECTION_CHARS in app/main.py. The server is the authority
+// and truncates independently; this just avoids shipping bytes for nothing.
+const MAX_SELECTION_CHARS = 4000;
 
 // The conversation is the unit now, not the turn - see docs/decisions/0017.
 // One EventSource per conversation, opened once and left open: a reload
@@ -548,6 +553,38 @@ function renderMarkdownInto(container, raw) {
 
 let currentPane = null; // {kind: 'kb', path} | {kind: 'upload', url, name}
 
+// The open file is attached automatically (see agent._viewer_context_note) -
+// this only remembers that ONE path was dismissed, so navigating away and
+// back re-offers it rather than a dismissal following you around the wiki.
+let viewerContextDismissedPath = null;
+
+function renderViewerContextChip() {
+  viewerContextBox.innerHTML = '';
+  if (!currentPane || currentPane.kind !== 'kb') {
+    viewerContextBox.hidden = true;
+    return;
+  }
+  const path = currentPane.path;
+  if (path === viewerContextDismissedPath) {
+    viewerContextBox.hidden = true;
+    return;
+  }
+  const chip = el('div', 'file-chip');
+  chip.title = 'Sent with your next message so the agent knows what you’re looking at';
+  chip.appendChild(el('span', 'name', '📄 ' + path));
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '×';
+  btn.title = 'Don’t attach this file';
+  btn.onclick = () => {
+    viewerContextDismissedPath = path;
+    renderViewerContextChip();
+  };
+  chip.appendChild(btn);
+  viewerContextBox.appendChild(chip);
+  viewerContextBox.hidden = false;
+}
+
 function pathToKbUrl(path) {
   return '/kb/' + path.split('/').map(encodeURIComponent).join('/');
 }
@@ -619,6 +656,7 @@ async function openKbFile(path, opts) {
   if (!path) return;
   const seq = ++paneSeq;
   currentPane = { kind: 'kb', path };
+  renderViewerContextChip();
   setActiveTreeLink(path);
   setPaneUrl(path, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -658,6 +696,7 @@ async function openKbDir(path, opts) {
   const dir = (path || '').replace(/^\/+|\/+$/g, '');
   const seq = ++paneSeq;
   currentPane = { kind: 'kbdir', path: dir };
+  renderViewerContextChip();
   setActiveTreeLink(dir);
   setPaneUrl(dir, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -706,6 +745,7 @@ function extOf(name) {
 // event, not the bytes).
 async function openUpload({ url, name }) {
   currentPane = { kind: 'upload', url, name };
+  renderViewerContextChip();
   setActiveTreeLink(null);
   const ext = extOf(name);
   const prose = el('div', 'prose');
@@ -1636,11 +1676,31 @@ if (window.visualViewport) {
 // to the bottom on focus, same as any other reason to autoscroll.
 input.addEventListener('focus', scroll);
 
+// What's currently open, plus a highlighted excerpt if there is one - read at
+// send time rather than tracked continuously. A document selection survives
+// focusing the composer's <textarea> (a form control keeps its own separate
+// selection state, so window.getSelection() over the article is untouched by
+// typing a reply), which is what makes "just check at send time" work without
+// a mouseup/selectionchange listener.
+function buildViewerContext() {
+  const context = {};
+  if (currentPane && currentPane.kind === 'kb' && currentPane.path !== viewerContextDismissedPath) {
+    context.path = currentPane.path;
+  }
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && content.contains(sel.anchorNode)) {
+    const text = sel.toString().trim();
+    if (text) context.selection = text.slice(0, MAX_SELECTION_CHARS);
+  }
+  return Object.keys(context).length ? context : null;
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   const images = pendingImages.slice();
   const files = pendingFiles.slice();
+  const context = buildViewerContext();
   if ((!text && !images.length && !files.length) || !activeConversationId) return;
   input.value = '';
   resizeTextarea();
@@ -1657,6 +1717,7 @@ form.addEventListener('submit', async (e) => {
         message: text,
         images: images.map(i => ({ media_type: i.mediaType, data: i.base64 })),
         files: files.map(f => ({ name: f.name, data: f.base64 })),
+        ...(context ? { context } : {}),
       }),
     });
     if (!res.ok) {
@@ -1668,6 +1729,10 @@ form.addEventListener('submit', async (e) => {
       try { detail = (await res.json()).detail || ''; } catch {}
       throw new Error(detail || 'submit failed: ' + res.status);
     }
+    // A highlight is a one-shot quote for this message, not a standing
+    // attachment - cleared only once the send actually succeeded, so a
+    // failed request leaves it in place for the retry.
+    if (context && context.selection) window.getSelection()?.removeAllRanges();
     // Nothing to render here: the `user_message` event on the stream is what
     // draws the bubble, for this sender exactly the same as for anyone else.
   } catch (err) {
