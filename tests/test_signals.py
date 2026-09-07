@@ -283,3 +283,89 @@ def test_a_denial_with_no_recorded_target_still_says_so(monkeypatch):
 
     _, body = created[0]
     assert "Target: not recorded" in body
+
+
+# --- a tool call that failed without taking the whole turn down -------------
+
+
+def test_a_tool_failure_files_a_weak_evidence_bead(monkeypatch):
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append((title, kwargs.get("priority")))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(
+        state=TurnState.DONE,
+        tool_failures=["download_attachment"],
+        tool_failure_details={"download_attachment": ["quota exceeded"]},
+    )
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert len(created) == 1, created
+    title, priority = created[0]
+    assert title == "Tool call failed: download_attachment: quota exceeded"
+    assert priority == 3, "weak evidence, not a P1 defect report"
+
+
+def test_a_turn_with_no_tool_failures_files_nothing_extra(monkeypatch):
+    created = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        created.append(title)
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+
+    turn = _turn(state=TurnState.DONE)
+    filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+
+    assert filed == []
+    assert created == []
+
+
+def test_identical_tool_failures_dedupe_but_a_different_one_does_not(monkeypatch):
+    """Fingerprinted on (tool, first line of error): a flaky integration
+    failing the same way every turn must not flood the ledger, but a new
+    failure mode for the same tool must not hide behind an old bead either."""
+    open_titles = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        return "kb-1"
+
+    async def list_open(*args, **kwargs):
+        return [{"title": t, "status": "open"} for t in open_titles]
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", list_open)
+
+    turn = _turn(
+        state=TurnState.DONE,
+        tool_failures=["download_attachment"],
+        tool_failure_details={"download_attachment": ["quota exceeded"]},
+    )
+    filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+    assert filed == ["kb-1"]
+    open_titles.append("Tool call failed: download_attachment: quota exceeded")
+
+    # Same tool, same error again: deduped against the still-open bead.
+    turn = _turn(
+        state=TurnState.DONE,
+        tool_failures=["download_attachment"],
+        tool_failure_details={"download_attachment": ["quota exceeded"]},
+    )
+    filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+    assert filed == []
+
+    # Same tool, a genuinely different error: must file, not hide behind it.
+    turn = _turn(
+        state=TurnState.DONE,
+        tool_failures=["download_attachment"],
+        tool_failure_details={"download_attachment": ["token expired"]},
+    )
+    filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
+    assert filed == ["kb-1"]

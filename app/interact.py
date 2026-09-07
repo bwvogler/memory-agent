@@ -490,7 +490,15 @@ def _on_tool_result(turn: Turn, data: Mapping[str, Any]) -> None:
 
 def _on_tool_failure(turn: Turn, data: Mapping[str, Any]) -> None:
     name = str(data.get("tool_name") or "")
-    turn.tool_failures.append(name)
+    error = _clip(str(data.get("error") or ""))
+    # An interrupted call (the person hit Stop mid-tool-call) is not a
+    # deployment defect, the same distinction this codebase already draws
+    # between OUTCOME_STOPPED and OUTCOME_ERROR, and between human_denials
+    # and an unexplained permission denial. Still shown as failed in the UI
+    # below - it did fail - just not counted as signals.py evidence.
+    if not data.get("is_interrupt"):
+        turn.tool_failures.append(name)
+        turn.tool_failure_details.setdefault(name, []).append(error)
     turn.append(
         "tool_result",
         _json(
@@ -498,7 +506,7 @@ def _on_tool_failure(turn: Turn, data: Mapping[str, Any]) -> None:
                 "id": data.get("tool_use_id") or "",
                 "name": name,
                 "ok": False,
-                "detail": _clip(str(data.get("error") or "")),
+                "detail": error,
                 "agent": data.get("agent_id") or "",
             }
         ),

@@ -471,9 +471,29 @@ def test_a_failed_tool_call_is_visible():
     )
 
     assert turn.tool_failures == ["Write"]
+    assert turn.tool_failure_details == {"Write": ["no such directory"]}
     payload = json.loads(turn.events[0].data)
     assert payload["ok"] is False
     assert payload["detail"] == "no such directory"
+
+
+def test_an_interrupted_tool_call_is_shown_but_not_signalled():
+    """A person hitting Stop mid-call is not a deployment defect - same
+    distinction as OUTCOME_STOPPED vs OUTCOME_ERROR in app/signals.py."""
+    turn = _turn()
+    _run_hook(
+        interact.tool_failure_for(turn),
+        {
+            "tool_name": "Write",
+            "tool_use_id": "tu1",
+            "error": "interrupted",
+            "is_interrupt": True,
+        },
+    )
+
+    assert turn.tool_failures == []
+    assert turn.tool_failure_details == {}
+    assert json.loads(turn.events[0].data)["ok"] is False
 
 
 def test_a_successful_tool_call_is_reported_as_such():
