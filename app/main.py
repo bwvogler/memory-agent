@@ -251,6 +251,32 @@ def _decode_attachments(files: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
     return decoded
 
 
+_MAX_SELECTION_CHARS = 4000
+
+
+def _resolve_viewer_context(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the browser's `context` field, or drop what doesn't hold up.
+
+    Never raises: the wiki pane's idea of "what's open" can be seconds stale
+    by the time this reaches the server (the file could have been deleted, or
+    a hostile client could send a made-up path), and a message must still
+    send even if its attached context doesn't check out - this degrades to
+    "no file context" rather than a 400.
+    """
+    if not raw:
+        return None
+    out: dict[str, str] = {}
+    path = str(raw.get("path") or "")
+    if path:
+        resolved = kb.resolve_kb_path(path)
+        if resolved is not None and resolved.is_file():
+            out["path"] = path
+    selection = str(raw.get("selection") or "").strip()
+    if selection:
+        out["selection"] = selection[:_MAX_SELECTION_CHARS]
+    return out or None
+
+
 def _stage_attachments(
     user_slug: str, turn_id: str, decoded: list[tuple[str, bytes]]
 ) -> list[Path]:
@@ -421,6 +447,7 @@ async def post_message(
     if not prompt and not images and not files:
         raise HTTPException(400, "message is required")
     decoded = _decode_attachments(files)
+    viewer_context = _resolve_viewer_context(body.get("context"))
 
     conv = await conversations.get_or_load(conversation_id)
     running = registry.running()
@@ -451,7 +478,9 @@ async def post_message(
             turn_id=running.id,
             actor=identity.email,
         )
-        running.inbox.put_nowait((prompt, images or None, identity.email))
+        running.inbox.put_nowait(
+            (prompt, images or None, identity.email, viewer_context)
+        )
         return JSONResponse(
             {"turn_id": running.id, "injected": True, "seq": event.seq}, status_code=202
         )
@@ -511,6 +540,7 @@ async def post_message(
             resume=resume,
             images=images or None,
             files=staged or None,
+            viewer_context=viewer_context,
         ),
         name=f"turn-{turn.id}",
     )

@@ -434,6 +434,10 @@ button.send:disabled { opacity: .5; cursor: default; }
 .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
 .img-previews { display: flex; flex-wrap: wrap; gap: 6px; }
 .img-previews:empty { display: none; }
+/* What's about to be attached automatically - a dismissible pointer to the
+   open wiki file, not a pending upload, so it lives outside #previews and
+   survives a send instead of being cleared with the rest of the composer. */
+.viewer-context { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .img-thumb { position: relative; display: inline-block; }
 .img-thumb img {
   height: 64px; max-width: 120px; border-radius: 6px;

@@ -935,8 +935,30 @@ async def _input_stream(turn: Turn, text: str, images: list[dict] | None = None)
         item = await turn.inbox.get()
         if item is None:
             return
-        next_text, next_images, next_actor = item
+        next_text, next_images, next_actor, next_context = item
+        if next_context:
+            note = _viewer_context_note(next_context, next_actor)
+            if note:
+                next_text = f"{note}\n\n{next_text}" if next_text else note
         yield _content_message(next_text, next_images, next_actor)
+
+
+def _viewer_context_note(context: dict[str, str], actor_email: str | None) -> str:
+    """Tell the agent what the user is currently looking at in the wiki viewer.
+
+    A path only for the open file - mirrors _attachment_note, so the agent
+    Reads it itself if it decides it's relevant rather than paying for
+    content on every message. A selection is inlined directly instead: it is
+    an ephemeral excerpt of rendered markdown, not a file the agent could
+    re-fetch with Read.
+    """
+    who = display_name_for(actor_email) if actor_email else "The user"
+    parts = []
+    if path := context.get("path"):
+        parts.append(f"{who} currently has {path} open in the wiki viewer.")
+    if selection := context.get("selection"):
+        parts.append(f'{who} highlighted this excerpt from it:\n"""\n{selection}\n"""')
+    return "\n\n".join(parts)
 
 
 def _attachment_note(files: list[Path], actor_email: str | None = None) -> str:
@@ -1038,6 +1060,7 @@ async def run_turn(
     resume: str | None = None,
     images: list[dict] | None = None,
     files: list[Path] | None = None,
+    viewer_context: dict[str, str] | None = None,
 ) -> None:
     """Run one agent turn to completion, streaming events into the turn buffer.
 
@@ -1058,7 +1081,7 @@ async def run_turn(
     turn that silently becomes the last one this process ever runs.
     """
     try:
-        await _run_turn(turn, prompt, user_slug, resume, images, files)
+        await _run_turn(turn, prompt, user_slug, resume, images, files, viewer_context)
     except Exception as exc:  # surface everything to the client
         # Guarded on `finished` because _run_turn has an inner handler that
         # already reported the agent loop's own failures, and the tail it runs
@@ -1086,6 +1109,7 @@ async def _run_turn(
     resume: str | None,
     images: list[dict] | None,
     files: list[Path] | None,
+    viewer_context: dict[str, str] | None = None,
 ) -> None:
     savepoint = f"turn-{turn.id}"
     if await kb.create_savepoint(savepoint):
@@ -1105,6 +1129,11 @@ async def _run_turn(
         # exactly the archaeology the signal layer exists to avoid.
         note = _attachment_note(files, turn.actor_email)
         prompt = f"{note}\n\n{prompt}" if prompt else note
+
+    if viewer_context:
+        note = _viewer_context_note(viewer_context, turn.actor_email)
+        if note:
+            prompt = f"{note}\n\n{prompt}" if prompt else note
 
     # Kept for the signal layer: a revert files a bead quoting the prompt, and
     # by then run_turn is long gone.
