@@ -152,6 +152,10 @@ class Turn:
     # showed no trace of before.
     subagents: list[dict] = field(default_factory=list)
     tool_failures: list[str] = field(default_factory=list)
+    # Where each failed call went wrong, keyed by tool name - mirrors
+    # denial_details, and for the same reason: a bead needs to say *what*
+    # happened, not just which tool.
+    tool_failure_details: dict[str, list[str]] = field(default_factory=dict)
 
     # Self-evolution (app/evolve.py). `evolved` holds the bounded skill edits
     # this turn was allowed to make - empty for every ordinary turn, and the

@@ -376,6 +376,36 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                 for tool in sorted(unexpected)
             ]
         )
+
+        # A tool call that failed but did not take the whole turn down with
+        # it - previously invisible here entirely, since only whole-turn
+        # ERROR/max_turns/denials were tracked. Fingerprinted on (tool, first
+        # line of error) rather than tool alone, the same trick _error_key
+        # uses below: a blanket per-tool dedupe would hide a genuinely new
+        # failure mode behind an already-open bead for that tool's earlier,
+        # different failure.
+        filed.extend(
+            [
+                await _file_signal(
+                    user_slug,
+                    f"Tool call failed: {tool}: {_first_line(error, 80)}",
+                    f"The agent called `{tool}` and it failed, but the turn "
+                    f"finished normally rather than erroring out as a whole - "
+                    f"which is why this was previously invisible to the "
+                    f"signal ledger.\n\n"
+                    f"Error:\n```\n{_clip(error, 500)}\n```\n\n"
+                    f"Skills that turn used: {_skill_list(turn)}\n\n"
+                    f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}\n\n"
+                    "Weak evidence about any skill: most tool failures are "
+                    "transient infrastructure (an expired token, a flaky "
+                    "API) rather than bad guidance.",
+                    priority=3,
+                    labels=("tool-failure",),
+                )
+                for tool in sorted(set(turn.tool_failures))
+                for error in [(turn.tool_failure_details.get(tool) or [""])[0]]
+            ]
+        )
     except Exception:  # recording must never break a turn
         log.exception("failed to record signals for turn %s", turn.id)
     return [b for b in filed if b]
@@ -473,8 +503,13 @@ async def on_revert(
 
 def _error_key(turn: Turn) -> str:
     """A stable-ish title fragment, so repeats of one error dedupe."""
-    text = (turn.error or "unknown").strip().splitlines()[0]
-    return _clip(text, 80)
+    return _first_line(turn.error, 80)
+
+
+def _first_line(text: str | None, limit: int) -> str:
+    """The first line of `text`, clipped - a stable-ish dedupe fingerprint."""
+    text = (text or "unknown").strip().splitlines()[0]
+    return _clip(text, limit)
 
 
 async def evidence_summary() -> str:
