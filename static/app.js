@@ -367,14 +367,15 @@ async function loadFiles() {
         const children = document.createElement('div');
         children.className = 'dir-children collapsed';
 
-        header.onclick = () => {
+        // The chevron only expands/collapses; opening the directory's view is
+        // the label's job alone, so expanding a section no longer also
+        // navigates the centre pane to it.
+        toggle.onclick = (e) => {
+          e.stopPropagation();
           const collapsed = children.classList.toggle('collapsed');
           toggle.classList.toggle('collapsed', collapsed);
-          // Only render into the centre pane when the click just EXPANDED this
-          // header, not when it just collapsed it - openKbFile() re-expands the
-          // same header via expandAncestors(), which otherwise undid the
-          // collapse on the very click that made it.
-          if (collapsed) return;
+        };
+        label.onclick = () => {
           if (isSkillDir) openKbFile(skillPath);
           else openKbDir(dirPath);
           goToArticleOnMobile();
