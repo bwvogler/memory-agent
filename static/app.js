@@ -552,39 +552,95 @@ function renderMarkdownInto(container, raw) {
 
 // --- the centre pane: KB articles, agent writes, uploads ----------------
 
-let currentPane = null; // {kind: 'kb', path} | {kind: 'upload', url, name}
+// {kind: 'kb', path, filePath} | {kind: 'kbdir', path, filePath} |
+// {kind: 'upload', url, name, filePath}. `filePath` is the real KB file
+// whose content is actually on screen, or null when nothing specific is -
+// for a plain file it's the same as `path`; for a directory showing its own
+// GUIDE.md, `path` is the directory but `filePath` is the guide (see
+// openKbDir). Auto-attach and the file chip key off `filePath`, not `kind`.
+let currentPane = null;
 
 // The open file is attached automatically (see agent._viewer_context_note) -
 // this only remembers that ONE path was dismissed, so navigating away and
 // back re-offers it rather than a dismissal following you around the wiki.
 let viewerContextDismissedPath = null;
 
-function renderViewerContextChip() {
-  viewerContextBox.innerHTML = '';
-  if (!currentPane || currentPane.kind !== 'kb') {
-    viewerContextBox.hidden = true;
-    return;
-  }
-  const path = currentPane.path;
-  if (path === viewerContextDismissedPath) {
-    viewerContextBox.hidden = true;
-    return;
-  }
-  const chip = el('div', 'file-chip');
-  chip.title = 'Sent with your next message so the agent knows what you’re looking at';
-  chip.appendChild(el('span', 'name', '📄 ' + path));
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.textContent = '×';
-  btn.title = 'Don’t attach this file';
-  btn.onclick = () => {
-    viewerContextDismissedPath = path;
-    renderViewerContextChip();
-  };
-  chip.appendChild(btn);
-  viewerContextBox.appendChild(chip);
-  viewerContextBox.hidden = false;
+// What's about to be attached, rendered as two independently-managed chips
+// in the same box - each function touches only its own element so re-
+// rendering one (e.g. on navigation) never wipes out the other.
+let fileChipEl = null;
+let selectionChipEl = null;
+
+function updateViewerContextBoxVisibility() {
+  viewerContextBox.hidden = !viewerContextBox.hasChildNodes();
 }
+
+function renderViewerContextChip() {
+  fileChipEl?.remove();
+  fileChipEl = null;
+  const path = currentPane && currentPane.filePath;
+  if (path && path !== viewerContextDismissedPath) {
+    fileChipEl = el('div', 'file-chip');
+    fileChipEl.title = 'Sent with your next message so the agent knows what you’re looking at';
+    fileChipEl.appendChild(el('span', 'name', '📄 ' + path));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '×';
+    btn.title = 'Don’t attach this file';
+    btn.onclick = () => {
+      viewerContextDismissedPath = path;
+      renderViewerContextChip();
+    };
+    fileChipEl.appendChild(btn);
+    viewerContextBox.appendChild(fileChipEl);
+  }
+  updateViewerContextBoxVisibility();
+}
+
+// A highlight in the article pane, captured the moment it's made (see the
+// selectionchange listener below) rather than read fresh at send time -
+// clicking into the composer's <textarea> collapses the page's own
+// selection, which used to destroy it before Send ever ran.
+let pendingSelection = null;
+const SELECTION_PREVIEW_CHARS = 60;
+
+function renderSelectionChip() {
+  selectionChipEl?.remove();
+  selectionChipEl = null;
+  if (pendingSelection) {
+    const preview = pendingSelection.length > SELECTION_PREVIEW_CHARS
+      ? pendingSelection.slice(0, SELECTION_PREVIEW_CHARS) + '…'
+      : pendingSelection;
+    selectionChipEl = el('div', 'file-chip');
+    selectionChipEl.title = 'Sent with your next message as a quoted excerpt';
+    selectionChipEl.appendChild(el('span', 'name', '🔖 “' + preview + '”'));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '×';
+    btn.title = 'Don’t attach this highlight';
+    btn.onclick = () => {
+      pendingSelection = null;
+      renderSelectionChip();
+    };
+    selectionChipEl.appendChild(btn);
+    viewerContextBox.appendChild(selectionChipEl);
+  }
+  updateViewerContextBoxVisibility();
+}
+
+// Scoped to the article container: a selection made anywhere else (the
+// composer, the tree, past chat messages) is ignored entirely, which is what
+// lets a captured highlight survive a click into the textarea to type a
+// reply - that click never fires this handler in the first place.
+function handleSelectionChange() {
+  const sel = document.getSelection();
+  if (!sel || !content.contains(sel.anchorNode)) return;
+  pendingSelection = sel.isCollapsed
+    ? null // an explicit click-to-deselect inside the article
+    : (sel.toString().trim().slice(0, MAX_SELECTION_CHARS) || null);
+  renderSelectionChip();
+}
+document.addEventListener('selectionchange', handleSelectionChange);
 
 function pathToKbUrl(path) {
   return '/kb/' + path.split('/').map(encodeURIComponent).join('/');
@@ -656,8 +712,10 @@ async function specForDir(dir) {
 async function openKbFile(path, opts) {
   if (!path) return;
   const seq = ++paneSeq;
-  currentPane = { kind: 'kb', path };
+  currentPane = { kind: 'kb', path, filePath: path };
   renderViewerContextChip();
+  pendingSelection = null;
+  renderSelectionChip();
   setActiveTreeLink(path);
   setPaneUrl(path, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -696,8 +754,10 @@ async function openKbFile(path, opts) {
 async function openKbDir(path, opts) {
   const dir = (path || '').replace(/^\/+|\/+$/g, '');
   const seq = ++paneSeq;
-  currentPane = { kind: 'kbdir', path: dir };
+  currentPane = { kind: 'kbdir', path: dir, filePath: null };
   renderViewerContextChip();
+  pendingSelection = null;
+  renderSelectionChip();
   setActiveTreeLink(dir);
   setPaneUrl(dir, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -721,6 +781,12 @@ async function openKbDir(path, opts) {
   if (seq !== paneSeq) return;
 
   specCache.set(dir, { view: data.view, page: data.page });
+  // The guide's own path, from the server - never reconstructed client-side
+  // (root's guide is AGENT_GUIDE.md, not GUIDE.md, and getting that wrong
+  // here is exactly the class of bug this fixes). The guide's content is
+  // genuinely on screen below, so it's what auto-attach should offer.
+  currentPane.filePath = data.guide ? data.guide.path : null;
+  renderViewerContextChip();
 
   content.innerHTML = '';
   if (data.guide && data.guide.content) {
@@ -745,8 +811,10 @@ function extOf(name) {
 // round-trip needed) or the /api/uploads/... route (a reload has only the
 // event, not the bytes).
 async function openUpload({ url, name }) {
-  currentPane = { kind: 'upload', url, name };
+  currentPane = { kind: 'upload', url, name, filePath: null };
   renderViewerContextChip();
+  pendingSelection = null;
+  renderSelectionChip();
   setActiveTreeLink(null);
   const ext = extOf(name);
   const prose = el('div', 'prose');
@@ -1677,22 +1745,18 @@ if (window.visualViewport) {
 // to the bottom on focus, same as any other reason to autoscroll.
 input.addEventListener('focus', scroll);
 
-// What's currently open, plus a highlighted excerpt if there is one - read at
-// send time rather than tracked continuously. A document selection survives
-// focusing the composer's <textarea> (a form control keeps its own separate
-// selection state, so window.getSelection() over the article is untouched by
-// typing a reply), which is what makes "just check at send time" work without
-// a mouseup/selectionchange listener.
+// What's currently open, plus a captured highlight if there is one.
+// `pendingSelection` (see the selectionchange listener above) rather than a
+// live window.getSelection() read: clicking into the composer's <textarea>
+// to type this very message collapses the page's own selection, which used
+// to destroy it before this function ever ran.
 function buildViewerContext() {
   const context = {};
-  if (currentPane && currentPane.kind === 'kb' && currentPane.path !== viewerContextDismissedPath) {
-    context.path = currentPane.path;
+  const path = currentPane && currentPane.filePath;
+  if (path && path !== viewerContextDismissedPath) {
+    context.path = path;
   }
-  const sel = window.getSelection();
-  if (sel && !sel.isCollapsed && content.contains(sel.anchorNode)) {
-    const text = sel.toString().trim();
-    if (text) context.selection = text.slice(0, MAX_SELECTION_CHARS);
-  }
+  if (pendingSelection) context.selection = pendingSelection;
   return Object.keys(context).length ? context : null;
 }
 
@@ -1733,7 +1797,11 @@ form.addEventListener('submit', async (e) => {
     // A highlight is a one-shot quote for this message, not a standing
     // attachment - cleared only once the send actually succeeded, so a
     // failed request leaves it in place for the retry.
-    if (context && context.selection) window.getSelection()?.removeAllRanges();
+    if (context && context.selection) {
+      pendingSelection = null;
+      renderSelectionChip();
+      window.getSelection()?.removeAllRanges();
+    }
     // Nothing to render here: the `user_message` event on the stream is what
     // draws the bubble, for this sender exactly the same as for anyone else.
   } catch (err) {
