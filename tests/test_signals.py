@@ -116,6 +116,9 @@ class _BrokenStore:
     async def turn_totals(self, *args, **kwargs) -> dict:
         raise RuntimeError("session store is down")
 
+    async def no_skill_totals(self, *args, **kwargs) -> dict:
+        raise RuntimeError("session store is down")
+
 
 def test_a_broken_ledger_does_not_swallow_the_signal_beads(monkeypatch):
     """Regression, and the failure mode was the usual one here: silence.
@@ -369,3 +372,73 @@ def test_identical_tool_failures_dedupe_but_a_different_one_does_not(monkeypatch
     )
     filed = asyncio.run(signals.record_turn(turn, "dev_localhost"))
     assert filed == ["kb-1"]
+
+
+# --- the bucket no skill can own --------------------------------------------
+
+
+def _labels_of(monkeypatch, turn) -> tuple[str, ...]:
+    """File one turn's signals and return the labels the bead carried."""
+    seen: list[tuple[str, ...]] = []
+
+    async def fake_create_bead(user_slug, title, **kwargs):
+        seen.append(tuple(kwargs.get("labels") or ()))
+        return "kb-1"
+
+    monkeypatch.setattr(signals.kb, "create_bead", fake_create_bead)
+    monkeypatch.setattr(signals.kb, "list_beads", _empty_list)
+    asyncio.run(signals.record_turn(turn, "dev_localhost"))
+    return seen[0]
+
+
+def test_a_failure_with_no_skill_loaded_is_labelled_as_such(monkeypatch):
+    """The label reflection needs to tell two conclusions apart.
+
+    "No skill change is warranted" and "no skill CAN be at fault, because none
+    was loaded" read identically in a bead body. Tagged at capture time, the
+    second becomes a query rather than a re-derivation from 24 bead bodies -
+    which is what a real reflection turn did, before concluding the pattern was
+    unfixable and dropping it.
+    """
+    turn = _turn(state=TurnState.ERROR, error="boom")
+    assert signals.NO_SKILL_LABEL in _labels_of(monkeypatch, turn)
+
+
+def test_a_failure_with_a_skill_loaded_is_not(monkeypatch):
+    turn = _turn(state=TurnState.ERROR, error="boom", skills={"kb-curator"})
+    assert signals.NO_SKILL_LABEL not in _labels_of(monkeypatch, turn)
+
+
+class _CountingStore(_BrokenStore):
+    """Only the no-skill query answers; everything else is still down."""
+
+    def __init__(self, row: dict) -> None:
+        self._row = row
+
+    async def no_skill_totals(self, *args, **kwargs) -> dict:
+        return self._row
+
+
+def test_no_skill_failures_counts_only_the_bad_outcomes():
+    """A no-skill turn that went fine is not evidence of anything."""
+    signals.attach_store(
+        _CountingStore({"turns": 40, "reverted": 2, "errored": 3, "max_turns": 1})
+    )
+    try:
+        assert asyncio.run(signals.no_skill_failures()) == 6
+    finally:
+        signals.attach_store(None)
+
+
+def test_no_skill_failures_is_zero_when_the_ledger_is_unreachable():
+    """A broken store must relax the reflection guard, never wedge it.
+
+    The count gates a Stop hook. If an unreachable ledger answered anything but
+    zero, every reflection turn would be blocked behind a bead it has no
+    evidence to write.
+    """
+    signals.attach_store(_BrokenStore())
+    try:
+        assert asyncio.run(signals.no_skill_failures()) == 0
+    finally:
+        signals.attach_store(None)

@@ -162,6 +162,12 @@ class Turn:
     # thing a later Revert consults to mark a proposal rejected.
     reflection: bool = False
     evolved: list = field(default_factory=list)
+    # Set when the evolution guard filed a `guide-gap` bead on this turn's
+    # behalf - a finding that is real but not skill-shaped. The Stop guard
+    # reads it so a turn that already reported one is not asked to report it
+    # again: the filing happened in a subprocess, not as a tool call, so the
+    # transcript alone cannot show it.
+    guide_gap_filed: bool = False
     # Tools OUR OWN hooks refused, as opposed to ones the permission system
     # refused. Without the distinction a guard doing its job files a P1 bead
     # reporting itself as a deployment defect.

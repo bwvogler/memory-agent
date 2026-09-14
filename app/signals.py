@@ -44,6 +44,11 @@ log = logging.getLogger(__name__)
 
 SKILL_FILE = "SKILL.md"
 SIGNAL_LABEL = "signal"
+# A turn with no skill recorded cannot be fixed by editing a skill - the fix,
+# if any, belongs in AGENT_GUIDE.md or the system prompt itself. Tagged at
+# capture time so this is queryable data rather than something reflection has
+# to re-derive by reading every bead body each time it runs.
+NO_SKILL_LABEL = "no-skill-context"
 
 # Signal bead bodies quote the prompt and the reverted diff. Both are unbounded
 # in principle and a bead description is read by an agent with a token budget.
@@ -88,6 +93,8 @@ class TurnOutcomeStore(Protocol):
     async def skill_signal_summary(self) -> list[dict]: ...
 
     async def turn_totals(self) -> dict: ...
+
+    async def no_skill_totals(self) -> dict: ...
 
 
 _store: TurnOutcomeStore | None = None
@@ -233,6 +240,7 @@ async def _file_signal(
     priority: int,
     labels: tuple[str, ...],
     *,
+    turn: Turn,
     dedupe: bool = True,
 ) -> str | None:
     if dedupe and await _already_open(user_slug, title):
@@ -248,7 +256,7 @@ async def _file_signal(
         title,
         description=body + footer,
         priority=priority,
-        labels=(SIGNAL_LABEL, *labels),
+        labels=(SIGNAL_LABEL, *labels, *((NO_SKILL_LABEL,) if not turn.skills else ())),
         status="deferred",
     )
 
@@ -302,6 +310,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     "or model failures, not bad guidance.",
                     priority=3,
                     labels=("error",),
+                    turn=turn,
                 )
             )
 
@@ -317,6 +326,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     f"Prompt:\n> {_clip(turn.prompt, MAX_PROMPT_CHARS)}",
                     priority=3,
                     labels=("max-turns",),
+                    turn=turn,
                 )
             )
 
@@ -339,6 +349,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     "not want it using is the thing to change.",
                     priority=3,
                     labels=("permission", "human-denied"),
+                    turn=turn,
                     dedupe=False,
                 )
                 for tool in sorted(set(turn.human_denials))
@@ -372,6 +383,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     f"Skills that turn used: {_skill_list(turn)}",
                     priority=1,
                     labels=("permission",),
+                    turn=turn,
                 )
                 for tool in sorted(unexpected)
             ]
@@ -401,6 +413,7 @@ async def record_turn(turn: Turn, user_slug: str) -> list[str]:
                     "API) rather than bad guidance.",
                     priority=3,
                     labels=("tool-failure",),
+                    turn=turn,
                 )
                 for tool in sorted(set(turn.tool_failures))
                 for error in [(turn.tool_failure_details.get(tool) or [""])[0]]
@@ -442,6 +455,7 @@ async def note_rejected_proposals(turn: Turn, user_slug: str) -> None:
         "and every cycle looks locally reasonable.",
         priority=1,
         labels=("evolution-rejected",),
+        turn=turn,
         dedupe=False,
     )
     log.info(
@@ -494,6 +508,7 @@ async def on_revert(
             body,
             priority=1,
             labels=("revert",),
+            turn=turn,
             dedupe=False,
         )
     except Exception:  # a failed recording must not fail the revert
@@ -525,6 +540,7 @@ async def evidence_summary() -> str:
     try:
         totals = await _store.turn_totals()
         rows = await _store.skill_signal_summary()
+        no_skill = await _store.no_skill_totals()
     except Exception:
         log.exception("could not summarise signal evidence")
         return ""
@@ -540,4 +556,33 @@ async def evidence_summary() -> str:
         f"reverted {row.get('reverted')}, errored {row.get('errored')}"
         for row in rows
     )
+    # Named separately because it appears in none of the per-skill rows above:
+    # a turn that read no skill joins to nothing there, so without this line a
+    # failure mode that only ever happens with no skill loaded reads as "no
+    # evidence about any skill" rather than as what it is.
+    lines.append(
+        f"  (no skill read): {no_skill.get('turns', 0)} turn(s), "
+        f"reverted {no_skill.get('reverted', 0)}, "
+        f"errored {no_skill.get('errored', 0)}, "
+        f"max_turns {no_skill.get('max_turns', 0)}"
+    )
     return "\n".join(lines)
+
+
+async def no_skill_failures() -> int:
+    """How many recorded failures happened on turns that read no skill at all.
+
+    This is the count that decides whether a reflection turn owes a `guide-gap`
+    bead: a failure concentrated here cannot be fixed by editing a skill,
+    because no skill was loaded for an edit to intercept. Returns 0 when the
+    ledger is unreachable, so a broken store relaxes the guard rather than
+    wedging every reflection turn behind a bead it has no evidence to write.
+    """
+    if not _store:
+        return 0
+    try:
+        row = await _store.no_skill_totals()
+    except Exception:
+        log.exception("could not count no-skill failures")
+        return 0
+    return sum(int(row.get(key) or 0) for key in ("reverted", "errored", "max_turns"))

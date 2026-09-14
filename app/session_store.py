@@ -268,6 +268,32 @@ class PostgresSessionStore:
             )
         return dict(row) if row else {}
 
+    async def no_skill_totals(self) -> dict:
+        """Turn counts by outcome for turns that read no skill at all.
+
+        The blind spot `skill_signal_summary` has by construction: a turn that
+        used no skill joins to no row there, so a failure mode that only ever
+        happens with no skill loaded is invisible in every per-skill rate while
+        still being real. A large bucket is not itself alarming - most turns
+        legitimately use no skill - but a failure concentrated here cannot be
+        fixed by editing a skill, which is the distinction reflection needs.
+        """
+        async with self._ready().acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT count(*)                                        AS turns,
+                       count(*) FILTER (WHERE o.outcome = 'reverted')  AS reverted,
+                       count(*) FILTER (WHERE o.outcome = 'error')     AS errored,
+                       count(*) FILTER (WHERE o.outcome = 'max_turns') AS max_turns
+                FROM   turn_outcomes o
+                WHERE  NOT EXISTS (
+                           SELECT 1 FROM turn_skill_uses u
+                           WHERE  u.turn_id = o.turn_id
+                       )
+                """
+            )
+        return dict(row) if row else {}
+
     async def sessions_for(self, user_email: str, limit: int = 20) -> list[dict]:
         async with self._ready().acquire() as conn:
             rows = await conn.fetch(
