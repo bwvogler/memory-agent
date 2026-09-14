@@ -320,6 +320,53 @@ agent into inventing the shell workaround in the first place, and both guards
 fail open — a guard that raised would take down the turn it was protecting.
 See `docs/decisions/0007`.
 
+**The same two rules are enforced a second time, for Claude Code on a laptop,
+by sharing the code rather than restating it.** Mounting the wiki with
+`scripts/mount-kb.sh` and editing it from a Claude Code session is the one way
+to get a stronger model and this repo's source onto the same task — the
+deployed agent has neither, by construction. It also leaves every guard above
+behind, since those are Python callables living inside the app's process.
+
+`.claude/settings.json` (the first one in this repo) wires
+`scripts/kb_guard_hook.py` into `PreToolUse` and `Stop`. That file imports
+`guards.kb_hazard`, `guards.GUIDANCE` and `guards.unfiled_deferral` rather than
+reimplementing them, because Claude Code's hook protocol turns out to be the
+SDK's hook protocol — the deny and block payloads `app/guards.py` already
+returns are accepted verbatim, and `app/guards.py` imports under bare stdlib
+`python3` with no `.venv` and no SDK. `unsafe_kb_write` was split to expose its
+hazard scan; which commands are hazardous did not move.
+
+The split was necessary, not tidy. **`guards._mentions_kb` does not fire on a
+laptop at all**: it is a substring test against an absolute `/mnt/kb`, and a
+laptop session writes `mnt/kb/memory/x.md` relatively. The hazard list was
+reachable and the rule was not.
+
+One guard is new, because the container never needed it. A laptop has two ways
+to write into something that looks exactly like the wiki and is not it, both
+reporting success: an unmounted mountpoint, which yields an ordinary local file
+in a gitignored directory, and a read-only mount, where macOS's NFS client
+caches the write and nothing reaches Postgres. The second is `prod-ops` rule 3,
+documented for a long time and enforced nowhere. Both are refused now, and the
+refusal **names the database** — which is why `mount-kb.sh` writes
+`$WORK_DIR/.mount-state.json` rather than leaving the hook to parse `mount`
+output, which answers "writable?" differently per platform and never answers
+"which database?". The first write of a session also opens
+`savepoint:laptop-<session_id>` through `kb.create_savepoint`, so revertability
+comes back rather than being nagged about.
+
+The deferred-work guard is scoped to sessions with a live mount, since this is
+also where the app is developed, and it offers two ledgers: wiki content to
+prod's volume ledger where the household agent can act on it, app work to this
+repo's committed `.beads/`.
+
+What stays lost is stated rather than patched: no signal bead, no conversation
+event, no `AGENT_GUIDE.md` in the prompt, no Revert button. The `kb-direct`
+skill's job is to make the agent *say* so, because the failure to design
+against is the household assuming the deployed agent made a change it has no
+record of. None of this reaches production — `setting_sources=[]` is exactly
+what makes file-based settings dead there (bead `img-9g8`). See
+`docs/decisions/0019`.
+
 **The human is a tool the agent can call.** "Headless: nobody is present to
 answer a permission prompt" was true of the subprocess and false of the product —
 there is a person holding an SSE stream open. `app/interact.py` gives the agent
