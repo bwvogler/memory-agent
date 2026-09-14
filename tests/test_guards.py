@@ -82,6 +82,40 @@ def test_bd_commands_are_untouched():
     assert not denied("bd ready --json")
 
 
+# --- kb_hazard: the same list, without the mount test ----------------------
+#
+# Split out for scripts/kb_guard_hook.py, which enforces this rule for Claude
+# Code sessions on a laptop and has to decide "is this the mount" differently.
+# These pin that the split changed nothing about WHICH commands are hazardous.
+
+
+def test_kb_hazard_finds_the_same_hazards_without_a_path():
+    """The hazard list must not depend on the command naming the mount."""
+    assert guards.kb_hazard("echo hi >> anywhere.md")
+    assert guards.kb_hazard("sed -i s/a/b/ anywhere.md")
+    assert guards.kb_hazard("echo hi | tee -a anywhere.md")
+
+
+def test_kb_hazard_still_allows_a_truncating_write():
+    assert guards.kb_hazard("echo hi > anywhere.md") is None
+    assert guards.kb_hazard("cat a.md b.md > c.md") is None
+
+
+def test_kb_hazard_tolerates_an_empty_command():
+    assert guards.kb_hazard("") is None
+
+
+def test_unsafe_kb_write_still_requires_the_mount():
+    """The deployed guard's scope is unchanged: scratch stays unrestricted.
+
+    kb_hazard is deliberately broader than unsafe_kb_write. If the two ever
+    collapsed into each other, every `>>` in the agent's scratch directory
+    would start being refused.
+    """
+    assert guards.kb_hazard("echo hi >> /work/dev_localhost/draft.md")
+    assert not denied("echo hi >> /work/dev_localhost/draft.md")
+
+
 # --- the hook wrapper ------------------------------------------------------
 
 

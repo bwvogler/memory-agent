@@ -85,7 +85,7 @@ _HAZARDS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-_GUIDANCE = (
+GUIDANCE = (
     "The knowledge base does not read a file before writing it: opening one "
     "gives a zero-filled buffer, and on close that buffer becomes the entire "
     "file. Bytes you do not write are lost - zeroed before your write, "
@@ -110,17 +110,36 @@ def _mentions_kb(command: str) -> bool:
     return config.kb_mount in command
 
 
-def unsafe_kb_write(command: str) -> str | None:
-    """Return why this command endangers the KB, or None if it is fine.
+def kb_hazard(command: str) -> str | None:
+    """Return why this command would corrupt a file, ignoring where it points.
 
-    Pure and string-only, so the hazard list can be tested without an agent.
+    Split out of `unsafe_kb_write` so a caller that has its own notion of
+    "is this the mount" can still share the hazard list. `scripts/kb_guard_hook.py`
+    is that caller: it enforces the same rule for Claude Code sessions on a
+    laptop, where the mount is named by a relative `mnt/kb` as often as by an
+    absolute path, and `_mentions_kb`'s substring test against
+    `config.kb_mount` misses the relative form entirely.
+
+    Sharing one function is the point. A second copy of this list is a second
+    thing to remember to update, and the failure mode of forgetting is silent:
+    a hazard the deployed agent is refused and a laptop session is allowed.
     """
-    if not command or not _mentions_kb(command):
+    if not command:
         return None
     for pattern, reason in _HAZARDS:
         if pattern.search(command):
             return reason
     return None
+
+
+def unsafe_kb_write(command: str) -> str | None:
+    """Return why this command endangers the KB, or None if it is fine.
+
+    Pure and string-only, so the hazard list can be tested without an agent.
+    """
+    if not _mentions_kb(command):
+        return None
+    return kb_hazard(command)
 
 
 def kb_write_guard_for(turn: Any = None) -> Any:
@@ -171,7 +190,7 @@ async def _pre_tool_use(
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": (f"Refused: {reason}.\n\n{_GUIDANCE}"),
+                "permissionDecisionReason": (f"Refused: {reason}.\n\n{GUIDANCE}"),
             }
         }
     except Exception:  # a broken guard must not break the turn

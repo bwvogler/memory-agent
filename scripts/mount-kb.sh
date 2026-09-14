@@ -77,6 +77,13 @@ check_dev_port() {
       bash scripts/mount-kb.sh --dev"
 }
 
+# Written on a successful mount, removed by --kill. scripts/kb_guard_hook.py
+# reads it to answer three questions it cannot answer from the filesystem: which
+# database is behind this mountpoint, whether the mount is writable, and where
+# the savepoint repo lives. Parsing `mount` output would answer the second one
+# only, differently on macOS and Linux, and would never answer the first.
+MOUNT_STATE_NAME=".mount-state.json"
+
 MODE=""
 WRITABLE=0
 for arg in "$@"; do
@@ -128,6 +135,15 @@ if [[ "${1:-}" == "--kill" ]]; then
     log "  each one holds a database connection. Stop it with: tigerfs stop <pid>"
     exit 1
   fi
+  # Both possible state files, for the same reason the unmount loop covers both
+  # mountpoints: --kill is the one command that has to leave nothing behind.
+  # A stale state file is worse than none - scripts/kb_guard_hook.py would read
+  # it, believe a mount is live, and wave through a write to a plain directory.
+  for state in "${WORK_DIR:-$REPO_ROOT/work}/$MOUNT_STATE_NAME" \
+               "$REPO_ROOT/work-dev/$MOUNT_STATE_NAME"; do
+    [[ -f "$state" ]] && { rm -f "$state"; log "removed $state"; }
+  done
+
   log "no tigerfs processes remain for this repo"
   exit 0
 fi
@@ -319,6 +335,23 @@ if [[ ! -d "$GIT_DIR_PATH" ]]; then
   git --git-dir="$GIT_DIR_PATH" --work-tree="$KB_MOUNT/memory" commit -m "init" --allow-empty
   log "git repo ready"
 fi
+
+# Only now, below the readdir probe and the savepoint repo: everything this
+# records has been established, so a reader can trust the whole file or nothing.
+MOUNT_STATE="$WORK_DIR/$MOUNT_STATE_NAME"
+cat > "$MOUNT_STATE" <<JSON
+{
+  "mountpoint": "$KB_MOUNT",
+  "workspace": "$KB_MOUNT/memory",
+  "git_dir": "$GIT_DIR_PATH",
+  "work_dir": "$WORK_DIR",
+  "db_host": "$DB_HOST",
+  "db_kind": "$DB_KIND",
+  "access": "$([[ "$READ_ONLY" -eq 1 ]] && echo "read-only" || echo "writable")",
+  "pid": $MOUNT_PID
+}
+JSON
+log "wrote $MOUNT_STATE"
 
 log "KB is live"
 echo ""

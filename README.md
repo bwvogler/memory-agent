@@ -321,6 +321,63 @@ database written by a newer schema, and this repo now has a `.beads` of its own
 — a newer local bd would upgrade it in place. `scripts/fly.sh doctor` prints
 both versions side by side.
 
+## Curating the wiki with Claude Code
+
+There are two ways to change the production wiki. Calling the deployed app over
+MCP (`mcp__kb-prod__*`, the `run-reflection` skill) runs a real turn with every
+piece of machinery around it, using the deployed model on the API key. Mounting
+the KB and editing it from a Claude Code session instead uses *that* session's
+model and puts this repo's source on the same task — something the deployed
+agent cannot have, since it runs from a read-only image with no repo.
+
+The second way used to leave every guard in `app/guards.py` behind, because
+those are Python callables living inside the app's process. It no longer does:
+`.claude/settings.json` wires `scripts/kb_guard_hook.py` into Claude Code's own
+`PreToolUse` and `Stop` hooks, which *import* the same hazard list and deferral
+detector rather than restating them. See `docs/decisions/0019`.
+
+**1. Mount, in your own terminal** — not through the agent:
+
+```bash
+bash scripts/mount-kb.sh --prod              # read-only; no prompt
+bash scripts/mount-kb.sh --prod --writable   # asks you to type the database host
+```
+
+Two reasons it has to be your terminal rather than a tool call. `--writable`
+refuses without a TTY, deliberately, so an agent cannot talk itself into a
+writable production mount. And the script leaves `tigerfs` holding its output
+pipe, so a foreground mount from anything that waits on that pipe never returns.
+Leave it running; it holds the database connection.
+
+**2. In Claude Code, in this repo:** invoke the `kb-direct` skill, then say what
+you want done. It is `disable-model-invocation: true`, so it only loads when you
+ask for it by name.
+
+**3. When finished:** `bash scripts/mount-kb.sh --kill`.
+
+While a mount is live, four things hold without anyone remembering them: a shell
+append into the mount is refused; a write to an *unmounted* mountpoint is refused
+(it would silently create an ordinary local file that looks just like the wiki);
+a write to a *read-only* mount is refused, naming the database, because that one
+reports success and reaches nothing; and the first write opens
+`savepoint:laptop-<session-id>` over the whole workspace. Ending a turn having
+deferred work without filing a bead is blocked too, and offers both ledgers —
+wiki content to the volume, app work to this repo's `.beads`.
+
+What this route does *not* give you, and what the skill makes the agent say
+rather than leave you to discover: no signal bead, no conversation event, no
+`AGENT_GUIDE.md` in the prompt, and no Revert button in the web UI. Undo is
+local git instead:
+
+```bash
+git --git-dir=work/kb.git --work-tree=mnt/kb/memory log --oneline
+git --git-dir=work/kb.git --work-tree=mnt/kb/memory reset --hard <sha>
+```
+
+For a change that wants the deployed machinery but not the deployed model,
+mount `--prod` read-only, draft with Claude Code, and hand the finished text to
+`mcp__kb-prod__ingest` so the write itself happens inside a real turn.
+
 ## Layout
 
 ```
@@ -334,7 +391,12 @@ app/
   main.py            HTTP surface
 static/index.html    Minimal chat UI, SSE, per-turn revert button
 skills/kb-curator/   Teaches the agent how to tend the knowledge base
-scripts/             Phase 0 de-risking spikes — run these first
+scripts/             Operational tooling: mount-kb.sh, fly.sh, beads-pull.sh,
+                     kb_guard_hook.py (the laptop-side guards), plus the
+                     original Phase 0 de-risking spikes
+.claude/             Claude Code's own config for this repo — skills, and the
+                     settings.json wiring the guard hook. Dead in production:
+                     the app sets setting_sources=[]
 docs/                Architecture, hosting comparison, ADRs
 ```
 
