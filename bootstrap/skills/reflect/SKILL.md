@@ -58,6 +58,35 @@ look locally reasonable. Changing nothing is how that is avoided.
 Ask specifically: *if the skill had said something different, would this turn
 have gone differently?* If you cannot answer yes concretely, the answer is no.
 
+### Check *why* no skill was at fault before you stop
+
+Every signal bead names the skills that turn read, and a bead labelled
+`no-skill-context` is one where that line reads "none recorded". If every
+occurrence of a pattern read no skill, a skill edit is not merely unwarranted —
+it is impossible, because no skill was loaded for one to intercept.
+
+That is a different finding wearing the same sentence, and it is the one nobody
+else in this system can make. It moves the fix somewhere out of your reach:
+
+| where | what it is | who can change it |
+|---|---|---|
+| `AGENT_GUIDE.md` | guidance that should apply on every turn | an ordinary turn, asked in a conversation |
+| the system prompt in `app/agent.py` | guidance that must survive a redeploy | a human, as a code change (label it `image`) |
+| nowhere | some patterns are nobody's guidance to fix | say so and stop |
+
+Unless it is the last row, file it — with the exact wording you would add:
+
+```bash
+bd create --title="Short, specific title" \
+  --description="The pattern, and the exact text you would add, and where." \
+  --type=task --priority=2 --labels guide-gap
+bd update <id> --status deferred
+```
+
+Two commands, because `bd create --status` is not a flag here and passing one
+creates nothing at all. This is the same move as the `image` label an ordinary
+turn uses for something living in the app rather than the wiki.
+
 ## Check what has already been rejected
 
 A bead titled `REJECTED self-edit:` records a change that was made and then

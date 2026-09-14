@@ -760,7 +760,7 @@ def _options(
 
 
 def _reflection_options(
-    user_slug: str, turn: Turn, bd_context: str
+    user_slug: str, turn: Turn, bd_context: str, no_skill_failures: int = 0
 ) -> ClaudeAgentOptions:
     """Options for a reflection turn: a deliberately narrower surface.
 
@@ -822,10 +822,18 @@ def _reflection_options(
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[guards.kb_write_guard_for(turn)]),
-                HookMatcher(hooks=[evolve.write_guard_for(turn)]),
+                HookMatcher(hooks=[evolve.write_guard_for(turn, user_slug)]),
             ],
-            # Deliberately no Stop guard: reflection has no "defer the work"
-            # failure mode, and filing a bead is one of its correct endings.
+            # Not the ordinary deferred-work Stop guard: reflection has no
+            # "defer the work" failure mode, and filing a bead is one of its
+            # correct endings. This is the narrower one - it fires only when the
+            # ledger holds failures from turns that read no skill at all, which
+            # reflection can diagnose and nothing else can. See guards.py.
+            "Stop": [
+                HookMatcher(
+                    hooks=[guards.reflection_stop_guard(turn, no_skill_failures)]
+                )
+            ],
             **_observer_hooks(turn),
         },
         include_partial_messages=True,
@@ -854,10 +862,14 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
     if await kb.ensure_beads(user_slug):
         bd_context = await kb.bd_prime(user_slug)
 
+    # Counted before the turn starts, from the same ledger the prompt is built
+    # from, so the guard and the evidence the agent was shown cannot disagree.
+    no_skill_failures = await signals.no_skill_failures()
+
     try:
         async for message in query(
             prompt=evolve.reflection_prompt(await signals.evidence_summary()),
-            options=_reflection_options(user_slug, turn, bd_context),
+            options=_reflection_options(user_slug, turn, bd_context, no_skill_failures),
         ):
             for kind, data in _render(message):
                 turn.append(kind, data)

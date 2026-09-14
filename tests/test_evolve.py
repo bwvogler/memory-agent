@@ -231,6 +231,7 @@ class _Turn:
     def __init__(self):
         self.evolved = []
         self.guard_denials = []
+        self.guide_gap_filed = False
 
 
 def _run(guard, tool: str, tool_input: dict) -> dict:
@@ -559,3 +560,157 @@ def test_an_unreachable_ledger_does_not_break_reflection(monkeypatch):
 
 async def _none():
     return None
+
+
+# --- the finding that is not skill-shaped -----------------------------------
+#
+# The denial text has always said "file a bead describing it instead". Nothing
+# checked that one was ever filed, and a real reflection turn showed why that
+# matters: it found a pattern no skill could own, said so in its reply, and
+# stopped. The reply is not durable; a bead is.
+
+
+class _Ledger:
+    """A stand-in bd, recording what the guard asked it to do."""
+
+    def __init__(self, existing=None):
+        self.existing = existing or []
+        self.created = []
+        self.notes = []
+        self.priorities = []
+
+    def install(self, monkeypatch):
+        async def list_beads(user_slug, label=None):
+            return [b for b in self.existing if b.get("label") == label]
+
+        async def create_bead(user_slug, title, **kwargs):
+            self.created.append((title, kwargs))
+            return "kb-new"
+
+        async def note_bead(user_slug, bead_id, text):
+            self.notes.append((bead_id, text))
+            return True
+
+        async def set_priority(user_slug, bead_id, priority):
+            self.priorities.append((bead_id, priority))
+            return True
+
+        monkeypatch.setattr(evolve.kb, "list_beads", list_beads)
+        monkeypatch.setattr(evolve.kb, "create_bead", create_bead)
+        monkeypatch.setattr(evolve.kb, "note_bead", note_bead)
+        monkeypatch.setattr(evolve.kb, "set_priority", set_priority)
+        return self
+
+
+def test_reaching_for_the_agent_guide_files_the_finding(monkeypatch, tmp_path):
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    ledger = _Ledger().install(monkeypatch)
+
+    turn = _Turn()
+    guard = evolve.write_guard_for(turn, "dev_localhost")
+    out = _run(
+        guard,
+        "Write",
+        {
+            "file_path": str(tmp_path / "AGENT_GUIDE.md"),
+            "content": "Always use Write for KB files, never a shell command.",
+        },
+    )
+
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert turn.guide_gap_filed is True
+    assert len(ledger.created) == 1
+    title, kwargs = ledger.created[0]
+    assert "AGENT_GUIDE.md" in title
+    assert kwargs["labels"] == (evolve.GUIDE_GAP_LABEL,)
+    # Deferred for the same reason signal beads are: evidence, not a job to
+    # claim off `bd ready`.
+    assert kwargs["status"] == "deferred"
+    # The proposal is the valuable part - it is the wording a human would apply.
+    assert "never a shell command" in kwargs["description"]
+    # And the agent is told not to file a duplicate by hand.
+    assert "already been filed" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_reaching_for_an_image_skill_files_nothing(monkeypatch, tmp_path):
+    """That refusal names the overlay, and the overlay is inside the remit.
+
+    Filing here would be noise about a case with a correct local answer.
+    """
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    ledger = _Ledger().install(monkeypatch)
+
+    turn = _Turn()
+    guard = evolve.write_guard_for(turn, "dev_localhost")
+    out = _run(
+        guard,
+        "Write",
+        {"file_path": "/srv/skills/kb-curator/SKILL.md", "content": SKILL},
+    )
+
+    assert ledger.created == []
+    assert turn.guide_gap_filed is False
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert evolve.OVERLAY_FILE in reason
+    assert "already been filed" not in reason
+
+
+def test_the_same_gap_twice_escalates_rather_than_multiplying(monkeypatch, tmp_path):
+    """One recurring gap is one job that got more urgent, not two jobs."""
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    target = str(tmp_path / "AGENT_GUIDE.md")
+    ledger = _Ledger(
+        [
+            {
+                "id": "kb-old",
+                "title": evolve.guide_gap_title(target),
+                "status": "open",
+                "priority": 3,
+                "label": evolve.GUIDE_GAP_LABEL,
+            }
+        ]
+    ).install(monkeypatch)
+
+    guard = evolve.write_guard_for(_Turn(), "dev_localhost")
+    _run(guard, "Write", {"file_path": target, "content": "again"})
+
+    assert ledger.created == []
+    assert ledger.notes and ledger.notes[0][0] == "kb-old"
+    assert ledger.priorities == [("kb-old", 2)]
+
+
+def test_an_unreachable_ledger_does_not_break_the_refusal(monkeypatch, tmp_path):
+    """ADR 0007: guards fail open. The denial still has to land."""
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+
+    async def bd_is_down(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(evolve.kb, "list_beads", bd_is_down)
+
+    guard = evolve.write_guard_for(_Turn(), "dev_localhost")
+    out = _run(
+        guard, "Write", {"file_path": str(tmp_path / "AGENT_GUIDE.md"), "content": "x"}
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_without_a_user_slug_the_guard_still_refuses(monkeypatch, tmp_path):
+    """The slug is optional so a unit test can build the guard with no ledger."""
+    monkeypatch.setattr(evolve.kb, "workspace_root", lambda: tmp_path)
+    ledger = _Ledger().install(monkeypatch)
+
+    out = _run(
+        evolve.write_guard_for(_Turn()),
+        "Write",
+        {"file_path": str(tmp_path / "AGENT_GUIDE.md"), "content": "x"},
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert ledger.created == []
+
+
+def test_only_non_skill_files_count_as_a_gap():
+    assert evolve.is_guide_gap_target("/mnt/kb/memory/AGENT_GUIDE.md") is True
+    assert evolve.is_guide_gap_target("/mnt/kb/memory/CLAUDE.md") is True
+    assert evolve.is_guide_gap_target("/srv/skills/kb-curator/SKILL.md") is False
+    assert evolve.is_guide_gap_target("/srv/skills/kb-curator/LEARNED.md") is False

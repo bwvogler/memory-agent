@@ -311,3 +311,84 @@ def test_a_half_written_final_line_is_skipped(tmp_path):
         guards.stop_guard({"transcript_path": str(transcript)}, None, None)
     )
     assert out["decision"] == "block"
+
+
+# --- the reflection guard ---------------------------------------------------
+#
+# The failure it exists for was found by a human reading a transcript: a
+# reflection turn reviewed two dozen signal beads, noticed a pattern that only
+# ever happened on turns where no skill was loaded, correctly concluded no
+# skill edit could fix it, and stopped - losing a finding nothing else in the
+# system can make.
+
+
+class _ReflectionTurn:
+    """Just the attribute the guard reads off a real Turn."""
+
+    def __init__(self, *, guide_gap_filed: bool = False) -> None:
+        self.guide_gap_filed = guide_gap_filed
+
+
+def _reflection_stop(tmp_path, rows, *, failures: int, turn=None) -> dict:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        "\n".join(json.dumps(r) for r in rows) or "{}", encoding="utf-8"
+    )
+    guard = guards.reflection_stop_guard(turn or _ReflectionTurn(), failures)
+    return asyncio.run(
+        guard(
+            {"stop_hook_active": False, "transcript_path": str(transcript)}, None, None
+        )
+    )
+
+
+def test_no_evidence_of_skill_less_failures_disarms_the_guard(tmp_path):
+    """The common case in a healthy deployment: it must stay out of the way."""
+    rows = [_user("[reflection]"), _says("No skill change is warranted.")]
+    assert _reflection_stop(tmp_path, rows, failures=0) == {}
+
+
+def test_skill_less_failures_left_unclassified_are_blocked_once(tmp_path):
+    rows = [_user("[reflection]"), _says("No skill change is warranted.")]
+    out = _reflection_stop(tmp_path, rows, failures=6)
+    assert out["decision"] == "block"
+    assert "6 failed turn(s)" in out["reason"]
+    assert "guide-gap" in out["reason"]
+    assert "AGENT_GUIDE.md" in out["reason"]
+    # Same escape hatch as the deferred-work guard: "nowhere" is a real answer,
+    # and a guard with no way past it teaches the model to file junk.
+    assert "nobody's guidance to fix" in out["reason"]
+
+
+def test_filing_one_by_hand_satisfies_the_guard(tmp_path):
+    rows = [
+        _user("[reflection]"),
+        _says("No skill could have intercepted this."),
+        _runs(
+            'bd create --title="Say not to shell out for KB writes" --labels guide-gap'
+        ),
+    ]
+    assert _reflection_stop(tmp_path, rows, failures=6) == {}
+
+
+def test_a_bead_the_evolution_guard_filed_satisfies_it_too(tmp_path):
+    """That filing runs as a subprocess, not a tool call, so the transcript
+    cannot show it. Without this the agent would be asked for a second bead
+    reporting what one already reports."""
+    rows = [_user("[reflection]"), _says("Refused, and already filed.")]
+    turn = _ReflectionTurn(guide_gap_filed=True)
+    assert _reflection_stop(tmp_path, rows, failures=6, turn=turn) == {}
+
+
+def test_the_reflection_guard_blocks_at_most_once():
+    """A Stop hook that fires on its own re-prompt loops until max_turns."""
+    guard = guards.reflection_stop_guard(_ReflectionTurn(), 6)
+    out = asyncio.run(guard({"stop_hook_active": True}, None, None))
+    assert out == {}
+
+
+def test_a_broken_reflection_guard_lets_the_turn_end():
+    """ADR 0007: a guard that raises takes down the turn it was protecting."""
+    guard = guards.reflection_stop_guard(_ReflectionTurn(), 6)
+    out = asyncio.run(guard({"transcript_path": object()}, None, None))
+    assert out == {}

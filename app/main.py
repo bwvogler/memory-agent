@@ -734,10 +734,18 @@ async def signal_summary() -> dict[str, Any]:
     revert whether or not it had anything to do with it.
     """
     if not store:
-        return {"totals": {}, "skills": [], "note": "no session store configured"}
+        return {
+            "totals": {},
+            "skills": [],
+            "no_skill": {},
+            "note": "no session store configured",
+        }
     return {
         "totals": await store.turn_totals(),
         "skills": await store.skill_signal_summary(),
+        # Turns that read no skill at all: invisible in `skills` by
+        # construction, and the bucket where a fix cannot be a skill edit.
+        "no_skill": await store.no_skill_totals(),
     }
 
 

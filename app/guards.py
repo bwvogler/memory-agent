@@ -327,3 +327,103 @@ async def stop_guard(
     except Exception:  # a broken guard must not break the turn
         log.exception("deferred-work guard failed; letting the turn end")
         return {}
+
+
+# --- the reflection guard ---------------------------------------------------
+#
+# A reflection turn has no "defer the work" failure mode, which is why the
+# guard above was deliberately not installed on one. It has a different one,
+# and it took a human reading a transcript to spot it: reflection reviewed two
+# dozen signal beads, found that a recurring pattern happened only on turns
+# where no skill was loaded, correctly concluded that no skill edit could fix
+# it - and stopped there. The finding was true, useful, and reachable by nobody
+# else in the system, and it died with the turn.
+#
+# "No skill change is warranted" and "no skill CAN be at fault, because none
+# was loaded" are different conclusions wearing the same sentence. The second
+# one names a gap in the always-on guidance - AGENT_GUIDE.md, or the system
+# prompt itself - and neither is reachable from a reflection turn.
+#
+# So this fires only when the ledger actually holds failures of that shape, and
+# it blocks at most once, like the guard above: "nowhere" remains a legitimate
+# answer, it just has to be said rather than arrived at silently.
+
+_GUIDE_GAP = re.compile(r"\bbd\s+\w+.*guide-gap", re.IGNORECASE | re.DOTALL)
+
+_CLASSIFY_IT = (
+    "The ledger holds {count} failed turn(s) that read NO skill at all. A skill "
+    "edit cannot reach those: there was no skill loaded for one to intercept. "
+    'That is not the same finding as "no skill change is warranted", and it '
+    "is the one nobody else in this system can make - you are the only thing "
+    "that reads this evidence.\n\n"
+    "Say where the fix belongs, and file it:\n\n"
+    '    bd create --title="Short, specific title" \\\n'
+    '      --description="What the pattern is, and the exact wording you would '
+    'add to AGENT_GUIDE.md or to the system prompt in app/agent.py." \\\n'
+    "      --type=task --priority=2 --labels guide-gap\n"
+    "    bd update <id> --status deferred\n\n"
+    "Two commands: `bd create --status` is not a flag here and passing one "
+    "creates nothing at all.\n\n"
+    "If the honest answer is that this pattern is nobody's guidance to fix, say "
+    "that in one line and stop. You will not be asked twice."
+)
+
+
+def guide_gap_filed(rows: list[dict[str, Any]]) -> bool:
+    """True if this turn ran a `bd` command naming the guide-gap label.
+
+    Pure over parsed transcript rows, like `unfiled_deferral`, so the decision
+    is unit-testable without a live agent.
+    """
+    for row in _this_turn(rows):
+        message = row.get("message") or {}
+        if message.get("role") != "assistant":
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            command = (block.get("input") or {}).get("command") or ""
+            if _GUIDE_GAP.search(command):
+                return True
+    return False
+
+
+def reflection_stop_guard(turn: Any, no_skill_failures: int) -> Any:
+    """Block a reflection turn that ignored the failures no skill could own.
+
+    `no_skill_failures` is counted once, before the turn starts, from the same
+    ledger the prompt is built from - so the guard and the evidence the agent
+    was shown can never disagree. Zero disarms it entirely, which is the common
+    case and keeps this off every reflection in a healthy deployment.
+    """
+
+    async def guard(
+        input_data: Mapping[str, Any],
+        _tool_use_id: str | None,
+        _context: Any,
+    ) -> SyncHookJSONOutput:
+        try:
+            if input_data.get("stop_hook_active") or no_skill_failures <= 0:
+                return {}
+            # The evolution guard already filed one on this turn's behalf. It
+            # did so in a subprocess rather than as a tool call, so the
+            # transcript below cannot see it.
+            if getattr(turn, "guide_gap_filed", False):
+                return {}
+            path = input_data.get("transcript_path")
+            if not path or guide_gap_filed(_transcript_rows(path)):
+                return {}
+
+            log.info(
+                "reflection stop guard: %d no-skill failure(s) went unclassified",
+                no_skill_failures,
+            )
+            return {
+                "decision": "block",
+                "reason": _CLASSIFY_IT.format(count=no_skill_failures),
+            }
+        except Exception:  # a broken guard must not break the turn
+            log.exception("reflection guard failed; letting the turn end")
+            return {}
+
+    return guard

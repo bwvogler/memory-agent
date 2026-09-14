@@ -349,11 +349,17 @@ _WRITE_WHOLE = (
 )
 
 
-def write_guard_for(turn: Any) -> Any:
+def write_guard_for(turn: Any, user_slug: str = "") -> Any:
     """Build the PreToolUse hook enforcing the remit, recording what it allows.
 
     A closure over the turn because the accepted changes have to survive into
     the evolution log and into the immune memory that a later Revert consults.
+
+    `user_slug` is what lets a refusal file a bead rather than only print one:
+    a write aimed outside the skill system is reflection telling us, in the
+    only way it can, that the fix it found is not skill-shaped. Optional so a
+    unit test can build the guard without a ledger; the one production call
+    site passes it.
     """
 
     async def guard(
@@ -374,8 +380,28 @@ def write_guard_for(turn: Any) -> Any:
             if tool != "Write":
                 return {}
 
-            path = mutable_skill_path(tool_input.get("file_path") or "")
+            target = tool_input.get("file_path") or ""
+            path = mutable_skill_path(target)
             if path is None:
+                # Aimed outside the skill system altogether: the finding is
+                # real and unreachable from here, so it is filed rather than
+                # left in a transcript nobody reads. An image skill's own
+                # SKILL.md is excluded - that denial names the overlay, and the
+                # overlay is inside the remit.
+                filed = user_slug and is_guide_gap_target(target)
+                if filed:
+                    await request_guide_gap(
+                        user_slug, target, tool_input.get("content") or ""
+                    )
+                    turn.guide_gap_filed = True
+                elsewhere = (
+                    "A `guide-gap` bead carrying what you were about to write "
+                    "has already been filed for you - do not file a second one "
+                    "by hand. Say what you found and move on."
+                    if filed
+                    else "If the fix is somewhere else entirely, file a bead "
+                    "describing it instead of making the change."
+                )
                 return _deny_write(
                     turn,
                     f"reflection may only write {SKILL_FILE} or {OVERLAY_FILE} "
@@ -386,9 +412,7 @@ def write_guard_for(turn: Any) -> Any:
                     "lessons are not out of reach: append them to "
                     f"{kb.workspace_root()}/skills/<skill>/{OVERLAY_FILE}, "
                     "which the skill reads when it loads. AGENT_GUIDE.md "
-                    "belongs to the human. If the fix is somewhere else "
-                    "entirely, file a bead describing it instead of making the "
-                    "change.",
+                    f"belongs to the human. {elsewhere}",
                 )
 
             try:
@@ -517,13 +541,40 @@ human waiting, and the knowledge base is not what you are here to change.
 2. Decide honestly whether a skill was actually at fault. Most failures are the
    situation, not the guidance: the human changed their mind, the model erred,
    the infrastructure broke. Concluding "no skill change is warranted" is a
-   correct and common outcome. Say so and stop.
+   correct and common outcome.
 
-3. Check what has already been rejected. A bead noted REJECTED PROPOSAL carries
+3. Before you stop there, check *why* no skill was at fault. Every bead names
+   the skills that turn read, and a bead labelled `no-skill-context` is one
+   where that line reads "none recorded". If every occurrence of a pattern read
+   no skill, a skill edit is not merely unwarranted, it is categorically
+   impossible: no skill was loaded for any edit to intercept. That does not end
+   the analysis, it moves the fix somewhere you cannot reach:
+
+   - guidance that should apply on every turn belongs in `AGENT_GUIDE.md`,
+     which an ordinary turn can edit and you cannot;
+   - guidance that has to survive a redeploy belongs in the system prompt in
+     `app/agent.py`, which is code and needs a human;
+   - and some patterns are genuinely nobody's guidance to fix.
+
+   Unless it is the third, file a bead saying which, and the exact wording you
+   would add:
+
+       bd create --title="..." --description="..." --type=task \\
+         --priority=2 --labels guide-gap
+       bd update <id> --status deferred
+
+   Two commands, because `bd create` here has no `--status` flag and passing
+   one creates nothing at all. This is the same move as the `image` label an
+   ordinary turn uses for something living in the app rather than the wiki, and
+   filing one is a successful reflection, not a failed one - a pattern that
+   recurs with no skill loaded is precisely the evidence a human cannot get any
+   other way.
+
+4. Check what has already been rejected. A bead noted REJECTED PROPOSAL carries
    a change that was made and then reverted by the human. Do not propose it
    again; propose something different or nothing.
 
-4. If a skill is genuinely at fault, make exactly one bounded change to it:
+5. If a skill is genuinely at fault, make exactly one bounded change to it:
    rewrite its `description:` frontmatter, or append an entry under a
    `## Learned` heading, or both. Write the whole file with the Write tool.
    You may not change anything else, and attempts will be refused.
@@ -542,8 +593,8 @@ human waiting, and the knowledge base is not what you are here to change.
    revise something already recorded, append an entry saying it supersedes the
    earlier one. A later entry beats an earlier one.
 
-5. Close or note the beads you acted on, so the next reflection does not redo
-   this. File a bead for anything you noticed but could not fix within the
+6. Close or note the beads you acted on, so the next reflection does not redo
+   this. File a bead for anything else you noticed but could not fix within the
    remit; a change too deep to make here is exactly what a human should see.
 
 Change at most one skill. A small, reversible, well-explained edit beats a
@@ -662,6 +713,122 @@ def _consolidation_body(skill: str, path: str) -> str:
         "Priority rises as more entries accumulate, because the cost is paid on "
         f"every turn that loads {skill}."
     )
+
+
+# --- the fix that is not skill-shaped --------------------------------------
+#
+# The remit above answers "may reflection make this change?" with yes or no,
+# and for a long time no was the whole of it: the denial text told the agent to
+# "file a bead describing it instead", and nothing checked that it ever did.
+# That is the same species of gap ADR 0007 records - a rule stated in prose,
+# agreed to, and then not followed - except the failure is silent rather than
+# destructive, so nobody notices for months.
+#
+# A reflection turn concluding "no skill change is warranted" is correct and
+# common. A reflection turn concluding it because every occurrence of a pattern
+# happened with NO skill loaded is a different thing wearing the same words: it
+# means the fix, if there is one, lives in AGENT_GUIDE.md or in the system
+# prompt, and neither is reachable from here. Left unfiled, that finding dies
+# with the turn, and the next reflection re-derives it from the same evidence
+# and stops in the same place.
+#
+# So the bead is filed by this module rather than asked for in the prompt,
+# exactly as `request_consolidation` is - escalating on repeat, so a recurring
+# gap becomes more urgent rather than more numerous.
+
+GUIDE_GAP_LABEL = "guide-gap"
+_MAX_PROPOSAL_CHARS = 1200
+
+
+def guide_gap_title(target: str) -> str:
+    return f"Reflection wanted to change {target}, which is out of its remit"
+
+
+def _guide_gap_body(target: str, proposal: str) -> str:
+    return (
+        f"A reflection turn tried to write `{target}` and was refused: that file "
+        "is outside the evolution remit (a skill's `description:`, or an append "
+        "under `## Learned`, and nothing else - see docs/decisions/0008).\n\n"
+        "The refusal is correct. The *finding* behind it may not be, and it is "
+        "the part that would otherwise be lost: reflection only reaches for a "
+        "file like this when the evidence points somewhere no skill edit can "
+        "go.\n\n"
+        "What it was about to write:\n\n"
+        f"```\n{_clip(proposal, _MAX_PROPOSAL_CHARS) or '(nothing recorded)'}\n```\n\n"
+        "Decide where it belongs, if anywhere:\n\n"
+        "- `AGENT_GUIDE.md` - guidance that should apply on every turn. An "
+        "ordinary turn can edit this; ask for it in a conversation.\n"
+        "- the system prompt in `app/agent.py` - guidance that must survive a "
+        "redeploy. That is a code change: file it with the `image` label.\n"
+        "- nowhere. Close this bead saying so; that is a real answer and "
+        "recording it stops the next reflection re-deriving it.\n\n"
+        "Filed automatically by app/evolve.py, not by the agent's own judgement."
+    )
+
+
+def _clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def is_guide_gap_target(path_str: str) -> bool:
+    """True if a refused write was aimed outside the skill system entirely.
+
+    An image skill's own `SKILL.md` is refused too, but it is not this: that
+    denial names the overlay as the way in, and the way in is inside the remit.
+    Filing a bead there would be noise about a case that has a correct local
+    answer. What earns a bead is reflection reaching for something that is not
+    a skill file at all - `AGENT_GUIDE.md`, `memory/CLAUDE.md`, a wiki page -
+    because that is the shape of "the fix is somewhere else entirely".
+    """
+    try:
+        return Path(path_str).name not in (SKILL_FILE, OVERLAY_FILE)
+    except (OSError, ValueError):
+        return False
+
+
+async def request_guide_gap(user_slug: str, target: str, proposal: str) -> None:
+    """File or escalate the bead for a finding reflection cannot act on.
+
+    Never raises: this runs inside a PreToolUse hook, and a guard that threw
+    would take down the turn it exists to bound (ADR 0007).
+    """
+    try:
+        title = guide_gap_title(target)
+        existing = await kb.list_beads(user_slug, label=GUIDE_GAP_LABEL)
+        if existing is None:
+            log.warning("bd unreachable; not filing a guide-gap bead for %s", target)
+            return
+        open_by_title = {
+            i.get("title"): i for i in existing if i.get("status") != "closed"
+        }
+        if bead := open_by_title.get(title):
+            await kb.note_bead(
+                user_slug,
+                bead["id"],
+                "A later reflection turn reached for this same file again. The "
+                "evidence behind it has not gone away, and reflection still "
+                "cannot act on it.",
+            )
+            current = bead.get("priority")
+            if isinstance(current, int) and current > MOST_URGENT:
+                await kb.set_priority(user_slug, bead["id"], current - 1)
+                log.info("escalated %s to P%d (%s)", bead["id"], current - 1, title)
+            return
+
+        # Deferred for the same reason signal beads are: this is a finding for a
+        # human to judge, not a job for the next session to claim off `bd ready`.
+        bead_id = await kb.create_bead(
+            user_slug,
+            title,
+            description=_guide_gap_body(target, proposal),
+            priority=FIRST_PRIORITY,
+            labels=(GUIDE_GAP_LABEL,),
+            status="deferred",
+        )
+        log.info("filed guide-gap bead %s for %s", bead_id, target)
+    except Exception:  # never break a reflection over bookkeeping
+        log.exception("could not record a guide-gap request")
 
 
 async def request_consolidation(user_slug: str, changes: list[Change]) -> None:

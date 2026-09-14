@@ -201,3 +201,115 @@ instruction the agent cannot follow does not merely fail, it burns turns being
 retried, so the application now injects those numbers into the prompt instead.
 Both were found only by running it against a real model, which is the argument
 for the manual trigger in one paragraph.
+
+## Amendment — a finding outside the remit has to leave the turn
+
+**Status:** accepted, 2026-09-11
+
+The remit answers "may reflection make this change?" and nothing else. When the
+answer is no, the denial text has always said to file a bead instead — and
+nothing ever checked that one was. That is precisely the shape ADR 0007 was
+written about: a rule stated in prose, agreed to, and then not followed. It
+took longer to notice here because the failure is silent rather than
+destructive.
+
+It was found by reading a transcript. A production reflection turn reviewed 24
+signal beads, identified a real recurring pattern — the agent shelling out with
+`cat`/`cp` instead of using `Write` for knowledge-base files — observed
+correctly that no skill had been loaded on any of those turns, and concluded
+that skills therefore could not fix it and no action was warranted. Every step
+is true. The conclusion is still wrong, because the fix was never skill-shaped:
+it belongs in `AGENT_GUIDE.md`, or in the universal system prompt in
+`app/agent.py`, both of which load on every turn regardless of routing and
+neither of which reflection can reach. The finding was correct, unavailable to
+anyone else in the system, and lost when the turn ended.
+
+**"No skill change is warranted" and "no skill *can* be at fault, because none
+was loaded" are different findings wearing the same sentence.** The first is a
+correct and common ending, and the original decision was right to bless it. The
+second names a gap in the always-on guidance and points somewhere specific. The
+prompt could not tell them apart because it never asked reflection to look at
+whether a pattern's turns had read any skill at all.
+
+Three changes, layered so each stands on the last.
+
+**The evidence learns to say which it is.** Skill attribution counts a skill
+only when a turn actually read it, which is what makes the per-skill rates
+meaningful and is not being changed. Its cost is that a turn which read nothing
+joins no row in `skill_signal_summary` and is invisible in every per-skill rate.
+Such signal beads now carry a `no-skill-context` label, applied in
+`signals._file_signal` for every signal type rather than at four call sites, and
+`store.no_skill_totals()` buckets those turns by outcome for both
+`GET /api/signals` and the evidence block injected into the reflection prompt.
+This is the cheap half and would have been worth doing alone: the distinction
+existed in the data and nothing surfaced it.
+
+**The prompt learns to ask.** `REFLECTION_PROMPT` gains a step between
+"decide whether a skill was at fault" and "check what was rejected": if every
+occurrence of a pattern read no skill, say where the fix belongs —
+`AGENT_GUIDE.md`, the system prompt, or nowhere — and file it as a `guide-gap`
+bead with the exact wording you would add. `bootstrap/skills/reflect/SKILL.md`
+mirrors it for the human-triggered path, which reads a different file.
+
+**And the code stops depending on either.** A prompt is advice; this ADR's own
+opening argument is that self-modification is the worst place to rely on one. So
+`guide-gap` beads are filed by the application, in the two shapes the failure
+actually takes:
+
+- `evolve.write_guard_for` files one when a reflection turn aims a `Write`
+  outside the skill tree entirely, carrying the content it was about to write.
+  The proposal is the valuable part — it is the exact wording a human would
+  apply, and it exists only in that refused tool call. Dedupe-by-title and
+  escalate-on-repeat are copied from `request_consolidation`, for the reason
+  recorded there: one recurring gap is one job that got more urgent, not five
+  jobs. An image skill's own `SKILL.md` is excluded, because that refusal names
+  the overlay and the overlay is inside the remit — filing there would be noise
+  about a case with a correct local answer.
+- `guards.reflection_stop_guard` covers the case that actually happened, where
+  reflection never attempted a write at all. A deny-path fix alone would have
+  caught nothing here.
+
+**The Stop hook is the part that needs justifying, because this ADR's
+implementation deliberately installed none.** "Reflection has no 'defer the
+work' failure mode" is still true, and the ordinary deferred-work guard is still
+not installed on a reflection turn. This one is narrower in three ways, each
+chosen to keep it from becoming the same unnoticed-dismissal failure in a new
+place. It arms only when `signals.no_skill_failures()` is non-zero — counted
+before the turn starts, from the same ledger the prompt is built from, so the
+guard and the evidence the agent was shown can never disagree; a healthy
+deployment never sees it. It blocks at most once, via `stop_hook_active`, like
+the guard it is modelled on. And its message says explicitly that "this is
+nobody's guidance to fix" is an acceptable answer — it has to be *said*, not
+arrived at silently. A guard with no way past it teaches a model to file junk to
+get through, which is ADR 0007's "always explain the safe alternative" applied
+to an ending rather than to a tool call.
+
+**`guide-gap` is a reporting escalation, not a new capability.** Nothing about
+the remit moves: reflection still cannot write `AGENT_GUIDE.md`, still cannot
+touch an image skill, still cannot reach `app/`. What it can now do is say, in
+the ledger rather than in a transcript, that the fix belongs somewhere it cannot
+go. The beads are filed `deferred` for the same reason signal beads are — this
+is a finding for a human to judge, not a job for the next session to claim off
+`bd ready`.
+
+**Deliberately not done: closing the loop on perpetual review.** Those 24 signal
+beads had been reviewed by several reflection turns and re-derived from scratch
+each time, and an obvious next step is a review counter that escalates after N
+passes with no result. It is not built, because counting reliably means parsing
+`bd note` history and nothing confirms that is cheap on the pinned `bd` surface.
+It is also plausibly smaller than it looks now: the reason those cycles produced
+nothing was that the only available conclusion was "no skill fix", and that is
+no longer a dead end.
+
+### Note on verification
+
+Both new mechanisms are unit-tested on the pure parts — which target counts as a
+gap, which transcript shapes satisfy the Stop guard, what the escalation does on
+a second occurrence — and the container tier exercises the guards against the
+real stack, where the `bd` calls are real. Two properties are pinned
+specifically because a mutation passing every other test would break them: an
+unreachable ledger must count zero no-skill failures (a broken store has to
+relax the guard, never wedge every reflection turn behind a bead it has no
+evidence to write), and a bead filed by the evolution guard must satisfy the
+Stop guard, since that filing happens in a subprocess and cannot appear in the
+transcript the guard reads.

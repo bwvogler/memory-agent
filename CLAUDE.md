@@ -553,6 +553,27 @@ reaches `bd ready`, and *every* turn is recorded, not just failing ones —
 `kb-curator` loads on every turn, so without the denominator it appears in
 every revert by construction. See the amendment in `docs/decisions/0006`.
 
+**A turn that read no skill is its own bucket, and it used to be invisible.**
+Attribution counts a skill only when the turn actually *read* it — the SDK
+`Skill` tool, or a `Read` of a `SKILL.md` — never when one was merely offered
+in the system prompt. That is deliberate and is what makes the per-skill rates
+mean anything, but it leaves a hole: a turn that read nothing joins no row in
+`skill_signal_summary`, so a failure mode that only ever happens with no skill
+loaded reads as "no evidence about any skill" rather than as what it is. Such a
+bead now carries the `no-skill-context` label (`signals.NO_SKILL_LABEL`,
+applied in `_file_signal` for every signal type), `store.no_skill_totals()`
+buckets those turns by outcome, and both `GET /api/signals` and the reflection
+prompt's own evidence block name the count.
+
+This is not bookkeeping. A reflection turn read two dozen signal beads, found a
+recurring pattern (shelling out with `cat`/`cp` instead of `Write` for KB
+files), correctly observed that no skill was loaded on any occurrence, and
+concluded from that that nothing could be done — dismissing as "base-model
+behaviour" a gap that actually belongs in `AGENT_GUIDE.md` or in the universal
+system prompt. "No skill change is warranted" and "no skill *can* be at fault,
+because none was loaded" are different findings wearing the same sentence, and
+only the second one points anywhere.
+
 The ledger write and the bead filing are separate `try` blocks, and the order
 matters: losing the denominator is survivable, losing the evidence that a turn
 went wrong is not. They shared one block once, with the ledger first, so a
@@ -594,6 +615,36 @@ Stage 3 on real signal data, the ledger held 6 turns and 0 reverts, and the
 user chose to proceed anyway — so a signal-only trigger would have shipped
 unexercised self-modification. See `docs/decisions/0008`, which records the
 override honestly.
+
+**A finding reflection cannot act on is filed by the code, not by the model.**
+The remit's denial text always said "file a bead describing it instead", and
+nothing checked that one ever was — the same shape as every other rule in ADR
+0007 that a prompt stated and a turn then ignored, except this failure is
+silent rather than destructive. Two things close it, because "the write was
+refused" and "reflection never even tried" are different shapes:
+
+- `evolve.write_guard_for` files a **`guide-gap`** bead itself when a
+  reflection turn aims a `Write` outside the skill tree entirely
+  (`AGENT_GUIDE.md`, `memory/CLAUDE.md`, a wiki page), carrying the content it
+  was about to write — the proposal is the valuable part, since it is the exact
+  wording a human would apply. It dedupes by title and escalates priority on
+  repeat, exactly like `request_consolidation`; one recurring gap is one job
+  that got more urgent, not five jobs. An *image skill's* `SKILL.md` is
+  deliberately excluded: that refusal names the overlay, and the overlay is
+  inside the remit, so filing there would be noise about a case with a correct
+  local answer.
+- `guards.reflection_stop_guard` covers the case actually observed, where
+  reflection reasoned "no skill fix" and stopped without ever attempting a
+  write. It arms **only** when `signals.no_skill_failures()` is non-zero,
+  counted before the turn starts from the same ledger the prompt is built from
+  so the guard and the evidence can never disagree, and it blocks at most once
+  — "this is nobody's guidance to fix" stays a legitimate ending, it just has
+  to be said rather than arrived at silently. This is a deliberate, narrow
+  exception to `_reflection_options` otherwise installing no `Stop` hook.
+
+`guide-gap` is a *reporting* escalation and not a new write capability:
+reflection still cannot touch `AGENT_GUIDE.md` or `agent.py`. What it can now
+do is say, durably, that the fix belongs there.
 
 **Memory.** `memory/CLAUDE.md` is short-lived accumulated notes — high-signal
 facts the agent wrote down to survive across conversations. The agent prunes it
