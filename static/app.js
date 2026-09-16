@@ -688,6 +688,24 @@ function renderViewerContextChip() {
 let pendingSelection = null;
 const SELECTION_PREVIEW_CHARS = 60;
 
+// Keeps the text visually marked too, independent of the browser's own
+// Selection: a Range object added here renders via ::highlight() in
+// app.css for as long as we hold onto it, even after document.getSelection()
+// itself has collapsed to nothing (the same click that does that). Feature-
+// detected - a browser without the CSS Custom Highlight API just never gets
+// the visual persistence; the captured text and its chip work exactly the
+// same either way.
+const pendingSelectionHighlight = (typeof Highlight === 'function' && CSS.highlights)
+  ? new Highlight()
+  : null;
+if (pendingSelectionHighlight) CSS.highlights.set('viewer-context-selection', pendingSelectionHighlight);
+
+function clearPendingSelection() {
+  pendingSelection = null;
+  pendingSelectionHighlight?.clear();
+  renderSelectionChip();
+}
+
 function renderSelectionChip() {
   selectionChipEl?.remove();
   selectionChipEl = null;
@@ -702,10 +720,7 @@ function renderSelectionChip() {
     btn.type = 'button';
     btn.textContent = '×';
     btn.title = 'Don’t attach this highlight';
-    btn.onclick = () => {
-      pendingSelection = null;
-      renderSelectionChip();
-    };
+    btn.onclick = clearPendingSelection;
     selectionChipEl.appendChild(btn);
     viewerContextBox.appendChild(selectionChipEl);
   }
@@ -719,9 +734,18 @@ function renderSelectionChip() {
 function handleSelectionChange() {
   const sel = document.getSelection();
   if (!sel || !content.contains(sel.anchorNode)) return;
-  pendingSelection = sel.isCollapsed
-    ? null // an explicit click-to-deselect inside the article
-    : (sel.toString().trim().slice(0, MAX_SELECTION_CHARS) || null);
+  if (sel.isCollapsed) {
+    clearPendingSelection(); // an explicit click-to-deselect inside the article
+    return;
+  }
+  const text = sel.toString().trim().slice(0, MAX_SELECTION_CHARS);
+  if (!text) {
+    clearPendingSelection();
+    return;
+  }
+  pendingSelection = text;
+  pendingSelectionHighlight?.clear();
+  pendingSelectionHighlight?.add(sel.getRangeAt(0).cloneRange());
   renderSelectionChip();
 }
 document.addEventListener('selectionchange', handleSelectionChange);
@@ -798,8 +822,7 @@ async function openKbFile(path, opts) {
   const seq = ++paneSeq;
   currentPane = { kind: 'kb', path, filePath: path };
   renderViewerContextChip();
-  pendingSelection = null;
-  renderSelectionChip();
+  clearPendingSelection();
   setActiveTreeLink(path);
   setPaneUrl(path, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -840,8 +863,7 @@ async function openKbDir(path, opts) {
   const seq = ++paneSeq;
   currentPane = { kind: 'kbdir', path: dir, filePath: null };
   renderViewerContextChip();
-  pendingSelection = null;
-  renderSelectionChip();
+  clearPendingSelection();
   setActiveTreeLink(dir);
   setPaneUrl(dir, opts);
   content.innerHTML = '<div class="prose"><div class="empty">Loading…</div></div>';
@@ -897,8 +919,7 @@ function extOf(name) {
 async function openUpload({ url, name }) {
   currentPane = { kind: 'upload', url, name, filePath: null };
   renderViewerContextChip();
-  pendingSelection = null;
-  renderSelectionChip();
+  clearPendingSelection();
   setActiveTreeLink(null);
   const ext = extOf(name);
   const prose = el('div', 'prose');
@@ -1882,8 +1903,7 @@ form.addEventListener('submit', async (e) => {
     // attachment - cleared only once the send actually succeeded, so a
     // failed request leaves it in place for the retry.
     if (context && context.selection) {
-      pendingSelection = null;
-      renderSelectionChip();
+      clearPendingSelection();
       window.getSelection()?.removeAllRanges();
     }
     // Nothing to render here: the `user_message` event on the stream is what
