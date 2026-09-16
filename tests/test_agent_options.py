@@ -181,3 +181,49 @@ def test_reflection_still_reports_what_it_did(isolated):
 
     assert "PostToolUse" in (opts.hooks or {})
     assert "SubagentStop" in (opts.hooks or {})
+
+
+# --- search (app/search.py), see docs/decisions/0020 -------------------------
+
+
+def test_search_is_allowlisted_without_a_permission_prompt(isolated):
+    """A ranking must never itself raise a prompt, on any turn shape."""
+    opts = agent._options("alice", None)
+
+    assert "mcp__wiki__search" in opts.allowed_tools
+
+
+def test_the_wiki_server_is_always_registered(isolated):
+    """Unlike `ask`, search closes over nothing turn-specific."""
+    opts = agent._options("alice", None)
+
+    servers = opts.mcp_servers
+    assert isinstance(servers, dict), f"expected inline servers, got {type(servers)}"
+    assert "wiki" in servers
+
+
+def test_kb_query_and_kb_lint_can_both_reach_search(isolated):
+    opts = agent._options("alice", None)
+
+    for name in ("kb-query", "kb-lint"):
+        tools = (opts.agents or {})[name].tools or []
+        assert "mcp__wiki__search" in tools
+
+
+def test_a_capability_is_reached_only_because_the_prompt_names_it(isolated):
+    """The direct analogue of _read_skills' measured "zero uses" finding.
+
+    A tool the system prompt does not mention is a tool the agent does not
+    reach for - so the appended prompt must literally name the tool string,
+    not just describe search in the abstract.
+    """
+    opts = agent._options("alice", None)
+
+    assert "mcp__wiki__search" in _appended(opts)
+
+
+def test_reflection_gets_no_search_server_either(isolated):
+    """Pinned deliberately: reflection's mcp_servers stays empty (ADR 0008)."""
+    opts = agent._reflection_options("alice", _turn(interactive=False), "")
+
+    assert not opts.mcp_servers

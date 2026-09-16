@@ -9,7 +9,15 @@ services:
     # 18+, not 16: TigerFS builds its workspace table with uuidv7(), which
     # older Postgres does not have. On 16 the mount comes up and then every
     # workspace creation fails.
-    image: postgres:18
+    #
+    # pgvector/, not plain postgres/: app/search.py's dense half needs the
+    # `vector` extension, which the official postgres image does not ship.
+    # Same base image, same entrypoint, same uuidv7() support. Production is
+    # Neon, which ships pgvector 0.8.0 on every plan. Without this the stack
+    # still WORKS - search degrades to lexical-only and says so at /healthz -
+    # which is the local/prod divergence the container tier's search probe
+    # exists to catch.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: kb
@@ -32,6 +40,10 @@ services:
       DEV_FAKE_EMAIL: dev@localhost
       # The dev Postgres above serves no TLS, which TigerFS otherwise requires.
       KB_INSECURE_NO_SSL: "1"
+      # Unset locally is fine and is the default: lexical-only search, no
+      # outbound call. `:-` not `:?` - an unset key must not refuse to start
+      # the stack, unlike ANTHROPIC_API_KEY above.
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
     ports: ["8080:8080"]
     cap_add: ["SYS_ADMIN"]
     devices: ["/dev/fuse"]

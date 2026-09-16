@@ -111,6 +111,17 @@ class Config:
         default_factory=lambda: _csv("MCP_OAUTH_EMAILS")
     )
 
+    # Embedding provider for app/search.py's dense half (app/embed.py).
+    # UNSET IS A SUPPORTED STATE AND THE DEFAULT: with no key, no wiki text
+    # ever leaves this process, and search runs lexical-only against Postgres
+    # full-text (see app/search.py). Setting it is the capability grant
+    # (ADR 0015's spine): a human puts it in the environment through a
+    # reviewed deploy. Deliberately NOT routed through app/mcp_catalog.py -
+    # that grants the AGENT a tool; this key is used by the app and is never
+    # reachable from a turn. See docs/decisions/0020.
+    voyage_api_key: str = os.environ.get("VOYAGE_API_KEY", "")
+    voyage_model: str = os.environ.get("VOYAGE_MODEL", "voyage-4-lite")
+
     # Attachments arrive base64-encoded inside a JSON body, which has no
     # natural size limit: without a cap, one large file is decoded into memory
     # and written to the volume before anything can object. The per-request cap

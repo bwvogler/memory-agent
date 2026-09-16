@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import time
 
@@ -1165,3 +1166,238 @@ def _mcp_tools(body: str) -> set[str]:
             payload = json.loads(line[len("data: ") :])
             return {t["name"] for t in payload["result"]["tools"]}
     raise AssertionError(f"no data frame in the response: {body[:300]}")
+
+
+# Hybrid search (docs/decisions/0020). One probe, several measurements, same
+# reasoning as VIEW_SPEC_PROBE: round trips against the real container are
+# slow, so one process measures everything and pytest asserts on the pieces.
+#
+# The embedder here is fake - a deterministic, offline, stdlib-only character-
+# trigram bag hashed into 1024 buckets and L2-normalised - monkeypatched onto
+# app.search's own `embed` reference before search.start() runs, the same
+# technique tests/test_agent_options.py uses on agent.config. It gives real
+# cosine STRUCTURE (texts sharing trigrams score closer), which is enough to
+# exercise the dense CTE, the HNSW index and the $1::vector round trip for
+# real - but it is essentially lexical, so it cannot honestly stand in for
+# "dense finds a paraphrase with no shared words". That claim rests on the
+# live tier (tests/test_live_turn.py) and is documented as such in
+# docs/decisions/0020's Note on verification.
+SEARCH_PROBE = """
+import asyncio, hashlib, json, math
+from pathlib import Path
+from app import search, kb
+from app import embed as embed_module
+
+DIM = embed_module.DIMENSIONS
+
+def _fake_vector(text):
+    buckets = [0.0] * DIM
+    t = text.lower()
+    for i in range(len(t) - 2):
+        tri = t[i:i + 3]
+        h = int(hashlib.blake2b(tri.encode('utf-8'), digest_size=8).hexdigest(), 16)
+        buckets[h % DIM] += 1.0
+    norm = math.sqrt(sum(b * b for b in buckets)) or 1.0
+    return [b / norm for b in buckets]
+
+async def _fake_embed_documents(texts):
+    return [_fake_vector(t) for t in texts]
+
+async def _fake_embed_query(text):
+    return _fake_vector(text)
+
+embed_module.enabled = lambda: True
+embed_module.embed_documents = _fake_embed_documents
+embed_module.embed_query = _fake_embed_query
+
+RESULT = {}
+
+# This stack is shared across the whole test file's session, and the seeded
+# bootstrap wiki already has a REAL wiki/recipes/ragu.md that genuinely
+# contains the word "soffritto" - a first cut of this probe used exactly that
+# word as its marker and got a false failure from it. Nonsense tokens below
+# are chosen specifically so they cannot collide with any real content, and
+# path checks compare the FULL expected path rather than a bare filename
+# substring, so a same-named fixture elsewhere in the tree cannot be mistaken
+# for this probe's own files either.
+A_PATH = 'search-probe/zzqx-alpha.md'
+B_PATH = 'search-probe/zzqx-bravo.md'
+C_PATH = 'search-probe/zzqx-charlie.md'
+
+async def main():
+    await search.start()
+    RESULT['state_after_start'] = search._state
+
+    root = Path('/mnt/kb/memory/search-probe')
+    root.mkdir(parents=True, exist_ok=True)
+    # Every literal ends with an explicit trailing newline - CLAUDE.md's own
+    # rule for KB writes ("the store adds a missing trailing newline"), and
+    # skipping it here is exactly what produced a false failure once already:
+    # a write with no trailing newline round-trips through read_text() one
+    # byte shorter than what a byte-identical SECOND write actually stores,
+    # which made a genuinely no-op rewrite look like a real content change.
+    ALPHA_CONTENT = (
+        '---\\ntitle: Alpha\\n---\\n# Method\\n\\n'
+        + ('The zzqxalphamarker word appears only in this probe file. ' * 10)
+        + '\\n'
+    )
+    (root / 'zzqx-alpha.md').write_text(ALPHA_CONTENT)
+    (root / 'zzqx-bravo.md').write_text(
+        '---\\ntitle: Bravo\\n---\\n# Notes\\n\\n'
+        + ('The zzqxbravomarker word appears only in this probe file. ' * 10)
+        + '\\n'
+    )
+    (root / 'zzqx-charlie.md').write_text(
+        '---\\ntitle: Charlie\\n---\\n# Section\\n\\n'
+        + ('The zzqxcharliemarker word appears only in this probe file. ' * 10)
+        + '\\n'
+    )
+
+    first_pass = await search.reindex()
+    RESULT['first_pass_indexed'] = first_pass
+
+    pool = await kb.pool()
+    RESULT['chunk_count_after_first_pass'] = await pool.fetchval(
+        'SELECT count(*) FROM kb_chunks'
+    )
+
+    hits = await search.search('zzqxalphamarker', limit=10)
+    RESULT['old_content_findable_after_first_pass'] = any(
+        h.path == A_PATH for h in hits
+    )
+
+    second_pass = await search.reindex()
+    RESULT['second_pass_indexed'] = second_pass
+
+    # No-op rewrite: identical content, so this file's own text should never
+    # be handed to the embedder again - only the touch path (UPDATE
+    # source_modified_at) should run for it. A raw call COUNT is not a safe
+    # signal here: an earlier test's real turn can leave a detached
+    # search.reindex() task (app/agent.py's spawn(), never awaited) still
+    # landing writes to OTHER files while this probe runs, which would
+    # legitimately need a real embed call of their own. So the check is
+    # scoped to whether THIS file's unique marker appears in anything
+    # embedded during this window, not whether the embedder ran at all.
+    embedded_texts = []
+    async def _recording_embed_documents(texts):
+        embedded_texts.extend(texts)
+        return await _fake_embed_documents(texts)
+    embed_module.embed_documents = _recording_embed_documents
+
+    # The exact same literal, not a read_text() round trip - see the note by
+    # ALPHA_CONTENT above on why a round trip is not safe to assume identical.
+    (root / 'zzqx-alpha.md').write_text(ALPHA_CONTENT)
+    noop_pass = await search.reindex()
+    RESULT['noop_rewrite_indexed'] = noop_pass
+    RESULT['noop_rewrite_reembedded_alpha'] = any(
+        'zzqxalphamarker' in t for t in embedded_texts
+    )
+    embed_module.embed_documents = _fake_embed_documents
+
+    # Staleness by construction: rewrite the content, and BEFORE reindexing,
+    # confirm the old text is no longer returned - the liveness join, not a
+    # background job, is what makes this true.
+    (root / 'zzqx-alpha.md').write_text(
+        '---\\ntitle: Alpha\\n---\\n# Method\\n\\n'
+        + ('An entirely rewritten zzqxalpharewritten passage instead. ' * 10)
+        + '\\n'
+    )
+    hits_before_reindex = await search.search('zzqxalphamarker', limit=10)
+    RESULT['stale_result_invisible_before_reindex'] = not any(
+        h.path == A_PATH for h in hits_before_reindex
+    )
+    await search.reindex()
+    hits_after_reindex = await search.search('zzqxalpharewritten', limit=10)
+    RESULT['new_content_findable_after_reindex'] = any(
+        h.path == A_PATH for h in hits_after_reindex
+    )
+
+    # Deletion: the liveness join drops a deleted file's chunks immediately,
+    # with no reindex pass needed at all.
+    (root / 'zzqx-charlie.md').unlink()
+    hits_after_delete = await search.search('zzqxcharliemarker', limit=10)
+    RESULT['deleted_file_absent_before_reindex'] = not any(
+        h.path == C_PATH for h in hits_after_delete
+    )
+
+    # RRF keeps a one-sided hit: an INNER JOIN regression would make every
+    # returned hit both-sided, since it would only keep rows both CTEs agree
+    # on. dense_raw ranks the WHOLE table regardless of query relevance, so a
+    # broad-enough query should surface at least one dense-only or
+    # lexical-only hit if the FULL OUTER JOIN is really doing its job.
+    fused_hits = await search.search('zzqxbravomarker', limit=10)
+    RESULT['not_every_hit_is_two_sided'] = any(
+        h.dense_rank is None or h.lexical_rank is None for h in fused_hits
+    )
+
+    await pool.close()
+
+asyncio.run(main())
+print(json.dumps(RESULT))
+"""
+
+
+@pytest.fixture(scope="session")
+def search_probe(stack):
+    """Run the hybrid-search probe once and hand back what it measured."""
+    out = app_exec("python", "-c", SEARCH_PROBE).stdout
+    last = [line for line in out.splitlines() if line.startswith("{")][-1]
+    return json.loads(last)
+
+
+def test_pgvector_is_available(search_probe):
+    """Catches docker-compose.yml being reverted to plain postgres/postgres.
+
+    Without pgvector, search.start()'s dense half fails soft and this
+    silently degrades to lexical-only - which is a CORRECT deployment
+    outcome in production (no VOYAGE_API_KEY) but a broken one here, where
+    the probe forces the key on. This is the one test that would catch it.
+    """
+    assert search_probe["state_after_start"] == "hybrid"
+
+
+def test_the_index_is_stale_by_construction(search_probe):
+    """The central claim of docs/decisions/0020: a rewritten file's old
+    content is invisible before the next reindex pass, not merely eventually
+    corrected - because the fusion query's liveness join fails the instant
+    modified_at moves, with no background job in between."""
+    assert search_probe["old_content_findable_after_first_pass"] is True
+    assert search_probe["stale_result_invisible_before_reindex"] is True
+    assert search_probe["new_content_findable_after_reindex"] is True
+
+
+def test_a_deleted_file_leaves_no_result_before_any_reindex(search_probe):
+    assert search_probe["deleted_file_absent_before_reindex"] is True
+
+
+def test_rrf_keeps_a_one_sided_hit(search_probe):
+    """An inner join regression would make every hit two-sided; this fails
+    if that ever happens - see the FULL OUTER JOIN note in app/search.py."""
+    assert search_probe["not_every_hit_is_two_sided"] is True
+
+
+def test_reindex_is_idempotent(search_probe):
+    assert search_probe["second_pass_indexed"] == 0
+
+
+def test_a_noop_rewrite_costs_no_embedding_call(search_probe):
+    """The single biggest cost saver in app/search.py's reindex: a rewrite
+    with byte-identical content only bumps a timestamp, no Voyage call."""
+    assert search_probe["noop_rewrite_indexed"] >= 1
+    assert search_probe["noop_rewrite_reembedded_alpha"] is False
+
+
+def test_healthz_reports_search(stack):
+    """Not folded into `ok`: see the comment beside it in app/main.py."""
+    health = httpx.get(f"{stack}/healthz", timeout=10).json()
+
+    assert "search" in health
+    assert health["search"]["state"] in ("lexical", "hybrid", "unavailable")
+    # docker-compose.yml leaves VOYAGE_API_KEY unset by default, so the
+    # --container tier alone should be lexical-only. But under --live,
+    # tests/conftest.py's `stack` fixture loads the real .env for the WHOLE
+    # session - the same file VOYAGE_API_KEY lives in - so this stack
+    # legitimately goes hybrid too. Assert the plain --container case
+    # specifically, rather than assuming this file's own state.
+    if not os.environ.get("VOYAGE_API_KEY"):
+        assert health["search"]["state"] == "lexical"

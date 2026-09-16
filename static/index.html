@@ -30,6 +30,10 @@
       <span class="nav-title" data-path="AGENT_GUIDE.md" onclick="openAgentGuide()">Files</span>
       <button class="refresh" onclick="loadFiles()" title="Refresh">↻</button>
     </div>
+    <div class="nav-search">
+      <input type="search" id="kb-search-input" placeholder="Search the wiki…" autocomplete="off">
+    </div>
+    <div id="kb-search-results" hidden></div>
     <div id="file-list"><div class="empty">Loading…</div></div>
   </nav>
   <div class="gutter" id="gutter-tree" role="separator" aria-orientation="vertical" aria-label="Resize or collapse the file tree" tabindex="0"></div>
