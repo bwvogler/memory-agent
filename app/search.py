@@ -561,7 +561,15 @@ lexical AS (
 fused AS (
     SELECT COALESCE(d.file_id, x.file_id) AS file_id,
            COALESCE(d.chunk_index, x.chunk_index) AS chunk_index,
-           COALESCE(1.0 / ($4 + d.rank), 0.0) + COALESCE(1.0 / ($4 + x.rank), 0.0)
+           -- ::float8, not a bare 1.0: a bare decimal literal is Postgres's
+           -- `numeric` type, which asyncpg decodes as a Decimal, and Hit.score
+           -- is typed float - Decimal silently survives the dataclass (no
+           -- runtime enforcement) all the way to json.dumps(), which cannot
+           -- serialise it and stringifies it instead, breaking `score > 0`
+           -- comparisons downstream. Cast at the source instead of coercing
+           -- every reader of Hit.score.
+           COALESCE(1.0::float8 / ($4 + d.rank), 0.0)
+               + COALESCE(1.0::float8 / ($4 + x.rank), 0.0)
                AS score,
            d.rank AS dense_rank, x.rank AS lexical_rank
     FROM   dense d
@@ -599,7 +607,7 @@ lexical AS (
     FROM   lex_raw l JOIN live USING (file_id, chunk_index)
 )
 SELECT live.path, live.heading,
-       1.0 / ($3 + x.rank) AS score,
+       1.0::float8 / ($3 + x.rank) AS score,
        NULL::bigint AS dense_rank, x.rank AS lexical_rank,
        ts_headline('english', live.content, q.tsq,
            'MaxFragments=2, MinWords=8, MaxWords=26, '
@@ -653,7 +661,13 @@ async def search(query_text: str, limit: int = 8) -> list[Hit]:
             path=r["path"],
             heading=r["heading"],
             snippet=r["snippet"] or "",
-            score=r["score"],
+            # float(), not r["score"] bare: the SQL casts every score
+            # expression to float8 so asyncpg hands back a native float, not
+            # a Decimal - but Hit.score's `float` annotation is not enforced
+            # at runtime, and an unserialisable Decimal reaching main.py's
+            # JSON response silently stringifies instead of erroring. Belt
+            # and suspenders at the one place every row passes through.
+            score=float(r["score"]),
             dense_rank=r["dense_rank"],
             lexical_rank=r["lexical_rank"],
         )

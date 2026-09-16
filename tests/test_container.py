@@ -1330,6 +1330,16 @@ async def main():
         h.dense_rank is None or h.lexical_rank is None for h in fused_hits
     )
 
+    # score must be a real float, not asyncpg's Decimal for a bare SQL
+    # numeric literal - found for real when json.dumps() silently
+    # stringified a Decimal instead of raising, and `score > 0` broke one
+    # HTTP round trip downstream in app/main.py's /api/kb/search route.
+    RESULT['score_is_a_real_float'] = all(
+        isinstance(h.score, float) for h in fused_hits
+    )
+    json.dumps([h.score for h in fused_hits])  # raises if any score is unserialisable
+    RESULT['score_survives_json_round_trip'] = True
+
     await pool.close()
 
 asyncio.run(main())
@@ -1374,6 +1384,16 @@ def test_rrf_keeps_a_one_sided_hit(search_probe):
     """An inner join regression would make every hit two-sided; this fails
     if that ever happens - see the FULL OUTER JOIN note in app/search.py."""
     assert search_probe["not_every_hit_is_two_sided"] is True
+
+
+def test_score_is_a_real_float_not_a_decimal(search_probe):
+    """A bare `1.0` in the RRF SQL is Postgres `numeric`, which asyncpg
+    decodes as Decimal - and Hit.score's `float` annotation does not enforce
+    anything at runtime. Caught for real when a Decimal reached
+    /api/kb/search's JSON response, where it silently stringified instead of
+    raising, breaking `score > 0` one HTTP round trip downstream."""
+    assert search_probe["score_is_a_real_float"] is True
+    assert search_probe["score_survives_json_round_trip"] is True
 
 
 def test_reindex_is_idempotent(search_probe):

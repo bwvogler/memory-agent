@@ -224,13 +224,34 @@ regardless. This is not a code defect: `embed_documents`/`embed_query`
 degrading to `None` and the caller falling back to lexical-only is the
 correctly-designed response to exactly this condition, observed for real.
 `test_a_real_turn_reaches_for_the_search_tool`, the other live claim in the
-same file, passed - the system prompt genuinely makes the agent reach for
-`mcp__wiki__search`. The paraphrase claim itself stays unmeasured until the
-Voyage account either has a payment method added (the free-token allowance
-is unaffected either way) or the test runs somewhere with a warmer key. The
-reasoning in "Context" and the reference repository's own results are what
-the dense-half claim rests on until then - stated as reasoning, not as
-something this codebase has observed.
+same file, passed on every attempt - the system prompt genuinely makes the
+agent reach for `mcp__wiki__search`.
+
+**The paraphrase claim is now measured, not reasoned.** A payment method
+was added to the Voyage account (the free-token allowance is unaffected -
+Voyage's own message says so); Voyage's docs promise the standard rate
+limit takes effect "after several minutes," which was confirmed for real by
+polling the raw API until its `x-api-warning` header stopped appearing,
+rather than assumed. With the throttle actually lifted,
+`test_dense_search_finds_a_genuine_paraphrase` passed: a real Voyage
+embedding, queried for "kids falling asleep at night" - a phrase sharing no
+literal word or stem with the target page's text or path - ranked that page
+above an unrelated distractor, via the dense candidate list specifically
+(`dense_rank` set), not by lexical coincidence.
+
+Getting a clean pass surfaced one more real bug, caught only because a
+production-shaped client (a browser hitting `GET /api/kb/search`, not this
+ADR's own SQL-level container probe) was in the loop: the RRF formula's bare
+`1.0`/`0.0` literals are Postgres's `numeric` type, which asyncpg decodes as
+`Decimal` - and `Hit.score`'s `float` annotation enforces nothing at
+runtime. A `Decimal` reaching `app/main.py`'s JSON response did not raise;
+it silently stringified, and `target_hit["score"] > 0` broke one HTTP round
+trip downstream with `'>' not supported between instances of 'str' and
+'int'`. Fixed by casting the score expressions to `::float8` at the SQL
+source, plus a defensive `float()` at the one place every row already
+passes through (`search.search()`'s `Hit` construction) - and pinned in the
+container tier, which does not need a live key to catch a Decimal that
+survived past the SQL layer.
 
 ## Amendments
 
