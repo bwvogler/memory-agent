@@ -1,13 +1,13 @@
 :root {
   --bg: #fbfbf9; --panel: #fff; --ink: #1a1a18; --muted: #6b6b66;
   --line: #e4e4df; --accent: #3d5a80; --tool: #7a6a55; --err: #a4342b;
-  --sidebar: #f4f3f0;
+  --sidebar: #f4f3f0; --highlight-bg: #fdf0a3;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #161614; --panel: #1e1e1b; --ink: #ece9e4; --muted: #9a968e;
     --line: #33322e; --accent: #8fb0d4; --tool: #c0a882; --err: #e2857c;
-    --sidebar: #181816;
+    --sidebar: #181816; --highlight-bg: #4a3f1a;
   }
 }
 * { box-sizing: border-box; }
@@ -192,6 +192,15 @@ nav a.active { color: var(--accent); border-left-color: var(--accent); font-weig
 
 main { flex: 1; overflow-y: auto; padding: 32px 48px; min-width: 280px; }
 .prose { max-width: 720px; margin: 0 auto; }
+/* A highlight captured as viewer-context (static/app.js's pendingSelection)
+   stays marked even after the browser's own text selection collapses - e.g.
+   on a click into the composer. Painted via the CSS Custom Highlight API
+   from a Range app.js keeps alive independently of document.getSelection(),
+   so it needs no DOM wrapper element and cannot be broken by re-rendering
+   unrelated parts of the page. Unsupported browsers just skip this (the
+   captured excerpt and its chip are unaffected) - see the feature-detect in
+   app.js. */
+::highlight(viewer-context-selection) { background-color: var(--highlight-bg); }
 .prose h1 { font-size: 1.8em; margin-bottom: .4em; line-height: 1.25; }
 .prose h2 { font-size: 1.35em; margin: 1.6em 0 .4em; }
 .prose h3 { font-size: 1.1em; margin: 1.4em 0 .3em; }
