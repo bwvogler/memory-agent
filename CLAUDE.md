@@ -143,6 +143,36 @@ through `kb.resolve_kb_path`, the same containment posture as
 `resolve_upload_path` - a client-controlled string, checked against
 `workspace_root()` rather than trusted.
 
+**Search ranks; it never lists.** `mcp__wiki__search` (`app/search.py`, an
+in-process SDK MCP tool registered in `agent._options` and allowlisted there)
+fuses a pgvector HNSW nearest-neighbour search with a Postgres `tsvector` GIN
+search by reciprocal rank fusion at k=60. Chunks live in `kb_chunks` in the
+**KB** database, not the session database, because every query joins
+`tigerfs.memory` in the same statement and Postgres has no cross-database
+join. Each row carries `body_sha` and `source_modified_at`, and the fusion
+query joins back to the live row on `modified_at`, so a chunk whose file has
+been written, moved or deleted since indexing is simply not returned. That is
+the whole answer to `bootstrap/skills/views/SKILL.md`'s argument against a
+persisted derived index: there is no progress list to keep honest, and the
+store itself is the check, on every read.
+
+Reindexing is a hash diff (`body || title || headers::text`) run detached
+after every turn, after reflection, and after a revert - never awaited inline,
+since it is a network round trip to a third party and has no place between a
+turn finishing and the client seeing `done`. A no-op rewrite costs no
+embedding call; `backlog.md` is never indexed, since `kb.export_backlog`
+rewrites it after every single turn.
+
+The lexical half is always on and needs no key - full-text search over data
+this app already reads is not a data-flow change. The dense half needs
+`VOYAGE_API_KEY` and, when set, sends page text to Voyage to be embedded;
+`embed.enabled()` is checked *before* an `httpx.AsyncClient` is ever
+constructed, so an unset key means literally no outbound request, not merely
+a failed one. State is reported at `/healthz` as `search.state`
+(`hybrid`/`lexical`/`unavailable`), deliberately not folded into `ok` - an
+unset key is a correct, supported deployment. Glob and Grep are untouched and
+remain the only way to answer "what is there" (ADR 0018, ADR 0020).
+
 **A skill is reached because the system prompt names it, and nothing else.**
 This is the load-bearing fact about skills here, and it was wrong in this file
 for a long time. `ClaudeAgentOptions.skills` is the SDK's switch, but it enables

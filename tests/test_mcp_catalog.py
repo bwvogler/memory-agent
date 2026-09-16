@@ -144,7 +144,7 @@ def test_an_empty_catalog_leaves_the_turn_exactly_as_it_was(isolated, monkeypatc
     turn = Turn(id="t1", user_email="alice@example.com")
     opts = agent._options("alice", None, "", turn)
 
-    assert _server_names(opts) == {"ask"}
+    assert _server_names(opts) == {"ask", "wiki"}
     assert opts.disallowed_tools == ["AskUserQuestion"]
 
 
@@ -305,7 +305,7 @@ def test_pre_approved_tools_reach_allowed_tools_fully_qualified(isolated, monkey
     opts = agent._options("alice", None, "", Turn(id="t1", user_email="a@e.com"))
 
     assert "mcp__calendar__list_events" in opts.allowed_tools
-    assert _server_names(opts) == {"ask", "calendar"}
+    assert _server_names(opts) == {"ask", "wiki", "calendar"}
 
 
 def test_a_tool_that_is_not_pre_approved_must_fall_through_to_the_human(
@@ -384,7 +384,7 @@ def test_a_tool_is_denied_even_when_its_server_is_dark(isolated, monkeypatch):
     opts = agent._options("alice", None, "", Turn(id="t1", user_email="a@e.com"))
 
     assert "mcp__post__send" in opts.disallowed_tools
-    assert _server_names(opts) == {"ask"}
+    assert _server_names(opts) == {"ask", "wiki"}
 
 
 def test_a_tool_cannot_be_both_pre_approved_and_denied():

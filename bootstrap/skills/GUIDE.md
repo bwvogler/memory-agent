@@ -34,10 +34,11 @@ at the step that reads it, and keep every reference one hop from `SKILL.md` —
 a file reached through a second hop tends to be read only in part. Give a
 reference of any length a `## Contents` list.
 
-**A skill here cannot ship a script.** Only `bd` is pre-approved, so anything
-else a skill runs stops to ask a human for permission — every time, and a turn
-with nobody watching is refused rather than asked. Write checks the skill can
-perform by reading and grepping instead.
+**A skill here cannot ship a script.** Only `bd` and `mcp__wiki__search` are
+pre-approved, so anything else a skill runs stops to ask a human for
+permission — every time, and a turn with nobody watching is refused rather
+than asked. Write checks the skill can perform by reading, grepping and
+searching instead.
 
 Skills that ship with the image (`ingest`, `lint`, `reflect`, `views`, and
 `kb-curator`, which is the one loaded on every turn) can carry a `LEARNED.md`

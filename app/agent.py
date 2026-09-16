@@ -68,7 +68,7 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
-from . import evolve, guards, interact, kb, mcp_catalog, signals
+from . import evolve, guards, interact, kb, mcp_catalog, search, signals
 from .auth import display_name_for
 from .config import config
 from .conversations import conversations
@@ -462,6 +462,32 @@ you are actively completing.
 """
 
 
+# The mechanically necessary half of search.py's tool: `agent._read_skills`'s
+# own docstring records the measured fact that a capability is reached ONLY
+# because the system prompt names it - a real turn with the tool available
+# but unmentioned recorded zero uses. Unconditional rather than gated on
+# `search.status()`, unlike mcp_catalog.summaries(): the tool is ALWAYS
+# registered (it is in-process, not a stdio server needing a secret to
+# start), and at call time it reports its own "unavailable, use Glob/Grep"
+# text when there is nothing behind it - so mentioning it costs nothing even
+# in a deployment where it currently does less.
+_SEARCHING = """\
+--- Finding what the wiki already says ---
+
+`mcp__wiki__search` ranks passages from across the whole wiki by meaning and
+by wording at once. Use it before you write anything: the most expensive
+failure in an agent-maintained wiki is not a wrong fact, it is a second page
+about something the wiki already covers.
+
+It returns a RANKING, not a listing. Anything it did not return still exists.
+When you need to know what is actually there - every page in a directory,
+every file matching a pattern - use Glob and Grep, which see everything and
+see it as of this instant. A page written moments ago may not be ranked yet.
+
+Search, then Read the paths it names. Never answer from a snippet.
+"""
+
+
 _ASKING = """\
 --- Reaching the human ---
 
@@ -524,6 +550,10 @@ def _named_agents() -> dict[str, AgentDefinition]:
             ),
             prompt=(
                 f"You are a read-only researcher for the wiki at {workspace}.\n\n"
+                "Start with `mcp__wiki__search` to find which pages are worth "
+                "reading, then Read them in full - never answer from a snippet. "
+                "Search ranks; it does not list, so when you need certainty "
+                "about what exists in a directory, use Glob instead.\n\n"
                 "Find what the wiki actually says about the question you were "
                 "given. Read the relevant pages, follow links between them, and "
                 "report what you found with the paths of the pages you used.\n\n"
@@ -533,7 +563,7 @@ def _named_agents() -> dict[str, AgentDefinition]:
                 "unless you separate them. And do not propose edits: you cannot "
                 "make them, and the turn that called you can."
             ),
-            tools=["Read", "Glob", "Grep"],
+            tools=["Read", "Glob", "Grep", "mcp__wiki__search"],
             model="inherit",
         ),
         "kb-lint": AgentDefinition(
@@ -547,9 +577,12 @@ def _named_agents() -> dict[str, AgentDefinition]:
                 "That skill is the specification; this prompt does not restate "
                 "it. Its own instruction stands: file findings as beads rather "
                 "than reporting them back as prose, and dedupe against the "
-                "ledger before filing. Report a short summary of what you filed."
+                "ledger before filing. Use `mcp__wiki__search` to find near-"
+                "duplicate and contradictory passages across the whole wiki - "
+                "that is semantic work Grep structurally cannot do. Report a "
+                "short summary of what you filed."
             ),
-            tools=["Read", "Glob", "Grep", "Bash"],
+            tools=["Read", "Glob", "Grep", "Bash", "mcp__wiki__search"],
             model="inherit",
         ),
     }
@@ -607,6 +640,7 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
         "the exact path you used in your tool call, no leading slash and no "
         "`/kb/` prefix. That opens it directly in the wiki viewer.",
     ]
+    parts.append(_SEARCHING)
     parts.append(_ASKING)
     if skills:
         parts.append(skills)
@@ -699,6 +733,11 @@ def _options(
         allowed_tools=[
             "Bash(bd:*)",
             "mcp__ask__ask_user",
+            # A ranking, never a write - see app/search.py. Allowlisted for
+            # the same reason as the two entries above it: it must never
+            # itself raise a permission prompt, including on a non-
+            # interactive /mcp turn where nobody is there to answer one.
+            "mcp__wiki__search",
             "TodoWrite",
             "Task",
             *mcp_catalog.auto_approved_tools(),
@@ -717,6 +756,11 @@ def _options(
         # This dict is the ONLY live way to add an MCP server in this
         # deployment - see the two lines below and app/mcp_catalog.py.
         mcp_servers={
+            # Registered on every turn, interactive or not - unlike "ask",
+            # it closes over nothing turn-specific, and unlike the catalog it
+            # needs no secret to start: an unset VOYAGE_API_KEY just means
+            # the tool reports lexical-only or unavailable at call time.
+            "wiki": search.search_server(),
             **({"ask": interact.ask_server_for(turn)} if turn else {}),
             **mcp_catalog.resolved(),
         },
@@ -877,6 +921,10 @@ async def run_reflection(turn: Turn, user_slug: str, trigger: str) -> None:
         await evolve.log_changes(turn.evolved, savepoint, trigger)
         await evolve.request_consolidation(user_slug, evolve.merge(turn.evolved))
         await kb.export_backlog(user_slug)
+        # Detached, not awaited - a network round trip to a third party has
+        # no place between "the turn finished" and the client seeing `done`.
+        # Idempotent by content hash, so a dropped pass costs nothing.
+        spawn(search.reindex(), name="reindex")
         turn.finish(TurnState.DONE)
         log.info("reflection %s finished with %d change(s)", turn.id, len(turn.evolved))
     except Exception as exc:
@@ -1186,6 +1234,7 @@ async def _run_turn(
                 ):
                     turn.inbox.put_nowait(None)
         await kb.export_backlog(user_slug)
+        spawn(search.reindex(), name="reindex")
         turn.finish(TurnState.DONE)
     except asyncio.CancelledError:
         # POST /api/turns/{id}/stop. Finished as DONE, not ERROR - the person

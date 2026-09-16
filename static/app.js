@@ -21,6 +21,8 @@ const filepicker = document.getElementById('filepicker');
 const conversationPicker = document.getElementById('conversation-picker');
 const newChatBtn = document.getElementById('new-chat');
 const stopBtn = document.getElementById('stop');
+const kbSearchInput = document.getElementById('kb-search-input');
+const kbSearchResults = document.getElementById('kb-search-results');
 const navPane = document.getElementById('nav');
 const mainPane = document.querySelector('main');
 const chatPane = document.getElementById('chat');
@@ -443,6 +445,88 @@ function setActiveTreeLink(path) {
 
 function openAgentGuide() {
   if (knownKbFiles.has('AGENT_GUIDE.md')) openKbFile('AGENT_GUIDE.md');
+}
+
+// --- wiki search (app/search.py) -----------------------------------------
+//
+// Ranks; it never lists - the same tool the agent reaches for as
+// mcp__wiki__search, over GET /api/kb/search. A blank box shows the normal
+// file tree; typing swaps #file-list for a ranked hit list, and clearing
+// the box swaps back. Snippets carry `**bold**` markers from Postgres'
+// ts_headline, turned into <mark> via DOM nodes built with textContent -
+// never innerHTML on server-returned text, same posture as the rest of
+// this file toward untrusted content.
+
+let searchDebounce = null;
+let searchSeq = 0;
+
+function renderSnippetInto(container, snippet) {
+  const parts = String(snippet || '').split('**');
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      container.appendChild(el('mark', null, part));
+    } else if (part) {
+      container.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+async function runKbSearch(query) {
+  const seq = ++searchSeq;
+  if (!query.trim()) {
+    kbSearchResults.hidden = true;
+    kbSearchResults.innerHTML = '';
+    navFileList.hidden = false;
+    return;
+  }
+  navFileList.hidden = true;
+  kbSearchResults.hidden = false;
+  kbSearchResults.innerHTML = '<div class="empty">Searching…</div>';
+  let data;
+  try {
+    const res = await fetch('/api/kb/search?q=' + encodeURIComponent(query), { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    data = await res.json();
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    kbSearchResults.innerHTML = '<div class="empty">Search failed.</div>';
+    return;
+  }
+  if (seq !== searchSeq) return;
+  kbSearchResults.innerHTML = '';
+  if (data.state === 'unavailable') {
+    kbSearchResults.appendChild(el('div', 'empty', 'Search is unavailable.'));
+    return;
+  }
+  if (!data.hits.length) {
+    kbSearchResults.appendChild(el('div', 'empty', 'No matches yet.'));
+    return;
+  }
+  data.hits.forEach(hit => {
+    const a = el('a', 'search-hit');
+    a.href = '#';
+    const pathLine = el('span', 'path', hit.path);
+    if (hit.heading) pathLine.appendChild(el('span', 'heading', ' · ' + hit.heading));
+    a.appendChild(pathLine);
+    const snippetLine = el('span', 'snippet');
+    renderSnippetInto(snippetLine, hit.snippet);
+    a.appendChild(snippetLine);
+    a.onclick = (e) => { e.preventDefault(); openKbFile(hit.path); goToArticleOnMobile(); };
+    kbSearchResults.appendChild(a);
+  });
+  if (data.state === 'lexical') {
+    kbSearchResults.appendChild(
+      el('div', 'search-note', 'Wording match only; semantic ranking is off.')
+    );
+  }
+}
+
+if (kbSearchInput) {
+  kbSearchInput.addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    const query = kbSearchInput.value;
+    searchDebounce = setTimeout(() => runKbSearch(query), 250);
+  });
 }
 
 // --- sanitising rendered markdown ---------------------------------------

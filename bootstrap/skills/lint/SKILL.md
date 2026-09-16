@@ -40,6 +40,12 @@ bd update <id> --priority=1 --notes="Still present as of <date>; now also on X."
 
 ## What to check
 
+Contradictions and near-duplicates are semantic, not lexical - two pages can
+disagree without sharing a single word Grep would match on. Use
+`mcp__wiki__search` for the concepts this audit is about and read the top
+passages together before concluding a page is clean; it ranks by meaning as
+well as wording, which is what a grep-only pass structurally cannot do.
+
 **Contradictions.** Pages making conflicting claims about the same fact. Do not
 silently pick a winner — file it, `--type=bug`, and include both page paths and
 both claims in the description.

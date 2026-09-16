@@ -141,6 +141,20 @@ def stack(request):
         # Deliberately overwrites a real key rather than deferring to it.
         os.environ["ANTHROPIC_API_KEY"] = "unused-by-the-smoke-tier"
 
+    # The same override, for the same reason, for VOYAGE_API_KEY - and it is
+    # not optional just because a missing one degrades soft instead of
+    # failing. `docker compose` reads a project-directory `.env` file for
+    # `${VAR}` substitution ITSELF, independent of this process's os.environ,
+    # so the instant a developer's .env carries a real key, the plain
+    # `--container` tier (no --live) would silently start talking to Voyage
+    # too - not a crash, just a tier that advertised "no API key needed"
+    # quietly spending real requests. Measured, not assumed: this exact
+    # container run reported search.state=="hybrid" before this override
+    # existed, on a bare `--container` invocation with no --live and no key
+    # in this process's own environment.
+    if not want_live:
+        os.environ["VOYAGE_API_KEY"] = ""
+
     compose("up", "-d", "--build")
     try:
         _wait_for_health()

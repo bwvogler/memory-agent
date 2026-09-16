@@ -27,16 +27,25 @@ Browser ──► Cloudflare (Access at the edge, free — no tunnel)
 
 Three decisions do most of the work, and each is written up in `docs/decisions/`:
 
-**The knowledge base is a filesystem, not a vector store.** TigerFS mounts
-Postgres as a versioned filesystem, so the agent uses the file tools it is
-already good at — `ls`, `cat`, `grep`, Read, Write — instead of a retrieval API
-it has to be taught. Every write is a row, every row has history.
+**The knowledge base is a filesystem first, and a search index second.**
+TigerFS mounts Postgres as a versioned filesystem, so the agent uses the file
+tools it is already good at — `ls`, `cat`, `grep`, Read, Write — and that is
+still what the wiki *is*: the directory tree is the hierarchy, and Glob and
+Grep see everything, as of this instant. Alongside it there is one ranking
+tool, `mcp__wiki__search` — Voyage AI embeddings in pgvector, fused with
+Postgres full-text search by reciprocal rank fusion. It ranks; it never lists,
+and it is never the only way to see what exists. Every chunk is keyed by file
+id and content hash and checked against the live row on every read, so a stale
+result is invisible rather than wrong. Semantic ranking is off until you set
+`VOYAGE_API_KEY`; full-text ranking needs nothing. See `docs/decisions/0020`.
 
 **Every turn gets a savepoint.** The agent is checkpointed before it touches
 anything, so a bad write is one atomic undo away — and TigerFS undo is itself
 reversible. This is what makes "let an agent write to my knowledge base" a
-reviewable idea rather than a reckless one. It is the single best reason to
-choose TigerFS over a RAG pipeline.
+reviewable idea rather than a reckless one. The honest caveat: a revert rolls
+back the files, not the search index — though a reverted file drops out of
+search the instant it is rewritten, and the next indexing pass re-indexes it
+as reverted.
 
 **Auth is Cloudflare Access, so there is almost no auth code.** Google SSO,
 policy as "allow emails ending in `@yourdomain.com`", free for 50 users. The

@@ -91,6 +91,31 @@ nav {
 .refresh { background: none; border: none; cursor: pointer; color: var(--muted);
   font-size: 14px; padding: 2px 4px; border-radius: 3px; line-height: 1; }
 .refresh:hover { color: var(--accent); background: var(--line); }
+.nav-search { padding: 0 12px 8px; }
+.nav-search input {
+  width: 100%; font: inherit; font-size: 13px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  color: var(--ink);
+}
+.nav-search input:focus { outline: none; border-color: var(--accent); }
+#kb-search-results { padding: 0 4px 8px; }
+.search-hit {
+  display: block; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+  color: var(--ink); text-decoration: none;
+}
+.search-hit:hover { background: var(--line); }
+.search-hit .path {
+  display: block; font-size: 13px; font-weight: 500; word-break: break-word;
+}
+.search-hit .heading { color: var(--muted); font-weight: 400; }
+.search-hit .snippet {
+  display: block; font-size: 12px; color: var(--muted); margin-top: 2px;
+  line-height: 1.4;
+}
+.search-hit mark { background: none; color: var(--accent); font-weight: 600; }
+.search-note {
+  padding: 4px 12px 8px; font-size: 12px; color: var(--muted);
+}
 nav .section-header {
   display: flex; align-items: stretch; gap: 4px;
   padding: 3px 12px 3px 8px; font-size: 12px; font-weight: 600;

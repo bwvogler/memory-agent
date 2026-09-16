@@ -704,6 +704,25 @@ async def _pool() -> asyncpg.Pool:
     return _kb_pool
 
 
+async def pool() -> asyncpg.Pool:
+    """The KB pool, for app/search.py.
+
+    One pool per DSN is the convention in this file, and a third pool on a
+    Neon pooler endpoint would cost connections for nothing. Exported
+    deliberately narrow: app/search.py writes to `kb_chunks`, a table of its
+    own in this same database, and nothing outside this file writes to
+    `tigerfs.memory` - that invariant is what keeps the SQL section above
+    readable, and this export does not touch it.
+    """
+    return await _pool()
+
+
+# Public name for the recursive CTE every listing/read query builds on.
+# app/search.py's fusion query needs the exact same path resolution - a second
+# copy would be the drift docs/tigerfs-backing-table.md already warns about.
+PATHS_CTE = _PATHS_CTE
+
+
 async def close_pool() -> None:
     global _kb_pool  # noqa: PLW0603 - one connection pool per process
     if _kb_pool:

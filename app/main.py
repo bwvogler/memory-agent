@@ -23,7 +23,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agent, interact, kb, kbview, mcp_catalog, mcp_server, signals
+from . import agent, interact, kb, kbview, mcp_catalog, mcp_server, search, signals
 from .auth import Identity, current_identity, display_name_for
 from .config import config
 from .conversations import conversations
@@ -115,6 +115,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         log.info("KB mount healthy: %s", kb.probe_control_surface())
         agent.seed_guide()
         agent.seed_bootstrap()
+
+    # After seeding, so a first deploy of this feature indexes the seeded
+    # corpus without waiting for someone to take a turn. Never raises - see
+    # search.start(); a boot backfill failure is reported at /healthz, not
+    # thrown here.
+    await search.start()
+    spawn(search.reindex(), name="search-backfill")
 
     # Independent of the mount: the ledgers live on the volume, and a deploy
     # that fixed something should say so even if the KB is unreachable. This is
@@ -208,6 +215,15 @@ async def healthz() -> JSONResponse:
             # have the host restarted, since no restart would fix it. It needs a
             # person with a browser, so it needs to be VISIBLE, not fatal.
             "mcp_catalog": mcp_catalog.status(),
+            # `state` is `hybrid` (Voyage key set, pgvector live), `lexical`
+            # (full-text only - the default, needs no key) or `unavailable`
+            # (the kb_chunks schema itself could not be created). Not folded
+            # into `ok` for the same reason as `transcripts` above: an unset
+            # VOYAGE_API_KEY is a correct, supported deployment, and a
+            # restart would not change it - but "lexical-only" and "broken"
+            # must not be indistinguishable from outside. See
+            # docs/decisions/0020.
+            "search": search.status(),
         },
         status_code=200 if mounted else 503,
     )
@@ -623,6 +639,13 @@ async def revert_turn(turn_id: str, identity: CurrentUser) -> dict[str, Any]:
     if not ok:
         raise HTTPException(500, "undo failed; check the server log")
 
+    # A revert is a write through the mount too: every reverted file's
+    # modified_at moves, so its chunks go invisible immediately (the liveness
+    # join in app/search.py) even before this pass runs. This closes the
+    # window by re-indexing the reverted content, rather than leaving search
+    # to describe a page that was rolled back.
+    spawn(search.reindex(), name="reindex")
+
     # A revert is the strongest signal this system gets: a human saying "that
     # was wrong" about one exact turn. Recorded, not acted on - see
     # app/signals.py and bead kb-3sv.
@@ -887,6 +910,33 @@ async def kb_spec(path: str = "") -> dict[str, Any]:
     source = f"{dir_path}/{kbview.SPEC_FILE}" if dir_path else kbview.SPEC_FILE
     raw = await kb.sql_read_headers(source)
     return _spec_payload(raw, source if raw is not None else None)[1]
+
+
+@app.get("/api/kb/search", dependencies=AUTHENTICATED)
+async def kb_search(q: str, limit: int = 8) -> dict[str, Any]:
+    """Ranked passages for the wiki viewer's search box - see app/search.py.
+
+    Same fusion query the agent's `mcp__wiki__search` tool calls, plain JSON
+    rather than the rendered text block. A blank query returns no results
+    rather than erroring: the UI can call this on every keystroke without a
+    special case for an empty box.
+    """
+    if not q.strip():
+        return {"query": q, "state": search.status()["state"], "hits": []}
+    hits = await search.search(q, limit)
+    return {
+        "query": q,
+        "state": search.status()["state"],
+        "hits": [
+            {
+                "path": h.path,
+                "heading": h.heading,
+                "snippet": h.snippet,
+                "score": h.score,
+            }
+            for h in hits
+        ],
+    }
 
 
 @app.get("/api/uploads/{turn_id}/{name}")

@@ -114,11 +114,18 @@ sees it from the inside, and nobody can ask you a follow-up question later.
 
 ## Read before you write
 
-Search first, always. The most common failure in an agent-maintained knowledge
-base is not a wrong fact, it is five near-duplicate documents that disagree
-slightly. Look for an existing document that should absorb the new information,
-and prefer extending a good document over creating a thin new one. If you find
-two documents that overlap, say so rather than silently adding a third.
+Search first, always, with `mcp__wiki__search`. It ranks passages from across
+the whole wiki by meaning and by wording at once, which is what finds the page
+that should absorb what you are about to write. It is a ranking, not a
+listing - when you need to know everything in a directory, use Glob instead.
+Read the pages it names before you conclude anything; never write from a
+snippet.
+
+The most common failure in an agent-maintained knowledge base is not a wrong
+fact, it is five near-duplicate documents that disagree slightly. Look for an
+existing document that should absorb the new information, and prefer
+extending a good document over creating a thin new one. If you find two
+documents that overlap, say so rather than silently adding a third.
 
 ## Follow the guide hierarchy
 
