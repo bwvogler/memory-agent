@@ -5,10 +5,11 @@ description: >
   more than one unrelated thing is sitting uncommitted, then for each batch —
   commit it in this repo's voice (via the commit skill), push a feature
   branch, open a PR, wait for CI, and merge with a plain merge commit,
-  matching every PR in this repo's history. Invoke explicitly with /land, at
-  the end of a planned chunk of work, only when the user has asked for the
-  whole commit-PR-merge sequence.
-argument-hint: "[branch-name]"
+  matching every PR in this repo's history. Once every batch is merged, `fly
+  deploy` if anything landed actually changed the deployed image. Invoke
+  explicitly with /land, at the end of a planned chunk of work, only when the
+  user has asked for the whole commit-PR-merge(-deploy) sequence.
+argument-hint: "[branch-name] [--deploy|--no-deploy]"
 disable-model-invocation: true
 ---
 
@@ -27,6 +28,14 @@ happened to be worked in two separate sessions. Nothing stopped a single
 `/land` invocation from bundling two unrelated changes into one commit and
 one PR if they'd been uncommitted at the same time — this skill now makes
 that split deliberate instead of accidental.
+
+And it deploys: "landed" (merged to `main`) and "live" used to be two
+separate manual steps, with the gap between them a place a merged fix could
+sit unnoticed for days. `/land` now closes that gap itself, once, after
+every batch in the invocation has merged — never per batch, since `fly
+deploy` is a real (if short — see `prod-ops` rule 5) production outage, and
+deploying three times for three small unrelated fixes would be three
+outages for one release's worth of change.
 
 ## Non-Negotiable Rules
 
@@ -78,6 +87,15 @@ that split deliberate instead of accidental.
    second batch branching before the first is merged risks basing it on
    unmerged work, and if the first batch's PR is later revised, the second
    batch's diff would silently carry those changes too.
+10. **A deploy still gets a real, live confirmation each time — invoking
+    `/land` covers commit/PR/merge (rule 1) but not this.** `fly deploy` is a
+    production outage on a real household's running app (`prod-ops` rule 5),
+    and unlike a merge it cannot be undone by reverting a commit once it's
+    out. After the last batch merges, ask (do not assume) unless `--deploy`
+    was passed explicitly as an argument this invocation; `--no-deploy` (or
+    being told to skip it) skips asking entirely and just stops after
+    landing. Only ask at all when something image-relevant actually landed —
+    see "Deploying" below.
 
 ## Splitting Into Batches
 
@@ -131,7 +149,31 @@ doing anything else:
    what makes it safe to branch the next batch from it.
 9. If another batch remains, go back to step 1 for it. Otherwise, report
    every PR URL landed (in order) and the final `git log -N --oneline`
-   (N = number of batches + 1, to show every merge commit just made).
+   (N = number of batches + 1, to show every merge commit just made), then
+   move on to "Deploying" below.
+
+## Deploying
+
+Runs once, after every batch above has merged — not per batch (rule 10).
+
+1. Check whether anything just landed actually touches the deployed image:
+   `app/`, `static/`, `skills/`, `bootstrap/`, `entrypoint.sh`, `scripts/`,
+   `docs/shipped-beads.jsonl`, `requirements.txt`, `Dockerfile` or
+   `fly.toml` — the exact set the Dockerfile `COPY`s or that `fly deploy`
+   reads. A batch confined to `.claude/`, `tests/`, `docs/decisions/` or
+   `.github/` produces a byte-identical image; deploying it is a real outage
+   for zero effect, so skip straight to reporting without asking.
+2. If something image-relevant landed: say so and ask whether to deploy now
+   (rule 10) — unless this invocation was explicitly told `--deploy` (then
+   just do it) or `--no-deploy`/"skip the deploy" (then skip straight to
+   reporting, no question needed).
+3. On a yes: `fly deploy`. It already blocks on Fly's own health checks
+   before returning, but confirm it independently rather than trusting the
+   exit code alone (rule 11): `curl -fsS https://memory-agent-proud-island-3747.fly.dev/healthz`
+   and check `kb_mounted` and `transcripts` in the response, the same two
+   fields `dev-checks`/`browser-test` gate on.
+4. Report what was deployed (or that it was skipped, and why) alongside the
+   landing summary from step 9 above.
 
 ## Notes
 
