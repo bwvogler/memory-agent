@@ -134,3 +134,51 @@ weighting the "must allow" cases as heavily as the "must deny" ones. Only the
 and_the_agent_recovers` asserts both that the file survives *and* that the agent
 still completes the task, because a guard that blocks without teaching produces
 a stuck turn or a model hunting for another way around.
+
+## Amendment: the fchmod diagnosis was right, just tested on the wrong mount (`kb-vnl`)
+
+The Decision section states, flatly, that `chmod` "works" on TigerFS and that
+the original `fchmod` diagnosis for the first incident was "a guess and was
+wrong." Production kept generating evidence against that: `kb-vnl`, `kb-21i`,
+and several deferred signal beads all show `Write`/`Edit` failing with the
+literal message `ENOENT: no such file or directory, fchmod`, on files that
+demonstrably exist and are readable — not the byte-mismatch false alarm this
+ADR already fixed.
+
+It reproduces, but only on the mount that matters. `scripts/mount-kb.sh --dev`
+on a laptop goes through TigerFS's macOS NFS re-export path, and `fchmod`
+there is fine — which is almost certainly what the original investigation
+tested against, and why it concluded the diagnosis was wrong. Production runs
+inside a Linux container with a real FUSE mount (`cap_add: SYS_ADMIN` +
+`/dev/fuse`, per `Dockerfile`/`docker-compose.yml`). Reproducing against a
+throwaway `debian:bookworm-slim` container with the same FUSE setup and the
+same `tigerfs` binary, mounted against the same dev Postgres, makes it
+deterministic: `fchmod(fd)` fails with `ENOENT` on 100% of attempts where the
+fd came from TigerFS's `Create` FUSE op (whether via a direct `open(O_CREAT)`
+or the temp-file-then-rename pattern most atomic writers use), and succeeds
+every time on an fd from opening an *already-existing* file, or on a
+path-based `chmod`.
+
+Root cause, read from TigerFS's own source (`timescale/tigerfs`, public):
+`internal/tigerfs/fuse/ops_node.go`'s `OpsNode.Setattr` — which `fchmod`
+dispatches to — resolves its own path via `Inode.Path(nil)`, and treats an
+empty result as an orphaned/detached inode, returning `ENOENT` defensively.
+A freshly-`Create`d inode hits exactly that branch when a same-handle
+`Setattr` follows it. That guard was introduced in TigerFS commit `fb74bade`
+("compute OpsNode path dynamically to survive Rename"), a legitimate fix for
+a different, real bug — a stale cached path after `os.Rename` — that shipped
+in `v0.7.0` (2026-06-02), still the current latest release and what
+`Dockerfile`'s unpinned `curl -fsSL https://install.tigerfs.io | sh` installs
+today.
+
+So: this is a genuine upstream regression, not fixed, and not something
+`app/guards.py` or the system prompt can work around — it lives entirely in
+TigerFS's FUSE layer, below anything this app controls. Filed upstream as
+[timescale/tigerfs#74](https://github.com/timescale/tigerfs/issues/74), with
+the reproduction and the code pointer. Until it ships a fix, the prompt's
+existing "re-read rather than believe a file-tool failure" guidance (added for
+the byte-mismatch case) does not help here — the write plainly did not land —
+and no workaround is proposed by this amendment; inventing one (e.g. widening
+the `PreToolUse` write guard's `>` allowance, or teaching the agent a retry)
+is future work, gated on confirming the shape of a real fix rather than
+guessing at one.
