@@ -134,3 +134,58 @@ weighting the "must allow" cases as heavily as the "must deny" ones. Only the
 and_the_agent_recovers` asserts both that the file survives *and* that the agent
 still completes the task, because a guard that blocks without teaching produces
 a stuck turn or a model hunting for another way around.
+
+## Amendment: the fchmod diagnosis was right, just tested on the wrong mount (`kb-vnl`)
+
+The Decision section states, flatly, that `chmod` "works" on TigerFS and that
+the original `fchmod` diagnosis for the first incident was "a guess and was
+wrong." Production kept generating evidence against that: `kb-vnl`, `kb-21i`,
+and several deferred signal beads all show `Write`/`Edit` failing with the
+literal message `ENOENT: no such file or directory, fchmod`, on files that
+demonstrably exist and are readable — not the byte-mismatch false alarm this
+ADR already fixed.
+
+It reproduces, but only on the mount that matters. `scripts/mount-kb.sh --dev`
+on a laptop goes through TigerFS's macOS NFS re-export path, and `fchmod`
+there is fine — which is almost certainly what the original investigation
+tested against, and why it concluded the diagnosis was wrong. Production runs
+inside a Linux container with a real FUSE mount (`cap_add: SYS_ADMIN` +
+`/dev/fuse`, per `Dockerfile`/`docker-compose.yml`). Reproducing against a
+throwaway `debian:bookworm-slim` container with the same FUSE setup and the
+same `tigerfs` binary, mounted against the same dev Postgres, makes it
+deterministic: `fchmod(fd)` fails with `ENOENT` on 100% of attempts where the
+fd came from TigerFS's `Create` FUSE op (whether via a direct `open(O_CREAT)`
+or the temp-file-then-rename pattern most atomic writers use), and succeeds
+every time on an fd from opening an *already-existing* file, or on a
+path-based `chmod`.
+
+Root cause, read from TigerFS's own source (`timescale/tigerfs`, public):
+`internal/tigerfs/fuse/ops_node.go`'s `OpsNode.Setattr` — which `fchmod`
+dispatches to — resolves its own path via `Inode.Path(nil)`, and treats an
+empty result as an orphaned/detached inode, returning `ENOENT` defensively.
+A freshly-`Create`d inode hits exactly that branch when a same-handle
+`Setattr` follows it. That guard was introduced in TigerFS commit `fb74bade`
+("compute OpsNode path dynamically to survive Rename"), a legitimate fix for
+a different, real bug — a stale cached path after `os.Rename` — that shipped
+in `v0.7.0` (2026-06-02), still the current latest release and what
+`Dockerfile`'s unpinned `curl -fsSL https://install.tigerfs.io | sh` installs
+today.
+
+So: this is a genuine upstream regression, not fixed, and TigerFS's FUSE layer
+is below anything this app controls — no fix belongs in `app/`. Filed upstream
+as [timescale/tigerfs#74](https://github.com/timescale/tigerfs/issues/74),
+with the reproduction and the code pointer.
+
+There is, however, a real client-side workaround, verified the same way as
+the bug: `OpsNode.Create` hard-codes the new file's mode to `0644` and ignores
+whatever mode the caller asked for, so the client's `fchmod` call was always
+redundant on this filesystem — it was never the thing that actually set
+permissions. A plain truncating shell write (`cat > path <<'EOF' ... EOF`, the
+same "safe pattern" `guards.GUIDANCE` already names for the append case) opens
+with `O_CREAT|O_TRUNC` and never calls `fchmod` at all, so it never reaches the
+broken code path — confirmed against the same real-FUSE repro container, for
+both a brand-new file and an overwrite of an existing one. The prompt (see
+`app/agent.py`) now tells the agent to use exactly that, and only that, when it
+sees this specific error message — distinct from, and narrower than, the
+general "never fall back to shell redirection" rule above, which stays correct
+for the false-alarm byte-mismatch case it was written for.

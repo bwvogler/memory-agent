@@ -294,6 +294,78 @@ def resolve_kb_path(rel_path: str) -> Path | None:
     return candidate
 
 
+def _resolve_absolute_kb_path(abs_path: str) -> Path | None:
+    """Like `resolve_kb_path`, but for a client-supplied ABSOLUTE path.
+
+    A tool call's `file_path` is always absolute (the system prompt requires
+    it), so the relative-join `resolve_kb_path` does would just reject it.
+    Same containment posture: resolve first, then check containment, never
+    trust the string.
+    """
+    if not abs_path:
+        return None
+    candidate = Path(abs_path)
+    if not candidate.is_absolute():
+        return None
+    root = workspace_root().resolve()
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(root):
+        log.warning("rejected fchmod-recovery path escaping workspace: %r", abs_path)
+        return None
+    return candidate
+
+
+def write_kb_file_safely(abs_path: str, content: str) -> Path | None:
+    """Write `content` to `abs_path` without the fchmod TigerFS ENOENTs on.
+
+    Recovery path for a Write that failed with TigerFS's known
+    Create()-then-fchmod bug (ADR 0007's amendment, timescale/tigerfs#74).
+    `Path.write_text` never calls fchmod, so this reconstructs exactly what
+    Write intended without going near the broken code path - and TigerFS's
+    `OpsNode.Create` hard-codes a new file's mode to 0644 regardless of what
+    the caller asks for, so the fchmod call that failed was never actually
+    setting anything here.
+
+    Creates missing parent directories, matching what Write itself would do -
+    a `mkdir` on a directory that already exists is a no-op, so this changes
+    nothing for the common case where the original Create already proved the
+    parent exists.
+
+    Returns the resolved path on success, or None if `abs_path` is not
+    actually inside the KB workspace.
+    """
+    target = _resolve_absolute_kb_path(abs_path)
+    if target is None:
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def apply_kb_edit_safely(
+    abs_path: str, old_string: str, new_string: str, *, replace_all: bool = False
+) -> Path | None:
+    """Reconstruct a failed Edit's effect directly, no fchmod involved.
+
+    Same recovery path as `write_kb_file_safely`, for Edit instead of Write.
+    Mirrors the Edit tool's own contract: `old_string` must appear exactly
+    once unless `replace_all` is set, so an ambiguous or absent match is
+    refused (returns None) rather than guessed at - the system prompt's
+    shell-redirect fallback is what should still reach a human for that
+    residual case.
+    """
+    target = _resolve_absolute_kb_path(abs_path)
+    if target is None or not target.is_file():
+        return None
+    current = target.read_text(encoding="utf-8")
+    count = current.count(old_string)
+    if count == 0 or (not replace_all and count > 1):
+        return None
+    new_content = current.replace(old_string, new_string, -1 if replace_all else 1)
+    target.write_text(new_content, encoding="utf-8")
+    return target
+
+
 # 0-3 leading spaces, same as CommonMark's fence rule.
 _FENCE_RE = re.compile(r"^ {0,3}(```+|~~~+)")
 _CHECKBOX_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s\[(?P<mark>[ xX])\]")
