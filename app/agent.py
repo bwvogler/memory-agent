@@ -637,17 +637,20 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
         "Never fall back to shell redirection to work around it.",
         # A real, known TigerFS bug (timescale/tigerfs#74; see ADR 0007's
         # amendment), unrelated to the false alarm above: Write/Edit sometimes
-        # fail with `ENOENT: no such file or directory, fchmod` even though
-        # the write is otherwise fine - the underlying data write and rename
-        # succeed, only the client's own fchmod call fails. Named narrowly
-        # because the general "never fall back to shell" rule above stays
-        # correct for the false-alarm case; this is the one exception.
+        # fail with `ENOENT: no such file or directory, fchmod`. A hook
+        # (guards.fchmod_recovery_for) recovers this automatically for Write
+        # and most Edits, adding a note to say so - so most of the time this
+        # paragraph never has to be acted on. It only matters when that note
+        # is absent (MultiEdit, NotebookEdit, or an Edit whose old_string no
+        # longer matches uniquely), which is why the general "never fall back
+        # to shell redirection" rule above still stands as the default and
+        # this is named as the one exception.
         "If Write or Edit fails with `ENOENT: no such file or directory, "
-        "fchmod`, that IS a real failure of that tool call, but a plain "
-        "truncating shell write works around it reliably: "
-        "`cat > /absolute/kb/path <<'EOF'` with the full file content and a "
-        "closing `EOF`, never `>>` or any append form. Do this once, then "
-        "re-read the file to confirm.",
+        "fchmod` and no note says it was already recovered, that IS a real "
+        "failure of that tool call, but a plain truncating shell write works "
+        "around it reliably: `cat > /absolute/kb/path <<'EOF'` with the full "
+        "file content and a closing `EOF`, never `>>` or any append form. Do "
+        "this once, then re-read the file to confirm.",
         "When mentioning a KB file or directory you just wrote, or one you want "
         "the user to open, link to it with `[label](workspace/relative/path)` — "
         "the exact path you used in your tool call, no leading slash and no "
@@ -676,18 +679,30 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
 
 
 def _observer_hooks(turn: Turn | None) -> dict[HookEvent, list[HookMatcher]]:
-    """Hooks that only watch: tool outcomes and subagent lifecycle.
+    """Hooks that watch tool outcomes and subagent lifecycle - plus one that
+    acts, kept here anyway because it needs to run on every turn regardless
+    of interactivity, exactly like the observers around it.
 
-    Separate from the two enforcing hooks above so it stays obvious which hooks
-    can refuse something and which cannot. These are the only route to a tool
-    RESULT: results arrive on a UserMessage, which `_render` drops wholesale, so
-    without them a failed Write and a successful one look identical in the UI.
+    The watching ones are separate from the two enforcing hooks above so it
+    stays obvious which hooks can refuse something and which cannot. These
+    are the only route to a tool RESULT: results arrive on a UserMessage,
+    which `_render` drops wholesale, so without them a failed Write and a
+    successful one look identical in the UI.
+
+    `guards.fchmod_recovery_for` is the exception: it recovers a specific,
+    known TigerFS failure (ADR 0007's amendment) rather than only observing
+    it, but belongs in this same dict because reflection and `/mcp` turns
+    need the recovery exactly as much as an interactive one does, and this is
+    the one hook set both option builders already merge in unconditionally.
     """
     if turn is None:
         return {}
     return {
         "PostToolUse": [HookMatcher(hooks=[interact.tool_result_for(turn)])],
-        "PostToolUseFailure": [HookMatcher(hooks=[interact.tool_failure_for(turn)])],
+        "PostToolUseFailure": [
+            HookMatcher(hooks=[interact.tool_failure_for(turn)]),
+            HookMatcher(matcher="Write|Edit", hooks=[guards.fchmod_recovery_for()]),
+        ],
         "SubagentStart": [HookMatcher(hooks=[interact.subagent_start_for(turn)])],
         "SubagentStop": [HookMatcher(hooks=[interact.subagent_stop_for(turn)])],
     }

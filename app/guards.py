@@ -48,6 +48,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import kb
 from .config import config
 
 if TYPE_CHECKING:
@@ -405,6 +406,115 @@ def guide_gap_filed(rows: list[dict[str, Any]]) -> bool:
             if _GUIDE_GAP.search(command):
                 return True
     return False
+
+
+# --- the TigerFS fchmod-recovery hook ---------------------------------------
+#
+# A real, reproduced TigerFS regression (ADR 0007's amendment,
+# timescale/tigerfs#74): OpsNode.Create returns a file handle whose fchmod
+# fails with ENOENT until the file round-trips through a fresh Lookup/Open.
+# Write and Edit both call fchmod as part of a normal atomic write, so this
+# fires on the *first* touch of a new-looking path - which includes editing
+# an existing file, since Edit's own atomic-write pattern creates a fresh
+# temp file too.
+#
+# The fix is not ours to make - it is in TigerFS's FUSE layer - but the
+# recovery is: OpsNode.Create hard-codes a new file's mode to 0644 and
+# ignores whatever mode the caller asked for, so the fchmod call that just
+# failed was never doing anything real on this filesystem. Reconstructing
+# the same write without calling fchmod at all (kb.write_kb_file_safely /
+# apply_kb_edit_safely) is not a guess at a fix, it is a no-op with respect
+# to what fchmod would have done.
+#
+# Told to the model via `additionalContext` rather than left silent, so it
+# neither retries (hitting the same bug again on a new temp file) nor reaches
+# for the Bash fallback the system prompt still names for whatever this
+# cannot reconstruct - MultiEdit/NotebookEdit, or an Edit whose `old_string`
+# no longer matches uniquely.
+
+_FCHMOD_ERROR = re.compile(r"fchmod", re.IGNORECASE)
+_RECOVERABLE_TOOLS = frozenset({"Write", "Edit"})
+
+
+def is_fchmod_enoent(error: str) -> bool:
+    """True if this is TigerFS's known Create()-then-fchmod regression.
+
+    Pure and string-only, matching the style of `unsafe_kb_write` above, so
+    the detection is unit-testable without a live agent.
+    """
+    return bool(error) and "ENOENT" in error and bool(_FCHMOD_ERROR.search(error))
+
+
+def fchmod_recovery_for() -> Any:
+    """Build the PostToolUseFailure hook that performs the recovery above.
+
+    No `turn` argument, unlike the other guards in this file: there is
+    nothing to record on it. This isn't a denial and isn't a permission
+    decision, and the underlying failure is still captured on the turn via
+    the ordinary tool_failures/tool_failure_details path in app/interact.py
+    (correctly - it's still evidence TigerFS is buggy, even though the write
+    itself landed).
+    """
+
+    async def hook(
+        input_data: Mapping[str, Any],
+        _tool_use_id: str | None,
+        _context: Any,
+    ) -> SyncHookJSONOutput:
+        try:
+            return _post_tool_use_failure(input_data)
+        except Exception:  # a broken guard must not break the turn
+            log.exception("fchmod recovery hook failed; leaving the failure as-is")
+            return {}
+
+    return hook
+
+
+def _post_tool_use_failure(input_data: Mapping[str, Any]) -> SyncHookJSONOutput:
+    name = input_data.get("tool_name")
+    if name not in _RECOVERABLE_TOOLS:
+        return {}
+    if not is_fchmod_enoent(str(input_data.get("error") or "")):
+        return {}
+
+    tool_input = input_data.get("tool_input") or {}
+    path = tool_input.get("file_path")
+    if not isinstance(path, str) or not path:
+        return {}
+
+    result = None
+    if name == "Write":
+        content = tool_input.get("content")
+        if isinstance(content, str):
+            result = kb.write_kb_file_safely(path, content)
+    elif name == "Edit":
+        old_string = tool_input.get("old_string")
+        new_string = tool_input.get("new_string")
+        if isinstance(old_string, str) and isinstance(new_string, str):
+            result = kb.apply_kb_edit_safely(
+                path,
+                old_string,
+                new_string,
+                replace_all=bool(tool_input.get("replace_all")),
+            )
+
+    if result is None:
+        return {}  # could not reconstruct it; the prompt's Bash fallback stands
+
+    log.info("recovered a TigerFS fchmod-ENOENT failure for %s: %s", name, path)
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUseFailure",
+            "additionalContext": (
+                f"That {name} error was TigerFS's known fchmod bug "
+                "(timescale/tigerfs#74), not a real failure: the content you "
+                "provided has already been written to this file, with no "
+                "fchmod call involved this time. Do not retry the write and "
+                "do not fall back to a shell command - this is done. Re-read "
+                "the file only if you want to double-check."
+            ),
+        }
+    }
 
 
 def reflection_stop_guard(turn: Any, no_skill_failures: int) -> Any:
