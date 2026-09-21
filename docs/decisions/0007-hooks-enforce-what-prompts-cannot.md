@@ -171,14 +171,21 @@ in `v0.7.0` (2026-06-02), still the current latest release and what
 `Dockerfile`'s unpinned `curl -fsSL https://install.tigerfs.io | sh` installs
 today.
 
-So: this is a genuine upstream regression, not fixed, and not something
-`app/guards.py` or the system prompt can work around — it lives entirely in
-TigerFS's FUSE layer, below anything this app controls. Filed upstream as
-[timescale/tigerfs#74](https://github.com/timescale/tigerfs/issues/74), with
-the reproduction and the code pointer. Until it ships a fix, the prompt's
-existing "re-read rather than believe a file-tool failure" guidance (added for
-the byte-mismatch case) does not help here — the write plainly did not land —
-and no workaround is proposed by this amendment; inventing one (e.g. widening
-the `PreToolUse` write guard's `>` allowance, or teaching the agent a retry)
-is future work, gated on confirming the shape of a real fix rather than
-guessing at one.
+So: this is a genuine upstream regression, not fixed, and TigerFS's FUSE layer
+is below anything this app controls — no fix belongs in `app/`. Filed upstream
+as [timescale/tigerfs#74](https://github.com/timescale/tigerfs/issues/74),
+with the reproduction and the code pointer.
+
+There is, however, a real client-side workaround, verified the same way as
+the bug: `OpsNode.Create` hard-codes the new file's mode to `0644` and ignores
+whatever mode the caller asked for, so the client's `fchmod` call was always
+redundant on this filesystem — it was never the thing that actually set
+permissions. A plain truncating shell write (`cat > path <<'EOF' ... EOF`, the
+same "safe pattern" `guards.GUIDANCE` already names for the append case) opens
+with `O_CREAT|O_TRUNC` and never calls `fchmod` at all, so it never reaches the
+broken code path — confirmed against the same real-FUSE repro container, for
+both a brand-new file and an overwrite of an existing one. The prompt (see
+`app/agent.py`) now tells the agent to use exactly that, and only that, when it
+sees this specific error message — distinct from, and narrower than, the
+general "never fall back to shell redirection" rule above, which stays correct
+for the false-alarm byte-mismatch case it was written for.

@@ -635,6 +635,19 @@ def _system_prompt_append(bd_context: str = "", *, shared: bool = False) -> str:
         "is a FALSE ALARM and your write succeeded. If any file tool reports a "
         "failure, re-read the file: if the content is right, you are done. "
         "Never fall back to shell redirection to work around it.",
+        # A real, known TigerFS bug (timescale/tigerfs#74; see ADR 0007's
+        # amendment), unrelated to the false alarm above: Write/Edit sometimes
+        # fail with `ENOENT: no such file or directory, fchmod` even though
+        # the write is otherwise fine - the underlying data write and rename
+        # succeed, only the client's own fchmod call fails. Named narrowly
+        # because the general "never fall back to shell" rule above stays
+        # correct for the false-alarm case; this is the one exception.
+        "If Write or Edit fails with `ENOENT: no such file or directory, "
+        "fchmod`, that IS a real failure of that tool call, but a plain "
+        "truncating shell write works around it reliably: "
+        "`cat > /absolute/kb/path <<'EOF'` with the full file content and a "
+        "closing `EOF`, never `>>` or any append form. Do this once, then "
+        "re-read the file to confirm.",
         "When mentioning a KB file or directory you just wrote, or one you want "
         "the user to open, link to it with `[label](workspace/relative/path)` — "
         "the exact path you used in your tool call, no leading slash and no "
