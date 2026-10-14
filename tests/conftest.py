@@ -111,6 +111,30 @@ def bd(*argv: str, check=True):
     return app_exec("bd", *argv, workdir=f"/work/{USER_SLUG}", check=check)
 
 
+def post_when_free(url: str, **kwargs) -> httpx.Response:
+    """POST, retrying while the instance answers 409 busy.
+
+    A turn that files a signal bead starts a reflection turn from `finish()`'s
+    aftermath - after the client has already been told `done`, and a bead-filing
+    subprocess later. That reflection is a real model call holding the whole
+    instance, so the next live test's POST lands on a 409 it did nothing to
+    deserve, and which one depends on timing. The refusal is the designed
+    answer (test_container.py pins it directly); a live test that is about
+    something else should wait its turn rather than fail on it.
+
+    Gives up and returns the last response at `timeout_s`, so a turn that never
+    finishes still surfaces as a failure with its body.
+    """
+    timeout_s = kwargs.pop("timeout_s", 300)
+    kwargs.setdefault("timeout", 30)
+    deadline = time.time() + timeout_s
+    while True:
+        response = httpx.post(url, **kwargs)
+        if response.status_code != httpx.codes.CONFLICT or time.time() >= deadline:
+            return response
+        time.sleep(2)
+
+
 def bd_json(*argv: str):
     out = bd(*argv, "--json").stdout
     return json.loads(out) if out.strip() else []

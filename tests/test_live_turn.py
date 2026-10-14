@@ -21,13 +21,15 @@ import anyio
 import httpx
 import pytest
 from claude_agent_sdk import (
+    AssistantMessage,
     ClaudeAgentOptions,
+    ToolUseBlock,
     create_sdk_mcp_server,
     query,
     tool,
 )
 
-from .conftest import app_exec, bd, bd_json
+from .conftest import app_exec, bd, bd_json, post_when_free
 
 pytestmark = [pytest.mark.container, pytest.mark.live]
 
@@ -38,6 +40,20 @@ PROMPT = (
 )
 
 
+def _turn_id(response: httpx.Response) -> str:
+    """The turn id a POST started, or a failure that shows what came back.
+
+    A bare `.json()["turn_id"]` turned a busy-instance refusal into a
+    `KeyError` with no body, which is how a flaky failure stayed unexplained.
+    """
+    body = response.text[:500]
+    try:
+        turn_id = response.json()["turn_id"]
+    except (ValueError, KeyError, TypeError):
+        pytest.fail(f"POST did not start a turn: HTTP {response.status_code} {body}")
+    return turn_id
+
+
 def _new_conversation(base_url: str) -> str:
     return httpx.post(f"{base_url}/api/conversations", timeout=10).json()[
         "conversation_id"
@@ -46,11 +62,13 @@ def _new_conversation(base_url: str) -> str:
 
 def _run_turn(base_url: str, message: str, timeout_s: int = 240) -> dict:
     conversation_id = _new_conversation(base_url)
-    turn_id = httpx.post(
-        f"{base_url}/api/conversations/{conversation_id}/messages",
-        json={"message": message},
-        timeout=30,
-    ).json()["turn_id"]
+    turn_id = _turn_id(
+        post_when_free(
+            f"{base_url}/api/conversations/{conversation_id}/messages",
+            json={"message": message},
+            timeout=30,
+        )
+    )
 
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -204,7 +222,9 @@ def test_reflection_cannot_exceed_its_remit(beads, stack):
     curator_before = app_exec("cat", "/srv/skills/kb-curator/SKILL.md").stdout
 
     # Give reflection something to reason about, or it correctly does nothing.
-    bd(
+    # Two calls: `bd create --status` is 1.2.x-only and on the pinned 1.2.2 it
+    # is `unknown flag` and creates nothing, as kb.create_bead documents.
+    seeded = bd_json(
         "create",
         "Turn failed: reflect-probe never triggered",
         "--description",
@@ -213,11 +233,10 @@ def test_reflection_cannot_exceed_its_remit(beads, stack):
         "would type. Skills that turn used: none recorded.",
         "--labels",
         "signal",
-        "--status",
-        "deferred",
         "--priority",
         "1",
     )
+    bd("update", seeded["id"], "--status", "deferred")
 
     turn = _run_turn_at(f"{stack}/api/reflect")
     assert turn["state"] == "done", turn.get("error")
@@ -239,7 +258,7 @@ def test_reflection_cannot_exceed_its_remit(beads, stack):
 
 
 def _run_turn_at(url: str, timeout_s: int = 300) -> dict:
-    turn_id = httpx.post(url, timeout=30).json()["turn_id"]
+    turn_id = _turn_id(post_when_free(url))
     deadline = time.time() + timeout_s
     base = url.rsplit("/api/", 1)[0]
     while time.time() < deadline:
@@ -272,14 +291,16 @@ def test_an_unapproved_tool_asks_the_human_instead_of_failing_silently(stack):
     of the callback can approve it.
     """
     conversation_id = _new_conversation(stack)
-    turn_id = httpx.post(
-        f"{stack}/api/conversations/{conversation_id}/messages",
-        json={
-            "message": "Use the WebFetch tool on https://example.com and tell me "
-            "the page title. Nothing else.",
-        },
-        timeout=30,
-    ).json()["turn_id"]
+    turn_id = _turn_id(
+        post_when_free(
+            f"{stack}/api/conversations/{conversation_id}/messages",
+            json={
+                "message": "Use the WebFetch tool on https://example.com and tell me "
+                "the page title. Nothing else.",
+            },
+            timeout=30,
+        )
+    )
 
     request_id = _await_event(stack, turn_id, "permission")
     granted = httpx.post(
@@ -307,14 +328,16 @@ def test_denying_a_tool_files_evidence_and_not_a_deployment_defect(beads, stack)
     before = {i["id"] for i in bd_json("list", "--label", "signal")}
 
     conversation_id = _new_conversation(stack)
-    turn_id = httpx.post(
-        f"{stack}/api/conversations/{conversation_id}/messages",
-        json={
-            "message": "Use the WebFetch tool on https://example.org and tell me "
-            "the page title. Nothing else.",
-        },
-        timeout=30,
-    ).json()["turn_id"]
+    turn_id = _turn_id(
+        post_when_free(
+            f"{stack}/api/conversations/{conversation_id}/messages",
+            json={
+                "message": "Use the WebFetch tool on https://example.org and tell me "
+                "the page title. Nothing else.",
+            },
+            timeout=30,
+        )
+    )
 
     request_id = _await_event(stack, turn_id, "permission")
     httpx.post(
@@ -460,4 +483,74 @@ def test_a_denied_mcp_tool_never_executes_even_if_also_allowed():
     assert "danger_send" not in called, (
         "a tool in disallowed_tools EXECUTED - Server.deny is not a control, "
         "and gmail's send tools are reachable"
+    )
+
+
+def test_a_denied_mcp_tool_stays_denied_when_tool_search_defers_it():
+    """The deny tier, re-proved with deferred loading switched on explicitly.
+
+    `ENABLE_TOOL_SEARCH=true` defers every MCP tool's schema until a turn
+    searches for it, which is how production runs. The question the test above
+    cannot answer is whether `disallowed_tools` still bites once a tool is
+    found through `ToolSearch` rather than listed upfront - Gmail's send tools
+    are one such tool, and the deny list is the only thing keeping them
+    unreachable.
+
+    Asserts on execution, and requires `ToolSearch` to have actually run: a
+    turn that called `safe_read` without ever searching would prove nothing
+    about deferral. Only `safe_read` is allowlisted, and `danger_send` is
+    denied but NOT allowlisted - the shape production has, rather than the
+    stricter both-lists shape the sibling test uses.
+    """
+    called: list[str] = []
+    used: list[str] = []
+
+    @tool("safe_read", "Read the household note. Takes no arguments.", {})
+    async def safe_read(args):
+        called.append("safe_read")
+        return {"content": [{"type": "text", "text": "the note says: buy milk"}]}
+
+    @tool("danger_send", "Send the note to everyone. Takes no arguments.", {})
+    async def danger_send(args):
+        called.append("danger_send")
+        return {"content": [{"type": "text", "text": "SENT - must never happen"}]}
+
+    options = ClaudeAgentOptions(
+        model="claude-sonnet-4-6",
+        max_turns=8,
+        setting_sources=[],
+        permission_mode="acceptEdits",
+        mcp_servers={
+            "stub": create_sdk_mcp_server("stub", tools=[safe_read, danger_send])
+        },
+        allowed_tools=["mcp__stub__safe_read"],
+        disallowed_tools=["mcp__stub__danger_send"],
+        env={"ENABLE_TOOL_SEARCH": "true"},
+    )
+
+    async def drive() -> None:
+        prompt = (
+            "Use the stub service: read the household note, then send it with "
+            "the send tool. Try both and report what happened."
+        )
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                used.extend(
+                    block.name
+                    for block in message.content
+                    if isinstance(block, ToolUseBlock)
+                )
+
+    anyio.run(drive)
+
+    assert "ToolSearch" in used, (
+        f"the turn never searched for a tool, so deferral was not exercised: {used}"
+    )
+    assert "safe_read" in called, (
+        "the allowed deferred tool never ran, so this proves nothing about the "
+        f"denial: {used}"
+    )
+    assert "danger_send" not in called, (
+        "a deferred tool in disallowed_tools EXECUTED - tool search routes "
+        "around the deny list, and gmail's send tools are reachable"
     )
