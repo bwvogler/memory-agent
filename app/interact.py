@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+from . import mcp_catalog
 from .config import config
 from .kb import WORKSPACE_NAME
 
@@ -211,6 +212,72 @@ def denial_detail(name: str, tool_input: Mapping[str, Any] | None) -> str:
             return f"{detail} (outside the KB workspace)"
         return "outside the KB workspace, no path recorded"
     return detail or "no target recorded"
+
+
+# The most a person is asked to read before approving a call. A call bigger
+# than this is REFUSED rather than shown clipped: approving text you were not
+# shown is not approval, and the call it guards writes to a public repository.
+MAX_REVIEW_CHARS = 20_000
+
+# Characters that reorder or hide text when rendered. `textContent` stops them
+# being markup and does nothing about this: a right-to-left override in an issue
+# body can make the words a person approves read differently from the words that
+# are sent. Shown as visible escapes instead of stripped, so what is displayed
+# is still exactly what is sent.
+_BIDI_CONTROLS = {
+    **{c: f"\\u{c:04x}" for c in range(0x202A, 0x202F)},
+    **{c: f"\\u{c:04x}" for c in range(0x2066, 0x206A)},
+    0x200E: "\\u200e",
+    0x200F: "\\u200f",
+    0x061C: "\\u061c",
+}
+
+
+class ArgumentsTooLargeError(ValueError):
+    """A tool call's arguments are too large for a person to review."""
+
+
+def _catalog_server_of(tool_name: str) -> str | None:
+    """The outbound server a qualified tool name belongs to, if it is one.
+
+    `mcp__ask__*` and `mcp__wiki__*` are ours and are not in CATALOG, so they
+    answer None - their calls never reach a person for approval anyway.
+    """
+    if not tool_name.startswith("mcp__"):
+        return None
+    server = tool_name.removeprefix("mcp__").split("__", 1)[0]
+    return server if server in {s.name for s in mcp_catalog.CATALOG} else None
+
+
+def review_arguments(
+    tool_name: str, tool_input: Mapping[str, Any] | None
+) -> list[dict[str, str]] | None:
+    """Every argument of an outbound-service call, in full, for a person to read.
+
+    `describe_tool_input` is one clipped line - right for a transcript, wrong
+    for an approval. For `issue_write` it would show the alphabetically first
+    string argument and nothing else, so a person could approve a public issue
+    without seeing which repository, what title, or most of the body. Only
+    catalog tools get this; a Bash call or a wiki edit has no outside audience.
+
+    None means "not a catalog tool". Raises ArgumentsTooLargeError rather than
+    clipping - see MAX_REVIEW_CHARS.
+    """
+    if _catalog_server_of(tool_name) is None:
+        return None
+    arguments = []
+    total = 0
+    for name, value in (tool_input or {}).items():
+        text = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        )
+        total += len(name) + len(text)
+        if total > MAX_REVIEW_CHARS:
+            raise ArgumentsTooLargeError(tool_name)
+        arguments.append({"name": str(name), "value": text.translate(_BIDI_CONTROLS)})
+    return arguments
 
 
 def _record_denial(turn: Turn, name: str, tool_input: Mapping[str, Any] | None) -> None:
@@ -385,6 +452,21 @@ async def _request_permission(
     tool_input: dict[str, Any],
     context: ToolPermissionContext,
 ) -> PermissionResult:
+    try:
+        arguments = review_arguments(tool_name, tool_input)
+    except ArgumentsTooLargeError:
+        # Our own refusal, so guard_denials and not human_denials: signals
+        # subtracts both, and neither is a "check allowed_tools" defect.
+        turn.guard_denials.append(tool_name)
+        _record_denial(turn, tool_name, tool_input)
+        return PermissionResultDeny(
+            message=(
+                "Refused: this call is too large for a person to read in full "
+                f"before approving it (over {MAX_REVIEW_CHARS} characters). "
+                "Make it shorter - put the essentials in, and link to the rest."
+            )
+        )
+
     request_id = uuid.uuid4().hex
     payload = {
         "request_id": request_id,
@@ -399,6 +481,9 @@ async def _request_permission(
         "blocked_path": context.blocked_path or "",
         "reason": context.decision_reason or "",
         "agent": context.agent_id or "",
+        # Absent for a tool with no outside audience. For an outbound service it
+        # is the whole call, because `detail` above is one clipped line.
+        **({"arguments": arguments} if arguments is not None else {}),
     }
 
     future = turn.open_request(request_id)
