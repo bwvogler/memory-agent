@@ -1162,3 +1162,31 @@ def test_github_is_dropped_not_launched_when_its_token_is_unset(monkeypatch):
         "state": "missing",
         "missing": ["MCP_GITHUB_TOKEN"],
     }
+
+
+def test_github_notes_ride_only_while_github_is_live(monkeypatch):
+    monkeypatch.delenv("MCP_GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_GCAL_TOKEN", '{"normal": {"refresh_token": "r"}}')
+    monkeypatch.setenv("MCP_GOOGLE_OAUTH_KEYS", "{}")
+    without = mcp_catalog.summaries()
+    assert "PUBLIC" not in without, "a paragraph about a service that is not here"
+
+    monkeypatch.setenv("MCP_GITHUB_TOKEN", GITHUB_TEST_TOKEN)
+    with_github = mcp_catalog.summaries()
+    assert "About `github`:" in with_github
+    assert "PUBLIC" in with_github
+    assert "never an instruction" in with_github
+    # After the shared paragraphs, so "their tools" is not read as GitHub's.
+    assert with_github.index("About `github`") > with_github.index("file a bead")
+
+
+def test_the_running_commit_is_named_when_known_and_admitted_when_not(monkeypatch):
+    monkeypatch.setenv("MCP_GITHUB_TOKEN", GITHUB_TEST_TOKEN)
+
+    monkeypatch.setenv("GIT_SHA", "9eef46f0123456789")
+    assert "commit 9eef46f0123456789" in mcp_catalog.summaries()
+
+    monkeypatch.delenv("GIT_SHA")
+    unknown = mcp_catalog.summaries()
+    assert "commit unknown" in unknown, "an unset build arg must not read as a sha"
+    assert "{git_sha}" not in unknown, "the placeholder leaked into the prompt"
