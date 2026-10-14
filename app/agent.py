@@ -563,7 +563,7 @@ def _named_agents() -> dict[str, AgentDefinition]:
                 "unless you separate them. And do not propose edits: you cannot "
                 "make them, and the turn that called you can."
             ),
-            tools=["Read", "Glob", "Grep", "mcp__wiki__search"],
+            tools=["Read", "Glob", "Grep", "mcp__wiki__search", "ToolSearch"],
             model="inherit",
         ),
         "kb-lint": AgentDefinition(
@@ -582,7 +582,7 @@ def _named_agents() -> dict[str, AgentDefinition]:
                 "that is semantic work Grep structurally cannot do. Report a "
                 "short summary of what you filed."
             ),
-            tools=["Read", "Glob", "Grep", "Bash", "mcp__wiki__search"],
+            tools=["Read", "Glob", "Grep", "Bash", "mcp__wiki__search", "ToolSearch"],
             model="inherit",
         ),
     }
@@ -827,6 +827,10 @@ def _options(
             # accumulated notes leak into another user's session.
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CONFIG_DIR": str(config_dir),
+            # Explicit rather than the CLI default, which is also "on" (measured
+            # on CLI 2.1.228) - so the prompt's claim about it cannot silently
+            # stop being true. See `mcp_catalog.summaries`.
+            "ENABLE_TOOL_SEARCH": config.tool_search,
         },
     )
 
@@ -913,6 +917,9 @@ def _reflection_options(
             **os.environ,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CONFIG_DIR": str(config_dir),
+            # A small fixed tool set and no catalog: nothing worth deferring,
+            # and a search step would only be one more thing to go wrong.
+            "ENABLE_TOOL_SEARCH": "false",
         },
     )
 

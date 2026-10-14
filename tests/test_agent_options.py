@@ -43,6 +43,7 @@ def isolated(tmp_path, monkeypatch):
         kb_mount=str(tmp_path / "kb"),
         agent_model="claude-sonnet-4-6",
         max_turns=30,
+        tool_search="true",
     )
     monkeypatch.setattr(agent, "config", fake)
     monkeypatch.setattr(agent.kb, "scratch_dir_for", lambda slug: tmp_path / slug)
@@ -227,3 +228,31 @@ def test_reflection_gets_no_search_server_either(isolated):
     opts = agent._reflection_options("alice", _turn(interactive=False), "")
 
     assert not opts.mcp_servers
+
+
+def test_tool_search_is_set_explicitly_from_config(isolated):
+    """The prompt tells the agent its service tools load on demand.
+
+    That is true because the CLI defaults to it (measured on 2.1.228), and a
+    default can change under a bump. Setting it here means the claim is ours.
+    """
+    isolated.tool_search = "true"
+    opts = agent._options("alice", None)
+    assert opts.env["ENABLE_TOOL_SEARCH"] == "true"
+
+
+def test_reflection_loads_every_tool_upfront(isolated):
+    opts = agent._reflection_options("alice", _turn(interactive=False), "")
+    assert opts.env["ENABLE_TOOL_SEARCH"] == "false"
+
+
+def test_tool_search_is_never_disallowed(isolated):
+    """Disallowing it turns the feature off silently, per the CLI docs."""
+    opts = agent._options("alice", None)
+    assert "ToolSearch" not in (opts.disallowed_tools or [])
+
+
+def test_search_reading_subagents_can_reach_tool_search(isolated):
+    for name, definition in agent._named_agents().items():
+        assert "mcp__wiki__search" in (definition.tools or []), name
+        assert "ToolSearch" in (definition.tools or []), name

@@ -47,6 +47,7 @@ def isolated(tmp_path, monkeypatch):
         kb_mount=str(tmp_path / "kb"),
         agent_model="claude-sonnet-4-6",
         max_turns=30,
+        tool_search="true",
     )
     monkeypatch.setattr(agent, "config", fake)
     monkeypatch.setattr(agent.kb, "scratch_dir_for", lambda slug: tmp_path / slug)
@@ -1045,3 +1046,16 @@ def test_no_catalog_entry_can_hard_code_a_secret():
     assert offenders == [], (
         f"a `secrets` value must be an env var NAME, not a credential: {offenders}"
     )
+
+
+def test_summaries_describe_on_demand_loading_not_its_absence(monkeypatch):
+    """The earlier text claimed no search step exists. The CLI has one, so the
+    agent was told something false and guessed tool names (cb20583)."""
+    monkeypatch.setattr(
+        mcp_catalog,
+        "CATALOG",
+        (mcp_catalog.Server(name="x", summary="an x", command="x"),),
+    )
+    text = mcp_catalog.summaries()
+    assert "ToolSearch" in text
+    assert "no tool-search" not in text
