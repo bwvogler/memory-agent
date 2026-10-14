@@ -368,3 +368,24 @@ that is the whole delivery mechanism — there is no scheduler in `app/`, which 
 the Conception gap ADR 0011 names. Somebody has to open the page or query the
 endpoint. Re-authorising is a laptop-and-browser job either way, so the ceiling on
 this is a reminder, not automation.
+
+## Amendment — a third entry that is not a household service (ADR 0022)
+
+`CATALOG` now holds GitHub, and it is the first entry that is neither Google
+nor a credential for the household's own data: it points at this application's
+own repository, which is public. That changed two things this ADR assumed.
+
+The deny tier was introduced for a tool that sends mail; here it covers
+twenty-one tools that change code, the repository or its automation, and the
+interesting tier is the middle one. Four issue-writing tools are in neither
+`auto_approve` nor `deny`, and they are the first case where "falls through to
+a person" is the whole control rather than a convenience - which is why the
+approval prompt had to start showing every argument, since a clipped line made
+it a formality (ADR 0022).
+
+And `Server.notes` is new: guidance that rides in the prompt only while its
+server is live, because a paragraph about a public repository on a turn with no
+GitHub is weight spent on nothing. The credential is a fine-grained token in
+`MCP_GITHUB_TOKEN`, shared like the others; it has no `oauth` check, since a
+token has nothing to probe, so `/healthz` reports `missing` or `ready` and
+nothing more.

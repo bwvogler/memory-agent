@@ -78,6 +78,13 @@ scripts/fly.sh --write bd note <id> "<manifest summary> (commit <sha>)"
   existing line.
 - The manifest closes only the **prod** copy. It has no effect on this repo's
   local ledger; close that yourself, in the same commit.
+- **A bead with an `external_ref` has a public twin on GitHub** (`bd show $id`
+  prints it). The deployed agent opens that issue and records the URL, per the
+  `kb-curator` skill. The PR that ships the work says `Closes #N`, so merging
+  closes the issue - but that does not close the bead, and closing the bead
+  does not close the issue. Each needs its own step; the ritual above is the
+  bead's. If the work shipped without that line in the PR, close the issue by
+  hand with a comment naming the commit. See `docs/decisions/0022`.
 - Full reasoning: CLAUDE.md's "The work ledger" section ("Closing a bead after
   shipping" and "Absence is the only failure treated as permanent"), and
   `docs/decisions/0010` for why `img-` and `kb-` beads travel differently at

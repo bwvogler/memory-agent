@@ -631,6 +631,26 @@ to stay denied when deferred by a live test, mutation-checked. See
 auto-reflection holds the instance after any turn that files a signal, so live
 tests POST through `conftest.post_when_free`.
 
+**The agent can read its own source and file issues, and a person approves each
+write.** `CATALOG` holds `github`: `github-mcp-server` pinned in the image
+(v1.14.0, the `repos` and `issues` toolsets, 29 tools). Eighteen read tools run
+unprompted, four issue-writing tools reach `can_use_tool`, and twenty-one tools
+that change code or automation are denied by name. The repository is PUBLIC and
+the agent also holds household mail, so every issue write is a world-readable
+channel; the gate is a person, who is shown **every argument in full**
+(`interact.review_arguments`, not the one clipped `detail` line, which for
+`issue_write` would have hidden the repository and title), with a call too large
+to read refused rather than clipped. Issue text from strangers is untrusted
+input and the prompt (`Server.notes`) says so. Code is **not** written here: the
+Claude Code Action (`.github/workflows/claude.yml`) does it, on a person's
+`@claude` or `claude` label, with the full repo and CI's tiers, and the agent is
+told never to start it. An `image` bead gets an issue twin, linked by
+`bd update --external-ref`; beads stay the truth. `MCP_GITHUB_TOKEN` is the
+secret; `fly deploy --build-arg GIT_SHA=$(git rev-parse HEAD)` is how the agent
+knows which commit it is running; the container tier fails when the binary
+offers an unclassified tool. See `docs/decisions/0022`, which is `proposed`:
+nothing has run against real GitHub yet.
+
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
 a tool. A Revert click is the valuable one — an explicit, human-labelled "that
@@ -990,7 +1010,8 @@ Outbound MCP servers (`app/mcp_catalog.py`) add their own variables, one set per
 entry in `CATALOG`, named by the entry rather than listed in `config.py`. Today
 that is three, because one OAuth client serves both Google servers:
 `MCP_GOOGLE_OAUTH_KEYS`, `MCP_GCAL_TOKEN` and `MCP_GMAIL_TOKEN`, all produced by
-`scripts/google-auth.sh`. `/healthz` reports each entry's `state` under
+`scripts/google-auth.sh`. A fourth, `MCP_GITHUB_TOKEN`, is a plain
+fine-grained token for the `github` entry and is set by hand. `/healthz` reports each entry's `state` under
 `mcp_catalog`; unset is the shipped state and leaves every turn exactly as it was.
 `MCP_STATE_DIR` (default `/tmp/mcp-catalog`) is where the credential files are
 written and should stay container-local.
@@ -1012,8 +1033,11 @@ identity here exactly as before.
 ## Deploying
 
 ```sh
-fly deploy
+fly deploy --build-arg GIT_SHA=$(git rev-parse HEAD)
 ```
+
+The build arg is optional and only names the running commit to the agent (the
+`github` entry's `ref`); without it the agent is told the commit is unknown.
 
 Bootstrap seeding (`AGENT_GUIDE.md`, `memory/skills/`) runs automatically at
 startup when the KB mount is live. It is idempotent — existing files are never
