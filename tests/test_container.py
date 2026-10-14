@@ -21,7 +21,7 @@ import time
 import httpx
 import pytest
 
-from app import interact, kb
+from app import interact, kb, mcp_catalog
 
 from .conftest import REPO_ROOT, USER_SLUG, app_exec, bd, bd_json
 
@@ -166,7 +166,7 @@ def test_the_merged_page_and_its_split_assets_are_in_the_image(stack):
 
 
 def test_healthz_reports_the_outbound_mcp_catalog(stack):
-    """Both Google servers present and dark, because this stack has no secrets.
+    """Every catalog server present and dark, because this stack has no secrets.
 
     An outbound server whose credential is unset is dropped from the agent's
     toolset silently, so this field is the only difference between "the tools
@@ -181,7 +181,7 @@ def test_healthz_reports_the_outbound_mcp_catalog(stack):
     """
     health = httpx.get(f"{stack}/healthz", timeout=10).json()
 
-    assert set(health["mcp_catalog"]) == {"calendar", "gmail"}
+    assert set(health["mcp_catalog"]) == {"calendar", "gmail", "github"}
     for name, entry in health["mcp_catalog"].items():
         assert entry["state"] == "missing", f"{name}: {entry}"
         assert entry["missing"], f"{name}: state is missing but names no variable"
@@ -199,6 +199,94 @@ def test_the_outbound_mcp_servers_are_installed_and_pinned(stack):
     """
     assert "2.6.2" in app_exec("google-calendar-mcp", "version").stdout
     assert app_exec("gmail-mcp", "--help").returncode == 0
+    assert "1.14.0" in app_exec("github-mcp-server", "--version").stdout
+
+
+# Boots the REAL pinned binary and asks it for its tools, over stdio. Runs inside
+# the container so it is the image's binary and the image's toolset handling that
+# is measured - not a laptop's. Prints one JSON object per tool: name plus the
+# server's own readOnlyHint, which is the one independent witness to "does this
+# tool write" that this repo does not author.
+_LIST_GITHUB_TOOLS = r"""
+import json, os, subprocess
+env = {**os.environ, "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_dummy",
+       "GITHUB_TOOLSETS": "repos,issues"}
+p = subprocess.Popen(["github-mcp-server", "stdio"], stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                     env=env, text=True)
+def send(m):
+    p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+def recv():
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            return None
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2024-11-05", "capabilities": {},
+    "clientInfo": {"name": "inv", "version": "0"}}})
+recv()
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+tools = recv()["result"]["tools"]
+p.kill()
+print(json.dumps([{"name": t["name"],
+                   "ro": (t.get("annotations") or {}).get("readOnlyHint")}
+                  for t in tools]))
+"""
+
+
+def test_every_github_tool_the_server_offers_is_classified(stack):
+    """A version bump that adds a tool fails HERE, until a person classifies it.
+
+    `auto_approve` and `deny` name tools one by one on purpose - a wildcard
+    would pre-approve whatever the next release learns to delete - and that
+    only works if something notices a NEW name. Nothing in the unit tier can:
+    it reads our own lists. This reads the binary's.
+
+    Three assertions, in increasing order of what they would have caught. Every
+    offered tool is one of: pre-approved, denied, or one of the four the person
+    is asked about. None the server calls writable is pre-approved - its own
+    hint, not our regex. And nothing we classify has vanished from the server,
+    which is how a rename turns a deny into a dead letter.
+    """
+    out = app_exec("python", "-c", _LIST_GITHUB_TOOLS).stdout
+    offered = {t["name"]: t["ro"] for t in json.loads(out.strip().splitlines()[-1])}
+    github = next(s for s in mcp_catalog.CATALOG if s.name == "github")
+
+    prompted = {
+        "issue_write",
+        "add_issue_comment",
+        "update_issue_comment",
+        "sub_issue_write",
+    }
+    # Offered, readable, and deliberately left to ask: membership data, not code.
+    also_asks = {"list_repository_collaborators"}
+    unclassified = (
+        set(offered)
+        - set(github.auto_approve)
+        - set(github.deny)
+        - prompted
+        - also_asks
+    )
+    assert not unclassified, (
+        f"github-mcp-server offers tools nobody has classified: "
+        f"{sorted(unclassified)}. Add each to auto_approve, deny, or the prompted "
+        f"set in this test - a person decides which."
+    )
+
+    writable_but_approved = [
+        name for name in github.auto_approve if offered.get(name) is False
+    ]
+    assert not writable_but_approved, (
+        f"pre-approved tools the server says are not read-only: {writable_but_approved}"
+    )
+
+    gone = (set(github.auto_approve) | prompted) - set(offered)
+    assert not gone, f"classified tools the server no longer offers: {sorted(gone)}"
 
 
 def test_bd_is_installed_and_pinned(stack):

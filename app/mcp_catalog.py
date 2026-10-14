@@ -114,9 +114,10 @@ through a new door. And `/healthz` never awaits Google - it reads a cache and
 schedules a refresh, because it is unauthenticated, it drives the host's suspend
 decision, and its latency is not Google's to set.
 
-CATALOG's two entries are Google Calendar and Gmail, both pointing at one
-household account. See docs/decisions/0015 for why the credential is shared, and
-`Server` below for what each field controls.
+CATALOG's entries are Google Calendar and Gmail, both pointing at one
+household account, and GitHub, pointing at this application's own repository.
+See docs/decisions/0015 for why the credential is shared, and `Server` below
+for what each field controls.
 """
 
 from __future__ import annotations
@@ -385,6 +386,92 @@ CATALOG: tuple[Server, ...] = (
             keys_var="MCP_GOOGLE_OAUTH_KEYS",
             token_var="MCP_GMAIL_TOKEN",  # noqa: S106 - a variable name; see calendar
             token_path=("tokens",),
+        ),
+    ),
+    Server(
+        name="github",
+        summary=(
+            "GitHub, for this application's OWN repository (bwvogler/memory-"
+            "agent, which is PUBLIC): read its source, ADRs and history, search "
+            "and read issues, and - with a person's approval each time - open "
+            "or comment on one. It cannot change code; that is done elsewhere."
+        ),
+        command="github-mcp-server",
+        args=("stdio",),
+        secrets={"GITHUB_PERSONAL_ACCESS_TOKEN": "MCP_GITHUB_TOKEN"},
+        # Two of the server's toolsets, not its default 46 tools: 29 tools
+        # (measured, v1.14.0 and v2.0.2 alike). Fewer tools is less to prompt,
+        # fewer names to classify below, and a version bump that adds a tool to
+        # one of THESE two is the review this file exists to force.
+        env={"GITHUB_TOOLSETS": "repos,issues"},
+        # Reads. Public data and this repo's own code, so nothing here needs a
+        # person. Excluded on purpose: `list_repository_collaborators` is
+        # membership data rather than code, and nothing here needs it.
+        #
+        # What this does NOT make safe is the CONTENT. Anyone on the internet
+        # can file an issue on a public repo, so what `issue_read` and
+        # `list_issues` return is untrusted text written by strangers, and the
+        # agent that reads it also holds the household's mail and calendar. The
+        # defence is not here, it is the next paragraph: nothing the agent can
+        # be talked into writing leaves without a person reading it first.
+        auto_approve=(
+            "get_commit",
+            "get_file_contents",
+            "get_label",
+            "get_latest_release",
+            "get_release_by_tag",
+            "get_tag",
+            "issue_read",
+            "list_branches",
+            "list_commits",
+            "list_issue_fields",
+            "list_issue_types",
+            "list_issues",
+            "list_releases",
+            "list_tags",
+            "search_code",
+            "search_commits",
+            "search_issues",
+            "search_repositories",
+        ),
+        # NOT in auto_approve, so each falls through to `can_use_tool`: a person
+        # sees every argument and clicks Allow. `issue_write` (create, edit,
+        # close), `add_issue_comment`, `update_issue_comment`, `sub_issue_write`.
+        # This repo is public, so each of these is a world-readable channel -
+        # exactly what a prompt-injected email would want, and why the gate is
+        # a person and not a rule. A machine (/mcp) turn and a reflection turn
+        # install no `can_use_tool`, so there these are refused outright.
+        #
+        # Denied, and not merely unlisted: everything that changes code, the
+        # repository or its automation. The toolset filter already hides most of
+        # these, which is the reason to name them anyway - the filter is
+        # configuration, this is the control, and a name that appears in some
+        # future version of an enabled toolset must not arrive pre-reachable.
+        # Writing code is the Claude Code GitHub Action's job, where tests run,
+        # and not a job for a container with no git and no test runner
+        # (docs/decisions/0022).
+        deny=(
+            "actions_run_trigger",
+            "add_comment_to_pending_review",
+            "add_reply_to_pull_request_comment",
+            "assign_copilot_to_issue",
+            "assign_copilot_to_issue_with_intent",
+            "create_branch",
+            "create_gist",
+            "create_or_update_file",
+            "create_pull_request",
+            "create_repository",
+            "create_repository_ruleset",
+            "custom_properties_write",
+            "delete_file",
+            "fork_repository",
+            "merge_pull_request",
+            "pull_request_review_write",
+            "push_files",
+            "request_copilot_review",
+            "update_gist",
+            "update_pull_request",
+            "update_pull_request_branch",
         ),
     ),
 )

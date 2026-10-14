@@ -564,7 +564,8 @@ def test_both_google_entries_share_one_oauth_client():
 
     assert _entry("calendar").files["gcp-oauth.keys.json"] == shared
     assert _entry("gmail").files["gcp-oauth.keys.json"] == shared
-    assert {v for s in mcp_catalog.CATALOG for v in s.needs()} == {
+    google = [s for s in mcp_catalog.CATALOG if s.name in {"calendar", "gmail"}]
+    assert {v for s in google for v in s.needs()} == {
         shared,
         "MCP_GCAL_TOKEN",
         "MCP_GMAIL_TOKEN",
@@ -579,6 +580,7 @@ def test_the_pinned_versions_match_the_dockerfile():
 
     assert "GCAL_MCP_VERSION=2.6.2" in text
     assert "GMAIL_MCP_VERSION=1.3.3" in text
+    assert "GITHUB_MCP_VERSION=1.14.0" in text
     assert "@cocal/google-calendar-mcp@${GCAL_MCP_VERSION}" in text
     assert "@klodr/gmail-mcp@${GMAIL_MCP_VERSION}" in text
     for server in mcp_catalog.CATALOG:
@@ -1059,3 +1061,104 @@ def test_summaries_describe_on_demand_loading_not_its_absence(monkeypatch):
     text = mcp_catalog.summaries()
     assert "ToolSearch" in text
     assert "no tool-search" not in text
+
+
+# --- github ------------------------------------------------------------------
+#
+# The repo is PUBLIC and the agent that holds this server also holds the
+# household's mail, calendar and wiki, so every write tool is a world-readable
+# exfiltration channel for anything a prompt-injected email can talk the agent
+# into. The tiers below are what stand between the two.
+
+# These four are the issue surface: neither pre-approved nor denied, so each
+# reaches `can_use_tool`, where a person reads the arguments and clicks Allow.
+GITHUB_PROMPTED = frozenset(
+    {"issue_write", "add_issue_comment", "update_issue_comment", "sub_issue_write"}
+)
+
+# What changes code, the repository or its automation. Denied by name, not
+# merely absent from the two enabled toolsets, because the toolset filter is
+# configuration and a name must not arrive pre-reachable in a version bump.
+GITHUB_CODE_WRITES = frozenset(
+    {
+        "actions_run_trigger",
+        "create_branch",
+        "create_or_update_file",
+        "create_pull_request",
+        "delete_file",
+        "merge_pull_request",
+        "push_files",
+        "update_pull_request",
+        "update_pull_request_branch",
+    }
+)
+
+GITHUB_TEST_TOKEN = "ghp_not-a-real-token"  # noqa: S105 - a fixture, not a credential
+
+_WRITE_SHAPED = re.compile(
+    r"(^|_)(create|update|delete|push|merge|write|assign|fork|trigger|dismiss"
+    r"|request|add|star|mark|manage|custom)(_|$)"
+)
+
+
+def test_github_pre_approves_reads_and_nothing_write_shaped():
+    github = _entry("github")
+
+    assert github.auto_approve, "an empty auto_approve makes every read prompt"
+    shaped = [t for t in github.auto_approve if _WRITE_SHAPED.search(t)]
+    assert not shaped, f"write-shaped tools are pre-approved: {shaped}"
+
+
+def test_github_issue_writes_reach_a_person_and_code_writes_reach_nobody():
+    github = _entry("github")
+
+    for tool in GITHUB_PROMPTED:
+        assert tool not in github.auto_approve, f"{tool} must ask a person"
+        assert tool not in github.deny, f"{tool} is the one thing a person may allow"
+    undenied = GITHUB_CODE_WRITES - set(github.deny)
+    assert not undenied, f"code-changing tools that are not denied: {sorted(undenied)}"
+
+
+def test_github_denials_hold_while_its_token_is_unset(monkeypatch):
+    """`denied_tools()` is built from CATALOG, not from what is live: a missing
+    secret must never shorten the one list whose job is to stay long."""
+    monkeypatch.delenv("MCP_GITHUB_TOKEN", raising=False)
+
+    denied = mcp_catalog.denied_tools()
+
+    assert "mcp__github__push_files" in denied
+    assert "mcp__github__merge_pull_request" in denied
+
+
+def test_github_reads_run_without_a_prompt_and_issue_writes_do_not(monkeypatch):
+    monkeypatch.setenv("MCP_GITHUB_TOKEN", GITHUB_TEST_TOKEN)
+
+    approved = mcp_catalog.auto_approved_tools()
+
+    assert "mcp__github__issue_read" in approved
+    assert "mcp__github__get_file_contents" in approved
+    assert "mcp__github__issue_write" not in approved
+    assert "mcp__github__add_issue_comment" not in approved
+
+
+def test_github_resolves_to_two_toolsets_and_carries_the_token(monkeypatch):
+    monkeypatch.setenv("MCP_GITHUB_TOKEN", GITHUB_TEST_TOKEN)
+
+    resolved = mcp_catalog.resolved()
+
+    assert "github" in resolved
+    env = _stdio_env(resolved, "github")
+    assert env["GITHUB_TOOLSETS"] == "repos,issues"
+    # The server's own variable name, carrying OUR variable's value.
+    assert env["GITHUB_PERSONAL_ACCESS_TOKEN"] == GITHUB_TEST_TOKEN
+    assert resolved["github"].get("args") == ["stdio"]
+
+
+def test_github_is_dropped_not_launched_when_its_token_is_unset(monkeypatch):
+    monkeypatch.delenv("MCP_GITHUB_TOKEN", raising=False)
+
+    assert "github" not in mcp_catalog.resolved()
+    assert mcp_catalog.status()["github"] == {
+        "state": "missing",
+        "missing": ["MCP_GITHUB_TOKEN"],
+    }
