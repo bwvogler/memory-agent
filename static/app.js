@@ -1631,8 +1631,23 @@ function wireStreamHandlers(stream) {
     const d = parse(e); if (!d || !turnUI) return;
     const box = el('div', 'perm');
     box.appendChild(el('div', 'q', d.title || ('Allow ' + d.tool + '?')));
-    const sub = [d.description, d.detail, d.blocked_path, d.reason].filter(Boolean).join(' — ');
+    // An outbound service call arrives with every argument in full. `detail`
+    // is one clipped line, and for a public issue that is not enough to approve
+    // - so when `arguments` is present it replaces `detail` rather than sitting
+    // beside it. textContent throughout (via el), and pre-wrap so the text a
+    // person reads is the text that is sent.
+    const hasArgs = Array.isArray(d.arguments) && d.arguments.length > 0;
+    const sub = [d.description, hasArgs ? '' : d.detail, d.blocked_path, d.reason]
+      .filter(Boolean).join(' — ');
     if (sub) box.appendChild(el('div', 'sub', sub));
+    if (hasArgs) {
+      const args = el('div', 'args');
+      for (const a of d.arguments) {
+        args.appendChild(el('div', 'arg-name', String(a.name)));
+        args.appendChild(el('pre', 'arg-value', String(a.value)));
+      }
+      box.appendChild(args);
+    }
 
     const actions = el('div', 'actions');
     const allow = el('button', 'allow', 'Allow');

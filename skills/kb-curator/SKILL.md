@@ -112,6 +112,31 @@ description is the whole of your case: write what you were doing, what was
 awkward, and what you wanted instead. You are the only user of this product who
 sees it from the inside, and nobody can ask you a follow-up question later.
 
+#### If the `github` tools are in your tool list
+
+Then the bead has a public twin, and you open it. Only for an `image` bead -
+wiki work never leaves the household.
+
+1. **Look first.** `search_issues` with `repo:bwvogler/memory-agent is:issue`
+   and a few keywords. If an open issue already says this, do not open another:
+   put its URL on the bead (step 3) and stop.
+2. **Open it** with `issue_write` (`method: create`, owner `bwvogler`, repo
+   `memory-agent`). Write it for a stranger. The repository is public, so no
+   names, addresses, mail, calendar or wiki content, and nothing quoted from
+   any of them - say what the app did and what you wanted, and leave out who
+   or what you were working on. End the body with a line `Bead: <id>`. A person
+   is shown the whole text and asked before it is posted.
+3. **Record the link** on the bead, so the two stay one piece of work:
+   `bd update <id> --external-ref <issue url>`. That flag is on the version
+   running here, and it survives the pull into the repo's ledger.
+
+If the person says no, that is the answer: do not retry with other wording or
+another tool. The bead is complete without the issue. If the GitHub tools are
+not in your list, nothing in this section applies and nothing is lost.
+
+Do not mention `@claude` or add a `claude` label to anything. Whether an issue
+gets worked on is a person's decision, and that is the mechanism they use.
+
 ## Read before you write
 
 Search first, always, with `mcp__wiki__search`. It ranks passages from across

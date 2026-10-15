@@ -417,6 +417,20 @@ details.subagent .agent-text {
   padding: 5px 8px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--bg); color: var(--ink);
 }
+.perm .args { margin: 4px 0 2px; }
+.perm .arg-name { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.perm .arg-value {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  max-height: 14em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
 .ask .actions, .perm .actions { display: flex; gap: 8px; margin-top: 8px; }
 .ask button, .perm button {
   font: inherit; font-size: 13px; padding: 4px 13px; border-radius: 6px;
