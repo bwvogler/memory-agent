@@ -33,6 +33,11 @@ def _name_map(name: str) -> dict[str, str]:
 class Config:
     anthropic_api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
     agent_model: str = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
+    # Passed to the CLI as ENABLE_TOOL_SEARCH: "true" defers every MCP tool's
+    # schema until a turn searches for it, "false" loads them all upfront. Not
+    # "auto" - that flips at a context-share threshold which moves whenever a
+    # server is added, so the agent's world would change under it unannounced.
+    tool_search: str = os.environ.get("AGENT_TOOL_SEARCH", "true")
 
     kb_database_url: str = os.environ.get("KB_DATABASE_URL", "")
     kb_mount: str = os.environ.get("KB_MOUNT", "/mnt/kb")

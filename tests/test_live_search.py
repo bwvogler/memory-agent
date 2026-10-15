@@ -21,7 +21,7 @@ import time
 import httpx
 import pytest
 
-from .conftest import app_exec
+from .conftest import app_exec, post_when_free
 
 pytestmark = [pytest.mark.container, pytest.mark.live]
 
@@ -171,14 +171,13 @@ def test_a_real_turn_reaches_for_the_search_tool(stack):
     conversation_id = httpx.post(f"{stack}/api/conversations", timeout=10).json()[
         "conversation_id"
     ]
-    turn_id = httpx.post(
+    turn_id = post_when_free(
         f"{stack}/api/conversations/{conversation_id}/messages",
         json={
             "message": "Before writing anything, search the wiki for what it "
             "already says about tea. Then just tell me what you found in one "
             "sentence - do not write any pages."
         },
-        timeout=30,
     ).json()["turn_id"]
 
     deadline = time.time() + 240

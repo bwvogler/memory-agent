@@ -615,6 +615,22 @@ every 15 minutes, because it is unauthenticated and drives the host's suspend
 decision. Neither is folded into `ok`: no restart fixes an expired token. See the
 `img-xak` amendment in `docs/decisions/0015`.
 
+**Tool search is on, set explicitly, and the prompt says so.** The CLI defers
+MCP tool schemas behind `ToolSearch` by default, which `mcp_catalog.summaries()`
+spent several weeks denying - a false claim added after the agent invented
+calendar tool names, and one that pushed it toward inventing more.
+`config.tool_search` (`AGENT_TOOL_SEARCH`, default `"true"`) now passes
+`ENABLE_TOOL_SEARCH` on ordinary turns, `"false"` on reflection, and the prompt
+tells the agent to search before its first call to a service and never to guess
+a name. `"true"` rather than `"auto"` because auto flips at a context-share
+threshold that moves when a server is added. `wiki` and `ask` are deferred too:
+`alwaysLoad` is unreachable for in-process servers in the pinned SDK and in
+0.2.166, and the prompt names both tools instead. A deny-listed tool is proven
+to stay denied when deferred by a live test, mutation-checked. See
+`docs/decisions/0021`, including the live-tier 409 cascade it records:
+auto-reflection holds the instance after any turn that files a signal, so live
+tests POST through `conftest.post_when_free`.
+
 **Signals are captured, not acted on.** `app/signals.py` observes every turn:
 which skills it read, whether it errored, exhausted `max_turns`, or was denied
 a tool. A Revert click is the valuable one — an explicit, human-labelled "that
