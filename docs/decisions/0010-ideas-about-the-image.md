@@ -159,3 +159,19 @@ are rebuilt from what the documentation records, not recovered — the originals
 are gone. `kb-3cl` is a marker only: `CLAUDE.md` cites it as *the work that was
 lost*, and its content is genuinely unrecoverable, so the bead says so rather
 than inventing a description that would read as recovered.
+
+## Amendment — an image bead gets a public issue twin (ADR 0022)
+
+Where the `github` tools are present, an `image` bead is also opened as a GitHub
+issue, and its URL is recorded on the bead with `bd update --external-ref`. Beads
+remain the source of truth: the issue is a pointer into the work that a person
+can see and ask Claude to pick up, not a second ledger.
+
+Nothing in the pipeline above changes. `external_ref` travels through
+`beads-pull.sh` because it is an ordinary bead field - measured in two throwaway
+ledgers on bd 1.2.2, where it survives export and import - and `shipped-beads`
+still closes the prod copy. What is new is that **closing is now two separate
+acts**: the PR that ships the work says `Closes #N` and closes the issue, the
+ritual in the `ship` skill closes the bead, and neither does the other's job.
+Only `image` beads get a twin; wiki beads never leave the household, and the
+issue is written for a stranger because the repository is public.

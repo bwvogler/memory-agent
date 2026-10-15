@@ -104,6 +104,29 @@ RUN npm install -g --omit=dev --no-audit --no-fund \
     && npm cache clean --force \
     && command -v google-calendar-mcp && command -v gmail-mcp
 
+# GitHub's own MCP server, a static Go binary rather than an npm package, so it
+# is pinned and checksummed like Node and bd above instead of installed with the
+# two Google servers. v1.14.0 rather than the newer v2.0.x on purpose: v2.0.0 is
+# eight days old and took two patch releases in its first two days,
+# and the two lines list an IDENTICAL 29 tools under the toolsets this
+# deployment enables (measured by booting both), so nothing is lost by waiting.
+# Moving to v2 is a bump like any other: tests/test_mcp_catalog.py's inventory
+# snapshot fails until each new tool is classified.
+ENV GITHUB_MCP_VERSION=1.14.0
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x86_64; sha=2fcad56bb164b6c4918fdd9f1d5572257bf4e1f14b7eb1119d015b079818fd38 ;; \
+      arm64) arch=arm64; sha=dd06beb81e62c42afa2d4217d86be79ca588a083f63da38ca3cbef0b7785e88d ;; \
+      *) echo "unsupported arch"; exit 1 ;; \
+    esac; \
+    f="github-mcp-server_Linux_${arch}.tar.gz"; \
+    curl -fsSLo "/tmp/${f}" \
+      "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/${f}"; \
+    echo "${sha}  /tmp/${f}" | sha256sum -c -; \
+    tar -xzf "/tmp/${f}" -C /usr/local/bin github-mcp-server; \
+    rm "/tmp/${f}"; \
+    command -v github-mcp-server
+
 WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -121,6 +144,13 @@ COPY scripts ./scripts
 # rather than as the whole directory - the ADRs are for readers of the repo,
 # not for the image. See docs/decisions/0010.
 COPY docs/shipped-beads.jsonl ./docs/shipped-beads.jsonl
+# The commit this image was built from, so the agent can read the code it is
+# actually running (the GitHub server's `ref=`) rather than whatever main is
+# today. Declared AFTER every COPY so a new commit invalidates this layer and
+# nothing before it. Unset on a plain `fly deploy`, and the prompt then says it
+# does not know; deploy with --build-arg GIT_SHA=$(git rev-parse HEAD).
+ARG GIT_SHA=
+ENV GIT_SHA=${GIT_SHA}
 RUN sed -i 's/\r//' entrypoint.sh && chmod +x entrypoint.sh && chmod +x scripts/*.sh && mkdir -p "$KB_MOUNT" "$WORK_DIR"
 
 EXPOSE 8080

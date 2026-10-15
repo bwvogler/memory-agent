@@ -408,6 +408,100 @@ def test_a_refusal_is_recorded_as_the_humans_and_not_a_defect():
     assert turn.denial_details == {"Bash": ["curl x"]}
 
 
+# --- what a person is shown before approving an outbound call ----------------
+#
+# `detail` is one clipped line, which is right for a transcript and wrong for an
+# approval: for `issue_write` it would be the alphabetically first string
+# argument, and a person could approve a public issue without seeing which
+# repository it goes to or what its title says.
+
+_ISSUE = {
+    "method": "create",
+    "owner": "bwvogler",
+    "repo": "memory-agent",
+    "title": "Render SKILL.md when opening a skill directory",
+    "body": "Opening a skill dir shows a file list.\n\nWhat I wanted instead: ...",
+    "labels": ["image"],
+}
+
+
+def test_an_outbound_call_shows_every_argument_in_full():
+    async def scenario() -> dict:
+        turn = _turn()
+        callback = interact.can_use_tool_for(turn)
+        deciding = asyncio.create_task(
+            callback("mcp__github__issue_write", _ISSUE, _Context())
+        )
+        turn.resolve(await _asked(turn), {"decision": "deny"})
+        await deciding
+        return json.loads(turn.events[0].data)
+
+    payload = asyncio.run(scenario())
+
+    shown = {a["name"]: a["value"] for a in payload["arguments"]}
+    assert shown["repo"] == "memory-agent"
+    assert shown["title"] == _ISSUE["title"]
+    assert shown["body"] == _ISSUE["body"], "the body must not be clipped"
+    assert '"image"' in shown["labels"], "non-strings are shown as JSON"
+    assert [a["name"] for a in payload["arguments"]] == list(_ISSUE)
+
+
+def test_a_call_with_no_outside_audience_carries_no_arguments():
+    """Bash and wiki edits are not a public channel; the one-line detail stands."""
+
+    async def scenario() -> dict:
+        turn = _turn()
+        callback = interact.can_use_tool_for(turn)
+        deciding = asyncio.create_task(callback("Bash", {"command": "ls"}, _Context()))
+        turn.resolve(await _asked(turn), {"decision": "deny"})
+        await deciding
+        return json.loads(turn.events[0].data)
+
+    assert "arguments" not in asyncio.run(scenario())
+
+
+def test_a_call_too_large_to_read_is_refused_not_clipped():
+    """Approving text you were not shown is not approval."""
+    huge = {**_ISSUE, "body": "x" * (interact.MAX_REVIEW_CHARS + 1)}
+
+    async def scenario() -> tuple[PermissionResult, Turn]:
+        turn = _turn()
+        callback = interact.can_use_tool_for(turn)
+        return await callback("mcp__github__issue_write", huge, _Context()), turn
+
+    result, turn = asyncio.run(scenario())
+
+    assert result.behavior == "deny"
+    assert "too large" in result.message
+    assert turn.events == [], "nobody was asked, because there was nothing to ask"
+    # Our refusal, not a person's and not a defect: signals subtracts it.
+    assert turn.guard_denials == ["mcp__github__issue_write"]
+    assert turn.human_denials == []
+
+
+def test_text_that_reorders_itself_is_shown_as_visible_escapes():
+    """A right-to-left override can make approved words read differently from the
+    words that are sent. Shown escaped rather than stripped, so what is displayed
+    is still exactly what is sent."""
+    sneaky = {**_ISSUE, "body": "safe \u202esdrawkcab\u202c text"}
+
+    arguments = interact.review_arguments("mcp__github__issue_write", sneaky)
+
+    assert arguments is not None
+    body = next(a["value"] for a in arguments if a["name"] == "body")
+    assert "\u202e" not in body
+    assert "\\u202e" in body
+    assert "sdrawkcab" in body
+
+
+def test_only_catalog_servers_get_the_full_view():
+    assert interact.review_arguments("mcp__github__issue_write", _ISSUE) is not None
+    assert interact.review_arguments("mcp__wiki__search", {"query": "tea"}) is None
+    assert interact.review_arguments("mcp__ask__ask_user", {"q": "x"}) is None
+    assert interact.review_arguments("Bash", {"command": "ls"}) is None
+    assert interact.review_arguments("mcp__unknown__tool", {"a": "b"}) is None
+
+
 def test_the_prompt_prefers_what_the_sdk_composed():
     """The CLI writes these sentences everywhere else; do not reword them here."""
 
